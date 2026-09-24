@@ -726,21 +726,26 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       : undefined;
     const isOpenRigManaged = typeof currentCmd === "string" && currentCmd.includes("context-collector.cjs");
 
-    // Also check the global ~/.claude/settings.json for a user-defined statusLine.
+    // Check the global ~/.claude/settings.json for a user-defined statusLine.
     // When a user has a global statusLine (e.g., statusline.sh that chains the collector),
-    // skip injection even for new projects — the global setting applies and handles both concerns.
-    let globalHasUserStatusLine = false;
-    if (!currentStatusLine) {
-      const globalSettingsPath = nodePath.join(process.env.HOME ?? "", ".claude", "settings.json");
-      const globalSettings = this.readJsonObject(globalSettingsPath);
-      const globalStatusLine = globalSettings["statusLine"];
-      const globalCmd = typeof globalStatusLine === "object" && globalStatusLine !== null
-        ? (globalStatusLine as Record<string, unknown>)["command"]
-        : undefined;
-      globalHasUserStatusLine = typeof globalCmd === "string" && !globalCmd.includes("context-collector.cjs");
-    }
+    // skip injection — the global setting applies and handles both concerns.
+    // Also remove an existing OpenRig-managed project statusLine so the global one takes effect
+    // (project settings.local.json overrides global settings.json for the same key).
+    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
+    const globalSettingsPath = home ? nodePath.join(home, ".claude", "settings.json") : "";
+    const globalSettings = this.readJsonObject(globalSettingsPath);
+    const globalStatusLine = globalSettings["statusLine"];
+    const globalCmd = typeof globalStatusLine === "object" && globalStatusLine !== null
+      ? (globalStatusLine as Record<string, unknown>)["command"]
+      : undefined;
+    const globalHasUserStatusLine = typeof globalCmd === "string" && !globalCmd.includes("context-collector.cjs");
 
-    if ((!currentStatusLine && !globalHasUserStatusLine) || isOpenRigManaged) {
+    if (globalHasUserStatusLine) {
+      if (isOpenRigManaged) {
+        delete existing["statusLine"];
+      }
+      // else: no project statusLine or user-defined project statusLine — leave as-is
+    } else if (!currentStatusLine || isOpenRigManaged) {
       existing["statusLine"] = {
         type: "command",
         command: collectorCmd,

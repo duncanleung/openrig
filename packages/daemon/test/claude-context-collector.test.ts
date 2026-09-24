@@ -334,6 +334,68 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     expect(settings.statusLine.command).toContain(join(tmpDir, "state", "context-usage"));
   });
 
+  it("removes OpenRig-managed project statusLine when a global user statusLine exists", async () => {
+    const fs = mockFsOps();
+    // Project has an old OpenRig collector statusLine
+    written["/project/.claude/settings.local.json"] = JSON.stringify({
+      customSetting: true,
+      statusLine: {
+        type: "command",
+        command: "node /old/path/context-collector.cjs /old/state/context-usage /old/state/provider-usage",
+      },
+    });
+    // Global has a user-defined statusLine (e.g., statusline.sh that chains the collector)
+    written["/home/tester/.claude/settings.json"] = JSON.stringify({
+      statusLine: {
+        type: "command",
+        command: "/home/tester/.claude/statusline.sh",
+        padding: 0,
+      },
+    });
+
+    const adapter = new ClaudeCodeAdapter({
+      tmux: mockTmux(),
+      fsOps: fs,
+      stateDir: tmpDir,
+      collectorAssetPath: "/fake/collector.js",
+    });
+
+    await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "test", nodeId: "n1" } as any);
+
+    const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
+    // Project statusLine must be removed so the global user script takes effect
+    expect(settings.statusLine).toBeUndefined();
+    // Other settings preserved
+    expect(settings.customSetting).toBe(true);
+    // Collector script still copied (global script chains it)
+    expect(written["/project/.openrig/context-collector.cjs"]).toBeDefined();
+  });
+
+  it("skips injection for new projects when a global user statusLine exists", async () => {
+    const fs = mockFsOps();
+    // No project settings.local.json yet
+    // Global has a user-defined statusLine
+    written["/home/tester/.claude/settings.json"] = JSON.stringify({
+      statusLine: {
+        type: "command",
+        command: "/home/tester/.claude/statusline.sh",
+      },
+    });
+
+    const adapter = new ClaudeCodeAdapter({
+      tmux: mockTmux(),
+      fsOps: fs,
+      stateDir: tmpDir,
+      collectorAssetPath: "/fake/collector.js",
+    });
+
+    await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "test", nodeId: "n1" } as any);
+
+    const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
+    // No statusLine injected — the global user script handles it
+    expect(settings.statusLine).toBeUndefined();
+  });
+
   it("ensureContextCollector is a public best-effort seam for adopted tmux sessions", () => {
     const adapter = new ClaudeCodeAdapter({
       tmux: mockTmux(),
