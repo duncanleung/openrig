@@ -711,17 +711,41 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.fs.copyFile(this.collectorAssetPath, collectorDest);
 
     // 2. Merge status line config into .claude/settings.local.json
+    //    Skip if a user-defined statusLine already exists (one whose command
+    //    is NOT the OpenRig context-collector). The user's script is expected
+    //    to chain the collector itself.
     const settingsPath = nodePath.join(binding.cwd, ".claude", "settings.local.json");
     this.fs.mkdirp(nodePath.dirname(settingsPath));
 
     const existing = this.readJsonObject(settingsPath);
 
     const collectorCmd = `node ${collectorDest} ${contextDir} ${providerUsageDir}`;
-    existing["statusLine"] = {
-      ...(typeof existing["statusLine"] === "object" && existing["statusLine"] !== null ? existing["statusLine"] as Record<string, unknown> : {}),
-      type: "command",
-      command: collectorCmd,
-    };
+    const currentStatusLine = existing["statusLine"];
+    const currentCmd = typeof currentStatusLine === "object" && currentStatusLine !== null
+      ? (currentStatusLine as Record<string, unknown>)["command"]
+      : undefined;
+    const isOpenRigManaged = typeof currentCmd === "string" && currentCmd.includes("context-collector.cjs");
+
+    // Also check the global ~/.claude/settings.json for a user-defined statusLine.
+    // When a user has a global statusLine (e.g., statusline.sh that chains the collector),
+    // skip injection even for new projects — the global setting applies and handles both concerns.
+    let globalHasUserStatusLine = false;
+    if (!currentStatusLine) {
+      const globalSettingsPath = nodePath.join(process.env.HOME ?? "", ".claude", "settings.json");
+      const globalSettings = this.readJsonObject(globalSettingsPath);
+      const globalStatusLine = globalSettings["statusLine"];
+      const globalCmd = typeof globalStatusLine === "object" && globalStatusLine !== null
+        ? (globalStatusLine as Record<string, unknown>)["command"]
+        : undefined;
+      globalHasUserStatusLine = typeof globalCmd === "string" && !globalCmd.includes("context-collector.cjs");
+    }
+
+    if ((!currentStatusLine && !globalHasUserStatusLine) || isOpenRigManaged) {
+      existing["statusLine"] = {
+        type: "command",
+        command: collectorCmd,
+      };
+    }
 
     this.fs.writeFile(settingsPath, JSON.stringify(existing, null, 2));
   }

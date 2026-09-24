@@ -282,6 +282,58 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     expect(settings.statusLine.command).toContain("context-collector.cjs");
   });
 
+  it("does not overwrite a user-defined statusLine that is not the context-collector", async () => {
+    const fs = mockFsOps();
+    // Pre-existing settings with a user-defined statusLine (not the collector)
+    written["/project/.claude/settings.local.json"] = JSON.stringify({
+      statusLine: {
+        type: "command",
+        command: "/home/user/.claude/statusline.sh",
+      },
+    });
+
+    const adapter = new ClaudeCodeAdapter({
+      tmux: mockTmux(),
+      fsOps: fs,
+      stateDir: tmpDir,
+      collectorAssetPath: "/fake/collector.js",
+    });
+
+    await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "test", nodeId: "n1" } as any);
+
+    const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
+    // User's statusLine must be preserved, not overwritten with collector
+    expect(settings.statusLine.command).toBe("/home/user/.claude/statusline.sh");
+    expect(settings.statusLine.command).not.toContain("context-collector.cjs");
+    // Collector script is still copied (user's script may chain it)
+    expect(written["/project/.openrig/context-collector.cjs"]).toBeDefined();
+  });
+
+  it("overwrites an existing OpenRig-managed statusLine with updated collector path", async () => {
+    const fs = mockFsOps();
+    // Pre-existing settings with an old OpenRig collector statusLine
+    written["/project/.claude/settings.local.json"] = JSON.stringify({
+      statusLine: {
+        type: "command",
+        command: "node /old/path/context-collector.cjs /old/state/context-usage /old/state/provider-usage",
+      },
+    });
+
+    const adapter = new ClaudeCodeAdapter({
+      tmux: mockTmux(),
+      fsOps: fs,
+      stateDir: tmpDir,
+      collectorAssetPath: "/fake/collector.js",
+    });
+
+    await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "test", nodeId: "n1" } as any);
+
+    const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
+    // OpenRig-managed statusLine should be updated to new paths
+    expect(settings.statusLine.command).toContain("context-collector.cjs");
+    expect(settings.statusLine.command).toContain(join(tmpDir, "state", "context-usage"));
+  });
+
   it("ensureContextCollector is a public best-effort seam for adopted tmux sessions", () => {
     const adapter = new ClaudeCodeAdapter({
       tmux: mockTmux(),
