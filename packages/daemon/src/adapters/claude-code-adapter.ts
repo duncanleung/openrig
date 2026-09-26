@@ -13,7 +13,7 @@ import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-plann
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
 import { mergeManagedBlock } from "../domain/managed-blocks.js";
 import { shellQuote } from "./shell-quote.js";
-import { validateClaudeActivityHookDelivery } from "../domain/claude-activity-hooks.js";
+import { validateClaudeActivityHookDelivery, type ActivityRelayEvent } from "../domain/claude-activity-hooks.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
 import { contextUsageDirectory, providerUsageDirectory } from "../domain/telemetry-state-paths.js";
 
@@ -794,6 +794,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       };
     }
 
+    // Check whether the global ~/.claude/settings.local.json already carries an
+    // owned relay hook for every derived event. Claude Code merges hooks from all
+    // settings tiers, so a global entry + a project entry = the relay fires TWICE.
+    // When the global covers all relay events, skip the project-level copy+upsert
+    // and strip any existing project-level owned entries so the global takes effect
+    // cleanly. Mirrors the statusLine dedup in provisionContextCollector.
+    const globalCoversRelay = deliverable && this.globalSettingsCoversRelayEvents(derivedEvents);
+
     const settingsExisted = this.fs.exists(settingsPath);
     // Fail closed: never clobber a settings file we cannot parse — preserve its bytes.
     let settings: Record<string, unknown>;
@@ -827,7 +835,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     // 2. Deliverable enable: copy the relay asset + upsert the owned entry for each
     //    PREVALIDATED relay event (derived from the canonical manifest above).
-    if (deliverable) {
+    //    SKIP when the global settings already cover every relay event — the global
+    //    hook fires for all projects and a project-level duplicate doubles the POST.
+    if (deliverable && !globalCoversRelay) {
       this.fs.mkdirp(nodePath.dirname(relayDest));
       this.fs.copyFile(this.activityRelayPath!, relayDest);
       this.preserveMode(this.activityRelayPath!, relayDest);
@@ -848,6 +858,30 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.fs.mkdirp(nodePath.dirname(settingsPath));
     this.fs.writeFile(settingsPath, JSON.stringify(settings, null, 2));
     return { changed: true, delivered: deliverable, sourceMissing: false, manifestUnavailable: false, settingsUnparseable: false };
+  }
+
+  /**
+   * Check whether the global ~/.claude/settings.local.json already carries an
+   * owned relay hook for every derived relay event. When it does, a project-level
+   * copy is redundant (Claude Code merges hooks from all tiers) and fragile
+   * (the project copy can be deleted while the global persists).
+   */
+  private globalSettingsCoversRelayEvents(derivedEvents: ActivityRelayEvent[]): boolean {
+    if (derivedEvents.length === 0) return false;
+    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
+    if (!home) return false;
+    const globalSettingsPath = nodePath.join(home, ".claude", "settings.local.json");
+    const globalSettings = this.readJsonObject(globalSettingsPath);
+    const globalHooks = this.readJsonObjectField(globalSettings, "hooks");
+    for (const { event } of derivedEvents) {
+      const groups = Array.isArray(globalHooks[event]) ? (globalHooks[event] as unknown[]) : [];
+      const hasOwned = groups.some((group) => {
+        if (!isPlainObject(group) || !Array.isArray(group["hooks"])) return false;
+        return (group["hooks"] as unknown[]).some((h) => isOwnedRelayCommand(hookCommand(h)));
+      });
+      if (!hasOwned) return false;
+    }
+    return true;
   }
 
 }
