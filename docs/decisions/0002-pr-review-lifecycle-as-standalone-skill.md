@@ -1,7 +1,7 @@
 ---
 id: ADR-0002
 title: Create pr-review-lifecycle as a standalone OpenRig skill
-status: proposed
+status: accepted
 date: 2026-09-26
 tags: [code-review, skills, pr-lifecycle, agent-coordination]
 supersedes: []

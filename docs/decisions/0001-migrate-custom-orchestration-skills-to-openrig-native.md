@@ -1,7 +1,7 @@
 ---
 id: ADR-0001
 title: Migrate custom orchestration skills to OpenRig native skills
-status: proposed
+status: accepted
 date: 2026-09-26
 tags: [orchestration, skills, migration, agent-coordination]
 supersedes: []

@@ -1,7 +1,7 @@
 ---
 id: ADR-0003
 title: Fork-specific validation gate referencing operator skills in orchestrator role guidance
-status: proposed
+status: accepted
 date: 2026-09-26
 tags: [orchestration, validation, fork-specific, code-review]
 supersedes: []
