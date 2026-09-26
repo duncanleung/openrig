@@ -77,7 +77,22 @@ If there is more than one orchestrator, divide the load:
 
 If there is only one orchestrator, you own both the main work stream and the coverage checks.
 
+## Pre-dispatch unknowns check
+
+Before dispatching implementation, name what you do not know. Research before
+building. The validation gate (ADR-0003) runs *after* planning; this check runs
+*before* planning — it catches the most expensive failure mode: confident
+implementation of a misunderstood requirement.
+
+Ask: "What am I assuming without evidence?" If the answer is non-empty, resolve
+those gaps before dispatching.
+
 ## Delegation rules
+
+Check git history for prior work before dispatching: `git log --grep` and
+`git log --all --oneline -- <paths>` surface completed, partial, or reverted
+work that a new dispatch would duplicate. In a multi-session rig, parallel
+branches and abandoned worktrees are common.
 
 Resolve the selected path first. Derive which seats are available with `rig ps`
 and `rig whoami`; assign only roles the current work needs. One seat may hold
@@ -93,6 +108,9 @@ When you dispatch work, give the receiving agent enough structure to act without
 - what acceptance criteria define success
 - what proof or verification you expect back
 - any independently held component explicitly selected, and the boundary that triggers it
+- **authority boundaries** — what the agent may always do, must ask about first, and must never do. Prevents agents from exceeding scope or stalling on routine decisions.
+- **contingencies** — if X happens, do Y. Agents that hit an unexpected state without contingency instructions either stop or improvise, both expensive.
+- **prerequisites** — what must be true before this work starts. Catches missing dependencies before the agent burns context discovering them.
 
 **(0.5.0) Assign work *with* its context attached.** Rather than make the assignee grep for the as-built, compose a context pack and ride it on the handoff: `rig context compose --out packs/<brief> --from <files>`, then `rig queue create --destination <seat> --body-context packs/<brief> --summary "…"`. The pack's resolved content is snapshotted into the qitem (plus its ref for provenance), so the context survives compaction and is auditable. See `openrig-user` → "Context packs and paced delivery." (`rig context` composes; the queue delivers — the noun never sends.)
 
