@@ -185,6 +185,30 @@ policies and workflow runtime project new owners off these fields.
 If a daemon-backed coordination command fails, debug the command/runtime/schema
 edge directly — don't fall back to stale pre-upgrade assumptions.
 
+## External state ledger
+
+When a handoff crosses the idempotence seam — from worktree-local work (Phase A)
+into external mutations (Phase B) — the queue body must carry an external state
+ledger. One row per external mutation attempted this session.
+
+| System | Identifier | Applied? | Idempotent? | How to verify before redoing |
+| --- | --- | --- | --- | --- |
+| *(example)* | `V2LAYVZ7LF` | yes | n/a | `aws bedrock-agent list-data-sources …` |
+| *(example)* | `SLCR1PL9FR` | started | yes | `get-ingestion-job` → expect `COMPLETE` |
+| *(example)* | merge 30/233k | **UNKNOWN** | **NO** | count entries for prefix; re-run only if 0 |
+
+Rules:
+- `Applied?` is `yes` / `no` / **`UNKNOWN`**. `UNKNOWN` is the honest value —
+  never guess `yes` or `no`.
+- Every non-idempotent row needs a **verify command that distinguishes "not yet
+  applied" from "already applied"**. A row without one is an incomplete handoff.
+- If you cannot determine a row's state, say so. The successor verifies before
+  acting — it does not infer from the task list.
+
+Hand off at the Phase A→B boundary and between Phase B steps. An agent that dies
+mid-Phase-B is the expensive failure — the queue ledger is what makes recovery
+possible without the human re-deriving every external mutation.
+
 ## See also
 
 - `looping-workflows` skill — operating discipline for self-driving rig-shaped loops; queue-handoff is its current handoff substrate

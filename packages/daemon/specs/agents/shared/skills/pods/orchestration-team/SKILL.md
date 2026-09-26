@@ -105,6 +105,27 @@ After delegating:
 2. Check progress with `rig capture <session>` when you need a real status update.
 3. If an agent is still stuck on your **next watchdog wake** (no progress signal since the last), investigate and redirect or unblock — the trigger is the wake / queue-transition / activity signal, **not a poll count or elapsed-time cycle.**
 
+## Git-isolated dispatch — worktree convention
+
+Implementation and fix work runs in a git worktree so the main tree stays
+clean for the orchestrator, reviewers, and concurrent work.
+
+**When to isolate:** implementation, fixes, rebases — any work that edits
+tracked files. Research, reviews, and one-off commands stay in the main tree.
+
+**Setup checklist for worktree dispatch:**
+
+1. Create a worktree on a dedicated branch for the work.
+2. Copy `.ai/` planning artifacts into the worktree — they are gitignored, so
+   `git worktree add` will not carry them.
+3. Copy gitignored config files (`.env`, `.env.local`,
+   `.env.development.local`) so the agent does not hit auth errors.
+4. Include `worktree_path=<path>` in the queue body so the execution view can
+   resolve the repo context.
+
+**After the work merges or is abandoned:** remove the worktree and its branch.
+Do not leave stale worktrees — they hold disk and confuse `git worktree list`.
+
 ## Monitoring and unblock loop
 
 When an agent looks stuck:
@@ -114,6 +135,22 @@ When an agent looks stuck:
 4. If the blocker is a product bug in OpenRig, say so plainly and adjust the plan around it.
 
 Do not call a blocked agent "in progress" forever.
+
+## Cost escalation — review-fix cycle limit
+
+After each review-fix cycle on a ticket, count how many
+implementation→review→fix rounds the ticket has consumed. Track the count in
+the queue item or status artifact.
+
+| Round count | Action |
+|---|---|
+| 1–2 | Normal. Continue. |
+| 3 | Escalate to the human with a cost summary: agents dispatched, review rounds, what keeps failing. Ask: continue or stop? |
+| 4+ | Do not dispatch another fix agent without explicit human approval. State the accumulated cost and the failure pattern. |
+
+This limit prevents infinite review→fix loops. The `pr-review-lifecycle` skill
+enforces a 3-cycle limit within a single PR's review loop; this rule covers the
+broader ticket-level cycle.
 
 ## Capacity and assignment
 
