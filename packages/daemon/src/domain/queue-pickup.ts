@@ -19,6 +19,9 @@ import { SettingsStore } from "./user-settings/settings-store.js";
 export const PICKUP_STALL_THRESHOLD_KEY = "queue.pickup_stall_threshold_minutes";
 export const DEFAULT_PICKUP_STALL_THRESHOLD_MINUTES = 3;
 
+export const HARD_STALE_THRESHOLD_KEY = "queue.hard_stale_minutes";
+export const DEFAULT_HARD_STALE_MINUTES = 45;
+
 export interface PickupReceipt {
   state: "unclaimed" | "working" | "stalled-after-claim" | "parked";
   /** Present iff stalled: the named evidence replacing the manual cross-surface join. */
@@ -37,6 +40,16 @@ export function resolvePickupThresholdMinutes(): number {
   }
 }
 
+export function resolveHardStaleMinutes(): number {
+  try {
+    const v = new SettingsStore().resolveOne(HARD_STALE_THRESHOLD_KEY).value;
+    const n = typeof v === "number" ? v : Number(v);
+    return Number.isFinite(n) && n > 0 ? n : DEFAULT_HARD_STALE_MINUTES;
+  } catch {
+    return DEFAULT_HARD_STALE_MINUTES;
+  }
+}
+
 export interface PickupFacts {
   state: string;
   claimedAt: string | null | undefined;
@@ -48,6 +61,7 @@ export interface PickupFacts {
   needsInput?: number;
   now?: Date;
   thresholdMinutes?: number;
+  hardStaleMinutes?: number;
 }
 
 /** The ONE derivation rule — every projection surface (rowToItem, the pickup view lens, the
@@ -61,9 +75,14 @@ export function derivePickup(facts: PickupFacts): PickupReceipt {
   // it is the first honest row-scoped writer, and wiring reopens only in that slice.
   const heartbeatAfterClaim =
     !!facts.lastHeartbeat && Date.parse(facts.lastHeartbeat) > claimedMs;
-  if (facts.activity === "working" && !facts.needsInput) return { state: "working" };
+  const hardStaleEligible = facts.activity === "working" && !facts.needsInput;
+  if (hardStaleEligible) {
+    const hardMs = (facts.hardStaleMinutes ?? resolveHardStaleMinutes()) * 60_000;
+    const hardAnchor = Math.max(claimedMs, Date.parse(facts.lastMeaningfulAt ?? facts.claimedAt), heartbeatAfterClaim ? Date.parse(facts.lastHeartbeat!) : claimedMs);
+    if (now.getTime() - hardAnchor <= hardMs) return { state: "working" };
+  }
   // Legacy callers without a timestamp retain their historical count contract.
-  if (facts.lastMeaningfulAt === undefined && (facts.postClaimMotionCount > 0 || heartbeatAfterClaim)) return { state: "working" };
+  if (!hardStaleEligible && facts.lastMeaningfulAt === undefined && (facts.postClaimMotionCount > 0 || heartbeatAfterClaim)) return { state: "working" };
   const thresholdMs = (facts.thresholdMinutes ?? resolvePickupThresholdMinutes()) * 60_000;
   const anchor = Math.max(claimedMs, Date.parse(facts.lastMeaningfulAt ?? facts.claimedAt), heartbeatAfterClaim ? Date.parse(facts.lastHeartbeat!) : claimedMs);
   const ageMs = now.getTime() - anchor;

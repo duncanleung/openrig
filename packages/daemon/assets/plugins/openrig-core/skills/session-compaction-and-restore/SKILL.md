@@ -133,6 +133,29 @@ The cross-runtime restore/reentry packet standard v0 defines:
 
 Plus a 6-item restored-seat acceptance checklist.
 
+### Continuation record fields
+
+Three fields that must appear in every restore packet written before compaction
+or handoff. Without these, successors repeat work or silently undo decisions.
+
+- **Standing decisions** — decisions made this session, with reasons. A successor
+  who sees the reason does not re-litigate. A successor who sees a bare
+  prohibition rationalizes it away.
+- **Attempted and reverted** — what was tried, why it failed, and a do-not-retry
+  marker. Structure: `what / why it failed / do not retry because`. Prevents the
+  next occupant from repeating a dead end.
+- **Explicit do-nots with reasons** — prohibitions that must survive compaction.
+  An unexplained "don't use X" is the first thing a fresh agent questions.
+  Every do-not carries its reason inline.
+
+### Anti-pattern: ephemeral references in restore packets
+
+Never reference scratchpad paths (`/private/tmp/claude-*/...`) or hosted
+artifact URLs (`claude.ai/artifact/...`) in a restore packet. Both are
+session-scoped or account-scoped and do not survive to the successor. Every
+reference in a restore packet must point to a durable location: a file in the
+repo, a queue item, or a committed artifact.
+
 Source-trust ranking applies when restored seat ingests packet evidence:
 **`rig whoami` > target rigspec > bounded latest transcript > full
 transcript > touched-files > `restore-summary.json`.**

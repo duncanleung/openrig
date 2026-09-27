@@ -189,6 +189,50 @@ describe("S04 pickup receipts — derived, visible, threshold-honest", () => {
     expect(mod.stalledPickupFinding(repo.getById(fresh.qitemId)!)).toBeNull();
   });
 
+  it("HARD-STALE BACKSTOP: activity=working suppresses stall only up to the hard-stale cap (default 45 min)", async () => {
+    const mod = await import("../src/domain/queue-pickup.js");
+    const now = new Date();
+    const base: Parameters<typeof mod.derivePickup>[0] = {
+      state: "in-progress",
+      claimedAt: new Date(now.getTime() - 50 * 60_000).toISOString(),
+      lastHeartbeat: null,
+      postClaimMotionCount: 0,
+      activity: "working",
+      needsInput: 0,
+      now,
+      hardStaleMinutes: 45,
+    };
+    // 50 min with activity=working but no queue progress → stalled
+    expect(mod.derivePickup(base).state).toBe("stalled-after-claim");
+    // Same scenario but only 30 min → still working (under the 45 min cap)
+    expect(mod.derivePickup({ ...base, claimedAt: new Date(now.getTime() - 30 * 60_000).toISOString() }).state).toBe("working");
+  });
+
+  it("HARD-STALE: meaningful queue change resets the hard-stale anchor", async () => {
+    const mod = await import("../src/domain/queue-pickup.js");
+    const now = new Date();
+    // Claimed 60 min ago, but last meaningful change was 10 min ago → working
+    expect(mod.derivePickup({
+      state: "in-progress",
+      claimedAt: new Date(now.getTime() - 60 * 60_000).toISOString(),
+      lastHeartbeat: null,
+      postClaimMotionCount: 1,
+      lastMeaningfulAt: new Date(now.getTime() - 10 * 60_000).toISOString(),
+      activity: "working",
+      needsInput: 0,
+      now,
+      hardStaleMinutes: 45,
+    }).state).toBe("working");
+  });
+
+  it("HARD-STALE CONFIG: the daemon config surface defaults queue.hard_stale_minutes to 45", () => {
+    const missingConfig = `/tmp/openrig-hard-stale-${process.pid}-${Date.now()}.json`;
+    const setting = new SettingsStore(missingConfig).resolveOne(
+      "queue.hard_stale_minutes" as never,
+    );
+    expect(setting).toMatchObject({ value: 45, source: "default", defaultValue: 45 });
+  });
+
   it("VIEW LENS 'pickup': claimed rows with derived state + named stalled evidence, queryable", async () => {
     const row = await mkRow();
     repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });

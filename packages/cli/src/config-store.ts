@@ -173,6 +173,7 @@ export interface RiggedConfig {
   // S02 (OPR.0.5.5.2) — standing-stuck-sweep cadence + unclaimed-obligation age (same twin).
   queue: {
     pickupStallThresholdMinutes: number;
+    hardStaleMinutes: number;
     stuckSweepIntervalSeconds: number;
     stuckSweepUnclaimedAgeMinutes: number;
     wakeRetryIntervalSeconds: number;
@@ -316,6 +317,7 @@ const DEFAULTS = {
   // S04 — pickup-receipt stall threshold default (twin of daemon getDefaultValue).
   queue: {
     pickupStallThresholdMinutes: 3,
+    hardStaleMinutes: 45,
     stuckSweepIntervalSeconds: 300,
     stuckSweepUnclaimedAgeMinutes: 60,
     wakeRetryIntervalSeconds: 300,
@@ -423,6 +425,7 @@ export const VALID_KEYS = [
   "retention.batch_size",
   // S04 — pickup-receipt stall threshold; lockstep with the daemon settings-store twin.
   "queue.pickup_stall_threshold_minutes",
+  "queue.hard_stale_minutes",
   // S02 — standing-stuck-sweep cadence + unclaimed-obligation age; same lockstep.
   "queue.stuck_sweep_interval_seconds",
   "queue.stuck_sweep_unclaimed_age_minutes",
@@ -510,6 +513,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "retention.watchdog_keep_per_job": { primary: "OPENRIG_RETENTION_WATCHDOG_KEEP_PER_JOB" },
   "retention.batch_size": { primary: "OPENRIG_RETENTION_BATCH_SIZE" },
   "queue.pickup_stall_threshold_minutes": { primary: "OPENRIG_QUEUE_PICKUP_STALL_THRESHOLD_MINUTES" },
+  "queue.hard_stale_minutes": { primary: "OPENRIG_QUEUE_HARD_STALE_MINUTES" },
   "queue.stuck_sweep_interval_seconds": { primary: "OPENRIG_QUEUE_STUCK_SWEEP_INTERVAL_SECONDS" },
   "queue.stuck_sweep_unclaimed_age_minutes": { primary: "OPENRIG_QUEUE_STUCK_SWEEP_UNCLAIMED_AGE_MINUTES" },
   "queue.wake_retry_interval_seconds": { primary: "OPENRIG_QUEUE_WAKE_RETRY_INTERVAL_SECONDS" },
@@ -584,6 +588,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "retention.watchdog_keep_per_job": ["retention", "watchdogKeepPerJob"],
   "retention.batch_size": ["retention", "batchSize"],
   "queue.pickup_stall_threshold_minutes": ["queue", "pickupStallThresholdMinutes"],
+  "queue.hard_stale_minutes": ["queue", "hardStaleMinutes"],
   "queue.stuck_sweep_interval_seconds": ["queue", "stuckSweepIntervalSeconds"],
   "queue.stuck_sweep_unclaimed_age_minutes": ["queue", "stuckSweepUnclaimedAgeMinutes"],
   "queue.wake_retry_interval_seconds": ["queue", "wakeRetryIntervalSeconds"],
@@ -851,6 +856,7 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
     }
   },
   "queue.pickup_stall_threshold_minutes": positiveIntegerConstraint("queue.pickup_stall_threshold_minutes"),
+  "queue.hard_stale_minutes": positiveIntegerConstraint("queue.hard_stale_minutes"),
   "queue.stuck_sweep_interval_seconds": positiveIntegerConstraint("queue.stuck_sweep_interval_seconds"),
   "queue.stuck_sweep_unclaimed_age_minutes": positiveIntegerConstraint("queue.stuck_sweep_unclaimed_age_minutes"),
   // S01 — wake-or-escalate ladder knobs (same positive-integer contract).
@@ -1064,6 +1070,7 @@ export class ConfigStore {
       },
       queue: {
         pickupStallThresholdMinutes: v("queue.pickup_stall_threshold_minutes") as number,
+        hardStaleMinutes: v("queue.hard_stale_minutes") as number,
         stuckSweepIntervalSeconds: v("queue.stuck_sweep_interval_seconds") as number,
         stuckSweepUnclaimedAgeMinutes: v("queue.stuck_sweep_unclaimed_age_minutes") as number,
         wakeRetryIntervalSeconds: v("queue.wake_retry_interval_seconds") as number,

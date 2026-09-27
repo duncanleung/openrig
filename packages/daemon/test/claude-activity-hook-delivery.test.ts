@@ -322,6 +322,83 @@ describe("Claude activity-hook delivery — ownership round-trips shellQuote (ap
   });
 });
 
+// Global-covers-relay dedup: when ~/.claude/settings.json already carries owned relay
+// hooks for ALL derived events, the adapter must skip project-level copy+upsert (to prevent
+// double-firing) and strip any existing project-level owned entries. When the global covers
+// only SOME events, the adapter must still write project-level entries (partial coverage is
+// worse than none — the missing events would not fire at all).
+const GLOBAL_SETTINGS = "/home/test/.claude/settings.json";
+const GLOBAL_RELAY_CMD = `node '/home/test/.openrig/hooks/scripts/activity-relay.cjs'`;
+
+function globalHooksAllEvents(): string {
+  const hooks: Record<string, any> = {};
+  for (const ev of EVENTS) hooks[ev] = [{ hooks: [{ type: "command", command: GLOBAL_RELAY_CMD, timeout: 5 }] }];
+  return JSON.stringify({ hooks });
+}
+
+function globalHooksPartialEvents(): string {
+  const hooks: Record<string, any> = {};
+  hooks["SessionStart"] = [{ hooks: [{ type: "command", command: GLOBAL_RELAY_CMD, timeout: 5 }] }];
+  hooks["Stop"] = [{ hooks: [{ type: "command", command: GLOBAL_RELAY_CMD, timeout: 5 }] }];
+  return JSON.stringify({ hooks });
+}
+
+describe("Claude activity-hook delivery — global-covers-relay dedup", () => {
+  it("GLOBAL covers all relay events: skips project-level enable, no relay copied, no project-level owned entries", async () => {
+    const fs = enableFs({ [GLOBAL_SETTINGS]: globalHooksAllEvents() });
+    await makeAdapter(fs).project(plan([activityEntry()]), binding());
+    expect(fs._store[RELAY_DEST], "relay must NOT be copied to project").toBeUndefined();
+    expect(allCommands(readSettings(fs)).filter((c) => c.includes(OWNED_MARKER)), "no project-level owned entries").toEqual([]);
+  });
+
+  it("GLOBAL covers all relay events: strips existing project-level owned entries", async () => {
+    const fs = enableFs({ [GLOBAL_SETTINGS]: globalHooksAllEvents(), [SETTINGS]: seededOwned() });
+    await makeAdapter(fs).project(plan([activityEntry()]), binding());
+    expect(allCommands(readSettings(fs)).filter((c) => c.includes(OWNED_MARKER)), "owned entries stripped").toEqual([]);
+  });
+
+  it("GLOBAL covers all relay events: preserves user hooks in project settings when stripping owned entries", async () => {
+    const userSettings = JSON.stringify({ hooks: {
+      Stop: [
+        { hooks: [{ type: "command", command: OWNED_CMD, timeout: 5 }] },
+        { hooks: [{ type: "command", command: "node ./my-stop-hook.cjs", timeout: 10 }] },
+      ],
+    } });
+    const fs = enableFs({ [GLOBAL_SETTINGS]: globalHooksAllEvents(), [SETTINGS]: userSettings });
+    await makeAdapter(fs).project(plan([activityEntry()]), binding());
+    const cmds = allCommands(readSettings(fs));
+    expect(cmds).toContain("node ./my-stop-hook.cjs");
+    expect(cmds.filter((c) => c.includes(OWNED_MARKER))).toEqual([]);
+  });
+
+  it("GLOBAL covers PARTIAL relay events: project-level enable proceeds normally", async () => {
+    const fs = enableFs({ [GLOBAL_SETTINGS]: globalHooksPartialEvents() });
+    await makeAdapter(fs).project(plan([activityEntry()]), binding());
+    expect(fs._store[RELAY_DEST], "relay copied to project").toBe("// relay");
+    for (const ev of EVENTS) {
+      const cmds = (readSettings(fs).hooks?.[ev] ?? []).flatMap((g: any) => (g.hooks ?? []).map((h: any) => h.command));
+      expect(cmds, `project-level entry for ${ev}`).toContain(OWNED_CMD);
+    }
+  });
+
+  it("NO global settings file: project-level enable proceeds normally", async () => {
+    const fs = enableFs(); // no GLOBAL_SETTINGS seeded
+    await makeAdapter(fs).project(plan([activityEntry()]), binding());
+    expect(fs._store[RELAY_DEST], "relay copied to project").toBe("// relay");
+    for (const ev of EVENTS) {
+      const cmds = (readSettings(fs).hooks?.[ev] ?? []).flatMap((g: any) => (g.hooks ?? []).map((h: any) => h.command));
+      expect(cmds, `project-level entry for ${ev}`).toContain(OWNED_CMD);
+    }
+  });
+
+  it("GLOBAL has empty hooks object: project-level enable proceeds normally", async () => {
+    const fs = enableFs({ [GLOBAL_SETTINGS]: JSON.stringify({ hooks: {} }) });
+    await makeAdapter(fs).project(plan([activityEntry()]), binding());
+    expect(fs._store[RELAY_DEST], "relay copied to project").toBe("// relay");
+    expect(allCommands(readSettings(fs)).filter((c) => c.includes(OWNED_MARKER)).length).toBe(EVENTS.length);
+  });
+});
+
 // Production-altitude reachability: the ACTUAL SHIPPED profile bytes (development/implementer,
 // which selects shared:claude-activity-hooks) must resolve — through the REAL resolveAgentRef ->
 // resolveNodeConfig -> planProjection -> adapter — to a plan entry the adapter enables. Loaded

@@ -77,7 +77,22 @@ If there is more than one orchestrator, divide the load:
 
 If there is only one orchestrator, you own both the main work stream and the coverage checks.
 
+## Pre-dispatch unknowns check
+
+Before dispatching implementation, name what you do not know. Research before
+building. The validation gate (ADR-0003) runs *after* planning; this check runs
+*before* planning — it catches the most expensive failure mode: confident
+implementation of a misunderstood requirement.
+
+Ask: "What am I assuming without evidence?" If the answer is non-empty, resolve
+those gaps before dispatching.
+
 ## Delegation rules
+
+Check git history for prior work before dispatching: `git log --grep` and
+`git log --all --oneline -- <paths>` surface completed, partial, or reverted
+work that a new dispatch would duplicate. In a multi-session rig, parallel
+branches and abandoned worktrees are common.
 
 Resolve the selected path first. Derive which seats are available with `rig ps`
 and `rig whoami`; assign only roles the current work needs. One seat may hold
@@ -93,6 +108,9 @@ When you dispatch work, give the receiving agent enough structure to act without
 - what acceptance criteria define success
 - what proof or verification you expect back
 - any independently held component explicitly selected, and the boundary that triggers it
+- **authority boundaries** — what the agent may always do, must ask about first, and must never do. Prevents agents from exceeding scope or stalling on routine decisions.
+- **contingencies** — if X happens, do Y. Agents that hit an unexpected state without contingency instructions either stop or improvise, both expensive.
+- **prerequisites** — what must be true before this work starts. Catches missing dependencies before the agent burns context discovering them.
 
 **(0.5.0) Assign work *with* its context attached.** Rather than make the assignee grep for the as-built, compose a context pack and ride it on the handoff: `rig context compose --out packs/<brief> --from <files>`, then `rig queue create --destination <seat> --body-context packs/<brief> --summary "…"`. The pack's resolved content is snapshotted into the qitem (plus its ref for provenance), so the context survives compaction and is auditable. See `openrig-user` → "Context packs and paced delivery." (`rig context` composes; the queue delivers — the noun never sends.)
 
@@ -105,6 +123,31 @@ After delegating:
 2. Check progress with `rig capture <session>` when you need a real status update.
 3. If an agent is still stuck on your **next watchdog wake** (no progress signal since the last), investigate and redirect or unblock — the trigger is the wake / queue-transition / activity signal, **not a poll count or elapsed-time cycle.**
 
+## Git-isolated dispatch — worktree convention
+
+Implementation and fix work runs in a git worktree so the main tree stays
+clean for the orchestrator, reviewers, and concurrent work.
+
+**When to isolate:** implementation, fixes, rebases — any work that edits
+tracked files. Research, reviews, and one-off commands stay in the main tree.
+
+**Setup checklist for worktree dispatch:**
+
+1. Create a worktree on a dedicated branch for the work.
+2. Copy `.ai/` planning artifacts into the worktree — they are gitignored, so
+   `git worktree add` will not carry them.
+3. Copy gitignored config files (`.env`, `.env.local`,
+   `.env.development.local`) so the agent does not hit auth errors.
+   ⚠ This carries live credentials into the worktree, and `npm install`
+   there runs third-party postinstall scripts alongside them — the removal
+   step below deletes the copy, so do not leave a credential-bearing
+   worktree stale.
+4. Include `worktree_path=<path>` in the queue body so the execution view can
+   resolve the repo context.
+
+**After the work merges or is abandoned:** remove the worktree and its branch.
+Do not leave stale worktrees — they hold disk and confuse `git worktree list`.
+
 ## Monitoring and unblock loop
 
 When an agent looks stuck:
@@ -114,6 +157,22 @@ When an agent looks stuck:
 4. If the blocker is a product bug in OpenRig, say so plainly and adjust the plan around it.
 
 Do not call a blocked agent "in progress" forever.
+
+## Cost escalation — review-fix cycle limit
+
+After each review-fix cycle on a ticket, count how many
+implementation→review→fix rounds the ticket has consumed. Track the count in
+the queue item or status artifact.
+
+| Round count | Action |
+|---|---|
+| 1–2 | Normal. Continue. |
+| 3 | Escalate to the human with a cost summary: agents dispatched, review rounds, what keeps failing. Ask: continue or stop? |
+| 4+ | Do not dispatch another fix agent without explicit human approval. State the accumulated cost and the failure pattern. |
+
+This limit prevents infinite review→fix loops. The `pr-review-lifecycle` skill
+enforces a 3-cycle limit within a single PR's review loop; this rule covers the
+broader ticket-level cycle.
 
 ## Capacity and assignment
 
