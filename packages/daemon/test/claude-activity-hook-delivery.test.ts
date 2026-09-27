@@ -399,7 +399,7 @@ describe("Claude activity-hook delivery — global-covers-relay dedup", () => {
   });
 });
 
-describe("Claude activity-hook delivery — cwd=home guard (OPE-3)", () => {
+describe("Claude activity-hook delivery — cwd=home guard (RIG-3)", () => {
   const HOME_CWD = "/home/test";
   const HOME_RELAY_DEST = "/home/test/.openrig/hooks/scripts/activity-relay.cjs";
   const HOME_SETTINGS = "/home/test/.claude/settings.local.json";

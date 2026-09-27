@@ -1,4 +1,4 @@
-// OPE-2: E2E tests for observer provisioning dedup with real filesystem.
+// RIG-2: E2E tests for observer provisioning dedup with real filesystem.
 // Verifies that statusLine and activity-hook dedup logic works with real
 // file reads/writes, real path resolution, and real JSON round-trips.
 
@@ -176,7 +176,7 @@ describe("Observer dedup E2E — real filesystem", () => {
     });
   });
 
-  describe("cwd=home dedup (OPE-3)", () => {
+  describe("cwd=home dedup (RIG-3)", () => {
     it("dedup applies when cwd=home and global covers all events — no project-level relay hooks", async () => {
       const relayCmd = `node '${join(homeDir, ".openrig", "hooks", "scripts", "activity-relay.cjs")}'`;
       const globalHooks: Record<string, unknown[]> = {};
