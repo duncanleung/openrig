@@ -75,13 +75,14 @@ export function derivePickup(facts: PickupFacts): PickupReceipt {
   // it is the first honest row-scoped writer, and wiring reopens only in that slice.
   const heartbeatAfterClaim =
     !!facts.lastHeartbeat && Date.parse(facts.lastHeartbeat) > claimedMs;
-  if (facts.activity === "working" && !facts.needsInput) {
+  const hardStaleEligible = facts.activity === "working" && !facts.needsInput;
+  if (hardStaleEligible) {
     const hardMs = (facts.hardStaleMinutes ?? resolveHardStaleMinutes()) * 60_000;
     const hardAnchor = Math.max(claimedMs, Date.parse(facts.lastMeaningfulAt ?? facts.claimedAt), heartbeatAfterClaim ? Date.parse(facts.lastHeartbeat!) : claimedMs);
     if (now.getTime() - hardAnchor <= hardMs) return { state: "working" };
   }
   // Legacy callers without a timestamp retain their historical count contract.
-  if (facts.lastMeaningfulAt === undefined && (facts.postClaimMotionCount > 0 || heartbeatAfterClaim)) return { state: "working" };
+  if (!hardStaleEligible && facts.lastMeaningfulAt === undefined && (facts.postClaimMotionCount > 0 || heartbeatAfterClaim)) return { state: "working" };
   const thresholdMs = (facts.thresholdMinutes ?? resolvePickupThresholdMinutes()) * 60_000;
   const anchor = Math.max(claimedMs, Date.parse(facts.lastMeaningfulAt ?? facts.claimedAt), heartbeatAfterClaim ? Date.parse(facts.lastHeartbeat!) : claimedMs);
   const ageMs = now.getTime() - anchor;

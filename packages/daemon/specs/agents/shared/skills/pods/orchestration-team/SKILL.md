@@ -138,6 +138,10 @@ tracked files. Research, reviews, and one-off commands stay in the main tree.
    `git worktree add` will not carry them.
 3. Copy gitignored config files (`.env`, `.env.local`,
    `.env.development.local`) so the agent does not hit auth errors.
+   ⚠ This carries live credentials into the worktree, and `npm install`
+   there runs third-party postinstall scripts alongside them — the removal
+   step below deletes the copy, so do not leave a credential-bearing
+   worktree stale.
 4. Include `worktree_path=<path>` in the queue body so the execution view can
    resolve the repo context.
 

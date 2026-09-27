@@ -794,7 +794,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       };
     }
 
-    // Check whether the global ~/.claude/settings.local.json already carries an
+    // Check whether the global ~/.claude/settings.json already carries an
     // owned relay hook for every derived event. Claude Code merges hooks from all
     // settings tiers, so a global entry + a project entry = the relay fires TWICE.
     // When the global covers all relay events, skip the project-level copy+upsert
@@ -861,7 +861,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   /**
-   * Check whether the global ~/.claude/settings.local.json already carries an
+   * Check whether the global ~/.claude/settings.json already carries an
    * owned relay hook for every derived relay event. When it does, a project-level
    * copy is redundant (Claude Code merges hooks from all tiers) and fragile
    * (the project copy can be deleted while the global persists).
@@ -870,7 +870,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     if (derivedEvents.length === 0) return false;
     const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
     if (!home) return false;
-    const globalSettingsPath = nodePath.join(home, ".claude", "settings.local.json");
+    const globalSettingsPath = nodePath.join(home, ".claude", "settings.json");
     const globalSettings = this.readJsonObject(globalSettingsPath);
     const globalHooks = this.readJsonObjectField(globalSettings, "hooks");
     for (const { event } of derivedEvents) {

@@ -322,12 +322,12 @@ describe("Claude activity-hook delivery — ownership round-trips shellQuote (ap
   });
 });
 
-// Global-covers-relay dedup: when ~/.claude/settings.local.json already carries owned relay
+// Global-covers-relay dedup: when ~/.claude/settings.json already carries owned relay
 // hooks for ALL derived events, the adapter must skip project-level copy+upsert (to prevent
 // double-firing) and strip any existing project-level owned entries. When the global covers
 // only SOME events, the adapter must still write project-level entries (partial coverage is
 // worse than none — the missing events would not fire at all).
-const GLOBAL_SETTINGS = "/home/test/.claude/settings.local.json";
+const GLOBAL_SETTINGS = "/home/test/.claude/settings.json";
 const GLOBAL_RELAY_CMD = `node '/home/test/.openrig/hooks/scripts/activity-relay.cjs'`;
 
 function globalHooksAllEvents(): string {
