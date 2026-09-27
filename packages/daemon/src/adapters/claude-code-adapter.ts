@@ -799,7 +799,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // settings tiers, so a global entry + a project entry = the relay fires TWICE.
     // When the global covers all relay events, skip the project-level copy+upsert
     // and strip any existing project-level owned entries so the global takes effect
-    // cleanly. Mirrors the statusLine dedup in provisionContextCollector.
+    // cleanly. Mirrors the statusLine dedup in provisionContextCollector — no
+    // cwd===home carve-out because settings.json and settings.local.json are
+    // distinct tiers regardless of sharing the same .claude/ directory.
     const globalCoversRelay = deliverable && this.globalSettingsCoversRelayEvents(derivedEvents);
 
     const settingsExisted = this.fs.exists(settingsPath);
