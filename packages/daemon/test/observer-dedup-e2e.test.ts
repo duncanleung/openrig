@@ -176,8 +176,8 @@ describe("Observer dedup E2E — real filesystem", () => {
     });
   });
 
-  describe("cwd=home guard (OPE-3)", () => {
-    it("writes project hooks even when global covers all events — because cwd IS home", async () => {
+  describe("cwd=home dedup (OPE-3)", () => {
+    it("dedup applies when cwd=home and global covers all events — no project-level relay hooks", async () => {
       const relayCmd = `node '${join(homeDir, ".openrig", "hooks", "scripts", "activity-relay.cjs")}'`;
       const globalHooks: Record<string, unknown[]> = {};
       for (const ev of ["SessionStart", "UserPromptSubmit", "Stop", "Notification"]) {
@@ -189,15 +189,14 @@ describe("Observer dedup E2E — real filesystem", () => {
       await makeAdapter(fs).project(plan(homeDir, [activityEntry(RELAY_ASSET)]), binding(homeDir));
 
       const settingsPath = join(homeDir, ".claude", "settings.local.json");
-      expect(existsSync(settingsPath), "settings.local.json created").toBe(true);
+      if (!existsSync(settingsPath)) return; // no file = no project hooks, correct
       const settings = readJsonFile(settingsPath);
-      const hooks = settings.hooks as Record<string, unknown[]>;
-      expect(hooks).toBeDefined();
-      const allCmds = Object.values(hooks).flat().flatMap((g: any) => (g.hooks ?? []).map((h: any) => h.command));
+      const hooks = settings.hooks as Record<string, unknown[]> | undefined;
+      const allCmds = Object.values(hooks ?? {}).flat().flatMap((g: any) => (g.hooks ?? []).map((h: any) => h.command));
       expect(
         allCmds.filter((c: string) => c.includes("activity-relay.cjs")).length,
-        "hooks written despite global coverage when cwd=home",
-      ).toBeGreaterThanOrEqual(4);
+        "no relay hooks when global covers all events, even when cwd=home",
+      ).toBe(0);
     });
   });
 });

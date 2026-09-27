@@ -405,12 +405,12 @@ describe("Claude activity-hook delivery — cwd=home guard (OPE-3)", () => {
   const HOME_SETTINGS = "/home/test/.claude/settings.local.json";
   const HOME_OWNED_CMD = `node ${shellQuote(HOME_RELAY_DEST)}`;
 
-  it("cwd=home with global hooks covering all events: still writes project-level hooks (dedup skipped)", async () => {
+  it("cwd=home with global hooks covering all events: dedup applies (no project-level hooks)", async () => {
     const fs = enableFs({ [GLOBAL_SETTINGS]: globalHooksAllEvents() });
     await makeAdapter(fs).project(plan([activityEntry()]), binding(HOME_CWD));
     const settings = JSON.parse(fs._store[HOME_SETTINGS] ?? "{}");
     const cmds = allCommands(settings);
-    expect(cmds.filter((c) => c.includes(OWNED_MARKER)).length, "project-level hooks written despite global coverage").toBe(EVENTS.length);
+    expect(cmds.filter((c) => c.includes(OWNED_MARKER)).length, "project-level hooks skipped — global covers all events").toBe(0);
   });
 
   it("cwd=home without global hooks: writes project-level hooks normally", async () => {
