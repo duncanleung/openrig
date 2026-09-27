@@ -399,6 +399,39 @@ describe("Claude activity-hook delivery — global-covers-relay dedup", () => {
   });
 });
 
+describe("Claude activity-hook delivery — cwd=home guard (OPE-3)", () => {
+  const HOME_CWD = "/home/test";
+  const HOME_RELAY_DEST = "/home/test/.openrig/hooks/scripts/activity-relay.cjs";
+  const HOME_SETTINGS = "/home/test/.claude/settings.local.json";
+  const HOME_OWNED_CMD = `node ${shellQuote(HOME_RELAY_DEST)}`;
+
+  it("cwd=home with global hooks covering all events: still writes project-level hooks (dedup skipped)", async () => {
+    const fs = enableFs({ [GLOBAL_SETTINGS]: globalHooksAllEvents() });
+    await makeAdapter(fs).project(plan([activityEntry()]), binding(HOME_CWD));
+    const settings = JSON.parse(fs._store[HOME_SETTINGS] ?? "{}");
+    const cmds = allCommands(settings);
+    expect(cmds.filter((c) => c.includes(OWNED_MARKER)).length, "project-level hooks written despite global coverage").toBe(EVENTS.length);
+  });
+
+  it("cwd=home without global hooks: writes project-level hooks normally", async () => {
+    const fs = enableFs();
+    await makeAdapter(fs).project(plan([activityEntry()]), binding(HOME_CWD));
+    const settings = JSON.parse(fs._store[HOME_SETTINGS] ?? "{}");
+    for (const ev of EVENTS) {
+      const cmds = (settings.hooks?.[ev] ?? []).flatMap((g: any) => (g.hooks ?? []).map((h: any) => h.command));
+      expect(cmds, `project-level entry for ${ev}`).toContain(HOME_OWNED_CMD);
+    }
+  });
+
+  it("cwd=different-project with global hooks covering all events: dedup still works (skips project hooks)", async () => {
+    const fs = enableFs({ [GLOBAL_SETTINGS]: globalHooksAllEvents() });
+    await makeAdapter(fs).project(plan([activityEntry()]), binding("/other/project"));
+    const otherSettings = "/other/project/.claude/settings.local.json";
+    const cmds = allCommands(JSON.parse(fs._store[otherSettings] ?? "{}"));
+    expect(cmds.filter((c) => c.includes(OWNED_MARKER)), "dedup active for non-home cwd").toEqual([]);
+  });
+});
+
 // Production-altitude reachability: the ACTUAL SHIPPED profile bytes (development/implementer,
 // which selects shared:claude-activity-hooks) must resolve — through the REAL resolveAgentRef ->
 // resolveNodeConfig -> planProjection -> adapter — to a plan entry the adapter enables. Loaded

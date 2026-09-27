@@ -800,7 +800,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // When the global covers all relay events, skip the project-level copy+upsert
     // and strip any existing project-level owned entries so the global takes effect
     // cleanly. Mirrors the statusLine dedup in provisionContextCollector.
-    const globalCoversRelay = deliverable && this.globalSettingsCoversRelayEvents(derivedEvents);
+    //
+    // Skip when cwd IS $HOME — project and global scopes share the same .claude/
+    // directory, so dedup is meaningless and would cause oscillating hook state.
+    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
+    const cwdIsHome = !!home && nodePath.resolve(cwd) === nodePath.resolve(home);
+    const globalCoversRelay = deliverable && !cwdIsHome && this.globalSettingsCoversRelayEvents(derivedEvents);
 
     const settingsExisted = this.fs.exists(settingsPath);
     // Fail closed: never clobber a settings file we cannot parse — preserve its bytes.
