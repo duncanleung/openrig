@@ -2,7 +2,7 @@
 title: OPE to RIG rename
 type: episode
 confidence: high
-last_verified: 2026-09-27
+last_verified: 2026-09-28
 tags: [linear, project-management]
 source: session
 ---
@@ -24,3 +24,18 @@ Three test files had OPE ticket references in comments and describe blocks:
 Committed on `main` at `8bc1392`.
 
 No ADR references needed updating. No source code (only comments) was affected.
+
+## PIPE → RIG consolidation
+
+On 2026-09-28, all 27 issues from the PIPE team ("Agent Pipeline") were moved
+to the RIG team under the "open-rig" project. PIPE-1 through PIPE-27 became
+RIG-6 through RIG-32. The PIPE team was then deleted.
+
+PIPE had two clusters:
+- **Orchestration/autonomy** (Done): authority boundaries, OPORD briefs,
+  autonomous loop, fleet/lead skills, observer messaging, push notifications
+- **Review pipeline** (Backlog): code review improvements (validators, scoring,
+  DSPy optimization, judge routing, finding tracking)
+
+Both are agent workflow work. RIG is the single team for all OpenRig and agent
+infrastructure work.
