@@ -1,7 +1,7 @@
 ---
 id: ADR-0005
 title: Separate universal guidance file for project-level features
-status: proposed
+status: accepted
 date: 2026-09-28
 tags: [architecture, startup, guidance, wiki]
 supersedes: []
@@ -11,7 +11,7 @@ related: [ADR-0003]
 # 0005 — Separate universal guidance file for project-level features
 
 Date: 2026-09-28
-Status: Proposed
+Status: Accepted
 
 ## Context
 
