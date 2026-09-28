@@ -19,7 +19,8 @@ rationale.
 | 0002 | Port review cycle protocol to OpenRig native skills | accepted |
 | 0003 | Mandatory validation gate for orchestrator plans | accepted |
 | 0004 | Native plan-validation skill | accepted |
+| 0005 | Separate universal guidance file for project-level features | proposed |
 
-Next ADR number: **0005**
+Next ADR number: **0006**
 
 Directory: `docs/decisions/`
