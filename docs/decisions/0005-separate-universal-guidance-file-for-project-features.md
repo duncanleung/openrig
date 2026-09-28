@@ -30,9 +30,11 @@ A dual-stack code review (25 agents, PR #4) found two problems:
    get you your identity"). A 2500-byte ceiling enforces this.
 
 2. **First fork divergence in a universal file.** Before this PR,
-   `openrig-start.md` had zero diff from upstream. ADR-0003 established the
-   precedent that fork-specific content belongs in role-scoped files
-   (`role.md`), not universal ones.
+   `openrig-start.md` had zero diff from upstream. ADR-0003 placed its
+   fork-specific content in `role.md` because validation is an orchestrator
+   responsibility — a placement-by-responsibility decision. That precedent
+   supports choosing the file whose responsibility matches the content, not a
+   blanket rule against fork content in universal files.
 
 The review's adversarial challenge found that the obvious alternative —
 routing through `rigSpec.startup.files` — would not be truly universal. There
@@ -48,16 +50,23 @@ delivered alongside `openrig-start.md` in step 7b of
 `buildResolvedStartupFiles`. This file carries project-level features that
 apply to all seats but do not belong in the thin identity overlay.
 
-The two files have distinct scopes:
+A third unconditional surface already exists: `CULTURE-default.md` is
+delivered before the optional rig culture overlay
+(`rigspec-instantiator.ts:324`). Feature instructions belong in a separate
+file from operating principles, so culture is not the right home for wiki
+guidance. The two new files have distinct scopes:
 
 | File | Scope | Contract |
 |------|-------|----------|
 | `openrig-start.md` | Identity resolution: whoami, peer verbs, transcript warning, ask-don't-infer | Thin overlay, 2500-byte ceiling, zero fork divergence |
-| `openrig-project-guidance.md` | Project features delivered to all seats: wiki read, future cross-seat guidance | No byte ceiling, fork-specific content expected |
+| `openrig-project-guidance.md` | Project features delivered to all seats: wiki read, future cross-seat guidance | 4000-byte budget (soft), fork-specific content expected |
 
-Both are unconditional (no resolver gate, no per-rig opt-in). Both use
-`deliveryHint: "guidance_merge"`, `required: false`,
-`appliesOn: ["fresh_start", "restore"]`.
+Both are unconditionally selected (no resolver gate, no per-rig opt-in).
+Both use `deliveryHint: "guidance_merge"`, `required: false`,
+`appliesOn: ["fresh_start", "restore"]`. Because `required` is `false`, a
+delivery failure (e.g., missing asset file) is silently skipped rather than
+blocking startup. Unconditional selection guarantees the file is always
+*attempted*; it does not guarantee the seat receives it.
 
 ## Rejected Alternatives
 
@@ -95,16 +104,19 @@ opt-in) while keeping identity resolution isolated. Future project-level
 features that need all-seat delivery have a clear home without reopening the
 thin-overlay question each time.
 
-ADR-0003 established that fork-specific content in upstream-tracked files is
-acceptable with documented merge-conflict cost. This decision generalizes that
-precedent: fork-specific content goes in `openrig-project-guidance.md` (where
-divergence is expected) rather than `openrig-start.md` (where it is not).
+ADR-0003 placed fork-specific content in the file whose responsibility matched
+the content (orchestrator validation → `role.md`). This decision applies the
+same principle: project-level feature guidance goes in
+`openrig-project-guidance.md` (whose responsibility is project features) rather
+than `openrig-start.md` (whose responsibility is identity resolution).
 
 ## Consequences
 
-- `openrig-project-guidance.md` is a new unconditional delivery point. Future
-  all-seat guidance (e.g., LEARNED.md conventions, cross-seat protocols) has a
-  home without touching `openrig-start.md`.
+- `openrig-project-guidance.md` is a new unconditional selection point with a
+  4000-byte soft budget. Future all-seat guidance (e.g., LEARNED.md conventions,
+  cross-seat protocols) has a home without touching `openrig-start.md`. The
+  budget prevents the same accretion problem the thin-overlay ceiling guards
+  against.
 - The file will diverge from upstream by design. Merge conflicts are expected
   and localized to this file.
 - The instantiator now has two unconditional pushes in step 7 (7 and 7b).

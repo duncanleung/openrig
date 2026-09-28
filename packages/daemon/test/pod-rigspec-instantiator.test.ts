@@ -556,6 +556,35 @@ profiles:
     expect(content).toContain("/wiki-update");
   });
 
+  it("terminal node receives openrig-start.md and openrig-project-guidance.md", async () => {
+    const files = {
+      [`${RIG_ROOT}/agents/impl/agent.yaml`]: agentYaml("impl"),
+    };
+    const termAdapter = mockAdapter("terminal");
+    const { db, inst } = setup(files, { terminal: termAdapter });
+    const spec = makeRigSpec({
+      pods: [
+        {
+          id: "dev", label: "Dev",
+          members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime: "claude-code", cwd: "." }],
+          edges: [],
+        },
+        {
+          id: "infra", label: "Infrastructure",
+          members: [{ id: "server", agentRef: "builtin:terminal", profile: "none", runtime: "terminal", cwd: "." }],
+          edges: [],
+        },
+      ],
+    });
+    const yaml = RigSpecCodec.serialize(spec);
+    const result = await inst.instantiate(yaml, RIG_ROOT);
+    expect(result.ok).toBe(true);
+    const deliveredFiles = (termAdapter.deliverStartup as ReturnType<typeof vi.fn>).mock.calls.flatMap((call) => call[0] as Array<{ path: string }>);
+    expect(deliveredFiles.some((f) => f.path === "openrig-start.md")).toBe(true);
+    expect(deliveredFiles.some((f) => f.path === "openrig-project-guidance.md")).toBe(true);
+    db.close();
+  });
+
   // T4: partial failure — one node startup fails, other succeeds
   it("partial node startup failure does not corrupt other nodes", async () => {
     const files = {
