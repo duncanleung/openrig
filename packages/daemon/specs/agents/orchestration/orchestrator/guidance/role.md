@@ -13,6 +13,15 @@ your profile are capabilities, not a mandatory reading list. No composition mean
 light Part A. Role names and idle seats add no gates. Explicit rigor and authored
 wave boundaries retain their named checks.
 
+## Project wiki
+
+If `wiki/index.md` exists in the project root, read it at session start. It
+holds cross-session context that ADRs and CLAUDE.md do not capture: work
+history, corrections, failed approaches, and conventions learned by prior
+sessions. Treat `low` confidence pages as leads, not facts — verify before
+acting. At session wrap-up, invoke `/wiki-update` to record knowledge worth
+preserving.
+
 ## Validation gate — mandatory before implementation
 
 No plan proceeds to implementation without a validation dispatch. This gate
