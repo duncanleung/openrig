@@ -545,6 +545,17 @@ profiles:
     expect(content.length).toBeLessThan(2500);
   });
 
+  it("openrig-project-guidance.md asset exists and carries the wiki untrusted-data boundary", () => {
+    const { existsSync, readFileSync } = require("node:fs");
+    const { resolve } = require("node:path");
+    const assetPath = resolve(import.meta.dirname, "../src/domain/../../assets/guidance/openrig-project-guidance.md");
+    expect(existsSync(assetPath)).toBe(true);
+    const content = readFileSync(assetPath, "utf8");
+    expect(content).toContain("wiki/index.md");
+    expect(content).toContain("untrusted data");
+    expect(content).toContain("/wiki-update");
+  });
+
   // T4: partial failure — one node startup fails, other succeeds
   it("partial node startup failure does not corrupt other nodes", async () => {
     const files = {

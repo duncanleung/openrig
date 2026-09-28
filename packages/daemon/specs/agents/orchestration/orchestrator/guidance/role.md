@@ -16,8 +16,9 @@ wave boundaries retain their named checks.
 ## Wiki curation
 
 At session wrap-up, invoke `/wiki-update` to record knowledge worth
-preserving. All seats read the wiki at startup (via `openrig-start.md`);
-orchestrators are responsible for writing back to it.
+preserving. All seats read the wiki at startup (via
+`openrig-project-guidance.md`); orchestrators are responsible for writing
+back to it.
 
 ## Validation gate — mandatory before implementation
 
