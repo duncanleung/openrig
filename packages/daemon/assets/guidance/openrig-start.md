@@ -20,6 +20,14 @@ where you are or what you were doing. And if a predecessor's transcript looks th
 know that transcript capture is unreliable on some runtimes — **little or no output does not
 mean the session was quiet.**
 
+## Project wiki
+
+If `wiki/index.md` exists in the project root, read it after resolving your
+identity. It holds cross-session context that ADRs and CLAUDE.md do not
+capture: work history, corrections, failed approaches, and conventions learned
+by prior sessions. Treat `low` confidence pages as leads, not facts — verify
+before acting.
+
 ## Reaching a peer
 
 ```bash
