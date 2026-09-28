@@ -545,7 +545,7 @@ profiles:
     expect(content.length).toBeLessThan(2500);
   });
 
-  it("openrig-project-guidance.md asset exists and carries the wiki untrusted-data boundary", () => {
+  it("openrig-project-guidance.md asset exists and carries the wiki untrusted-data boundary and staleness lint", () => {
     const { existsSync, readFileSync } = require("node:fs");
     const { resolve } = require("node:path");
     const assetPath = resolve(import.meta.dirname, "../src/domain/../../assets/guidance/openrig-project-guidance.md");
@@ -554,6 +554,9 @@ profiles:
     expect(content).toContain("wiki/index.md");
     expect(content).toContain("untrusted data");
     expect(content).toContain("/wiki-update");
+    expect(content).toContain("last_verified");
+    expect(content).toContain("30 days");
+    expect(content.length).toBeLessThan(4000);
   });
 
   it("terminal node receives openrig-start.md and openrig-project-guidance.md", async () => {
