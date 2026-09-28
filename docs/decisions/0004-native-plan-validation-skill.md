@@ -1,7 +1,7 @@
 ---
 id: ADR-0004
 title: Native plan-validation skill to replace fork-specific validation gate
-status: proposed
+status: accepted
 date: 2026-09-27
 tags: [orchestration, validation, skills]
 related: [ADR-0003]
