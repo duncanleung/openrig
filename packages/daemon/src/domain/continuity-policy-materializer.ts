@@ -186,6 +186,7 @@ export function materializeContinuityPolicy(
     const prepareMessage = [
       `Managed compaction preparation threshold crossed for ${input.targetSession}.`,
       "Deposit continuity context now with rig context recap-write before the enforcer reaches its compaction threshold; this nudge prepares and never compacts.",
+      "If wiki/ exists in the project root, invoke /wiki-update to preserve session knowledge before compaction.",
       CONTINUITY_POLICY_DOC,
     ].join("\n\n");
     return {
@@ -207,7 +208,7 @@ export function materializeContinuityPolicy(
   }
   const cutoverThreshold = thresholdBytes(CUTOVER_TARGET_TOKENS, density);
   const identity = seatIdentity(input);
-  const prepareMessage = `${renderRung1IncumbentNotice(identity)}\n\n${CONTINUITY_POLICY_DOC}`;
+  const prepareMessage = `${renderRung1IncumbentNotice(identity)}\n\nIf wiki/ exists in the project root, invoke /wiki-update to preserve session knowledge before handover.\n\n${CONTINUITY_POLICY_DOC}`;
   const cutoverBaton = renderRung2Baton(identity);
   const cutoverMessage = [
     `Continuity cutover threshold crossed for ${input.targetSession}.`,

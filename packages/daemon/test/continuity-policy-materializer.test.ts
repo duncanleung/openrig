@@ -373,6 +373,23 @@ describe("continuity policy materializer (S20 P4)", () => {
     expect(materializeContinuityPolicy({ ...CLAUDE_SEAT, compactionStrategy: "managed-compaction" }).jobs).toHaveLength(1);
   });
 
+  it("managed-compaction prepare message includes wiki-update directive", () => {
+    const plan = materializeContinuityPolicy({ ...CLAUDE_SEAT, compactionStrategy: "managed-compaction" });
+    expect(plan.jobs).toHaveLength(1);
+    expect(plan.jobs[0]!.specYaml).toContain("wiki-update");
+  });
+
+  it("apprentice-handover prepare message includes wiki-update directive", () => {
+    const plan = materializeContinuityPolicy({
+      ...CLAUDE_SEAT,
+      compactionStrategy: "apprentice-handover",
+      mechanic: "mechanic@rig",
+    });
+    const prepareJob = plan.jobs.find((j) => j.key === "prepare");
+    expect(prepareJob).toBeDefined();
+    expect(prepareJob!.specYaml).toContain("wiki-update");
+  });
+
   it("adds registration glue only, never a second timer, scheduler, or engine", () => {
     const source = readFileSync(
       resolve(import.meta.dirname, "../src/domain/continuity-policy-materializer.ts"),
