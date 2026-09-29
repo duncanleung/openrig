@@ -11,20 +11,23 @@ Signals measured:
   - surface_activity:     read/write counts per surface per session
   - skill_invocations:    memory-related skill calls per session
   - read_write_ratio:     per-surface ratio (consumed vs. produced)
+  - delivery_manifests:   event-based delivery records from the daemon events table
 
 Usage:
-  python3 scripts/analyze-memory-usage.py [--project <project-dir>] [--json] [--sessions N]
+  python3 scripts/analyze-memory-usage.py [--project <project-dir>] [--json] [--sessions N] [--db <path>]
 
   --project   Claude project transcript directory
               (default: ~/.claude/projects/-Users-*-openrig/)
   --json      Output raw JSON report instead of human-readable summary
   --sessions  Limit to the N most recent sessions (default: all)
+  --db        OpenRig SQLite database path (default: ~/.openrig/openrig.sqlite)
 """
 
 import argparse
 import glob
 import json
 import os
+import sqlite3
 import sys
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -341,6 +344,27 @@ def print_summary(report):
             print(f"  {skill:<30} {count:>3} invocations")
         print()
 
+    # Delivery manifests (event-based, from daemon)
+    dm = report.get("delivery_manifests", {})
+    if dm.get("available"):
+        print("  Delivery Manifests (daemon events)")
+        print("  " + "-" * 58)
+        if dm["manifest_count"] == 0:
+            print(f"  No manifests yet ({dm['total_startups']} startups recorded)")
+            print(f"  {dm.get('note', 'restart daemon to begin collecting')}")
+        else:
+            rate = dm.get("delivery_rate", 0)
+            print(f"  Manifests:   {dm['manifest_count']}/{dm['total_startups']} startups "
+                  f"({rate:.0%} coverage)")
+            if dm.get("surface_totals"):
+                print(f"  Surfaces delivered:")
+                for surface, count in sorted(dm["surface_totals"].items(), key=lambda x: -x[1]):
+                    print(f"    {surface:<20} {count:>4} files")
+        print()
+    elif dm.get("reason"):
+        print(f"  Delivery Manifests: unavailable ({dm['reason']})")
+        print()
+
     # Per-session detail (top 5 by interaction count)
     sessions = sorted(
         report["sessions"],
@@ -355,6 +379,71 @@ def print_summary(report):
               f"tools={s['total_tool_uses']}  "
               f"surfaces=[{', '.join(surfaces_touched[:4])}]")
     print()
+
+
+def query_delivery_manifests(db_path):
+    """Query delivery manifest events from the OpenRig events table."""
+    if not os.path.exists(db_path):
+        return {"available": False, "reason": f"database not found: {db_path}"}
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+
+        rows = conn.execute(
+            "SELECT node_id, payload, created_at FROM events "
+            "WHERE type = 'node.startup_delivery_manifest' "
+            "ORDER BY created_at DESC"
+        ).fetchall()
+
+        if not rows:
+            total_startups = conn.execute(
+                "SELECT count(*) FROM events WHERE type = 'node.startup_ready'"
+            ).fetchone()[0]
+            conn.close()
+            return {
+                "available": True,
+                "manifest_count": 0,
+                "total_startups": total_startups,
+                "note": "no manifests yet — daemon needs restart with new code",
+                "manifests": [],
+            }
+
+        manifests = []
+        for row in rows:
+            try:
+                payload = json.loads(row["payload"])
+                manifests.append({
+                    "node_id": row["node_id"],
+                    "created_at": row["created_at"],
+                    "session_name": payload.get("sessionName", ""),
+                    "summary": payload.get("summary", {}),
+                    "file_count": len(payload.get("deliveredFiles", [])),
+                    "surfaces": list(payload.get("summary", {}).get("surfaceCounts", {}).keys()),
+                })
+            except (json.JSONDecodeError, KeyError):
+                continue
+
+        total_startups = conn.execute(
+            "SELECT count(*) FROM events WHERE type = 'node.startup_ready'"
+        ).fetchone()[0]
+        conn.close()
+
+        surface_totals = Counter()
+        for m in manifests:
+            for surface, count in m.get("summary", {}).get("surfaceCounts", {}).items():
+                surface_totals[surface] += count
+
+        return {
+            "available": True,
+            "manifest_count": len(manifests),
+            "total_startups": total_startups,
+            "delivery_rate": round(len(manifests) / max(total_startups, 1), 3),
+            "surface_totals": dict(surface_totals.most_common()),
+            "manifests": manifests,
+        }
+    except sqlite3.Error as e:
+        return {"available": False, "reason": str(e)}
 
 
 def find_project_dir(hint=None):
@@ -375,6 +464,8 @@ def main():
     parser.add_argument("--project", help="Claude project transcript directory")
     parser.add_argument("--json", action="store_true", help="Output raw JSON")
     parser.add_argument("--sessions", type=int, default=0, help="Limit to N most recent sessions (0=all)")
+    parser.add_argument("--db", default=os.path.expanduser("~/.openrig/openrig.sqlite"),
+                        help="OpenRig SQLite database path")
     args = parser.parse_args()
 
     project_dir = find_project_dir(args.project)
@@ -398,15 +489,19 @@ def main():
         except Exception as e:
             print(f"  skip {os.path.basename(f)}: {e}", file=sys.stderr)
 
+    delivery_data = query_delivery_manifests(args.db)
+
     report = {
         "meta": {
             "project": os.path.basename(project_dir),
             "project_dir": project_dir,
             "analyzed_at": datetime.now(timezone.utc).isoformat(),
             "transcript_count": len(jsonl_files),
+            "db_path": args.db,
         },
         "sessions": sessions,
         "aggregate": aggregate(sessions),
+        "delivery_manifests": delivery_data,
     }
 
     if args.json:
