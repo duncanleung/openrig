@@ -18,6 +18,10 @@ import type { AppliedLaunchObservation } from "./permission-drift.js";
 
 // -- Types --
 
+// The non-"auto" members of ResolvedStartupFile["deliveryHint"] — what routing
+// and the delivery manifest actually key off of once "auto" has been resolved.
+type ConcreteDeliveryHint = ReturnType<typeof resolveConcreteHint>;
+
 export interface StartupInput {
   rigId: string;
   nodeId: string;
@@ -183,16 +187,28 @@ export class StartupOrchestrator {
     const applicableFiles = sourceFiles.filter((f) => f.appliesOn.includes(context));
     const preLaunchFiles: ResolvedStartupFile[] = [];
     let postLaunchFiles: ResolvedStartupFile[] = [];
+    // Concrete hint per file, keyed by identity. "auto" is resolved exactly once
+    // here (routing decision); every later manifest/classification read must go
+    // through this map instead of re-reading f.deliveryHint, which stays "auto"
+    // for pre-NS-T05 persisted files and would silently defeat
+    // classifyDeliveredSurface's skill_install/guidance_merge fast paths.
+    const resolvedHints = new Map<ResolvedStartupFile, ConcreteDeliveryHint>();
     for (const f of applicableFiles) {
       const hint = f.deliveryHint === "auto"
         ? resolveConcreteHint(f.path, this.safeReadFile(f.absolutePath))
         : f.deliveryHint;
+      resolvedHints.set(f, hint);
       if (hint === "send_text") {
         postLaunchFiles.push(f);
       } else {
         preLaunchFiles.push(f);
       }
     }
+    // Defensive only: every file reaching a manifest site was routed through the
+    // partition loop above, so this always hits the map. The fallback just keeps
+    // us from ever hard-failing startup over an observability read.
+    const deliveryHintOf = (f: ResolvedStartupFile): ConcreteDeliveryHint =>
+      resolvedHints.get(f) ?? (f.deliveryHint === "auto" ? "send_text" : f.deliveryHint);
 
     // Delivery manifest accumulator — tracks what was delivered for observability.
     const deliveredFiles: Array<{ path: string; deliveryHint: string; surface: string; phase: "pre_launch" | "post_launch"; contentHash: string }> = [];
@@ -207,11 +223,15 @@ export class StartupOrchestrator {
         }
         return this.fail(input, "failed", errors);
       }
+      // NOTE: iterates the input list, not the delivered set — the adapter
+      // returns only a count, so silently-skipped files (e.g. rig-role merge
+      // that returns false) are over-reported here. Acceptable for v1; a
+      // future iteration can plumb a delivered-files list from the adapter.
       for (const f of preLaunchFiles) {
         deliveredFiles.push({
           path: f.path,
-          deliveryHint: f.deliveryHint,
-          surface: classifyDeliveredSurface(f.path, f.deliveryHint),
+          deliveryHint: deliveryHintOf(f),
+          surface: classifyDeliveredSurface(f.path, deliveryHintOf(f)),
           phase: "pre_launch",
           contentHash: quickHash(this.safeReadFile(f.absolutePath)),
         });
@@ -366,6 +386,16 @@ export class StartupOrchestrator {
         return this.fail(input, "failed", errors);
       }
       postLaunchFiles = initialPrompt.remainingFiles;
+      if (initialPrompt.bundledFile) {
+        const f = initialPrompt.bundledFile;
+        deliveredFiles.push({
+          path: f.path,
+          deliveryHint: deliveryHintOf(f),
+          surface: classifyDeliveredSurface(f.path, deliveryHintOf(f)),
+          phase: "post_launch",
+          contentHash: quickHash(this.safeReadFile(f.absolutePath)),
+        });
+      }
     } else if (challenge) {
       challengeOnlyPrompt = challenge.promptBlock;
     }
@@ -398,6 +428,16 @@ export class StartupOrchestrator {
           return this.fail(input, "failed", errors);
         }
         postLaunchFiles = preload.remainingFiles;
+        if (preload.bundledFile) {
+          const f = preload.bundledFile;
+          deliveredFiles.push({
+            path: f.path,
+            deliveryHint: deliveryHintOf(f),
+            surface: classifyDeliveredSurface(f.path, deliveryHintOf(f)),
+            phase: "post_launch",
+            contentHash: quickHash(this.safeReadFile(f.absolutePath)),
+          });
+        }
         for (const a of preloadActions) consumedActions.add(a);
       }
     }
@@ -415,8 +455,8 @@ export class StartupOrchestrator {
         for (const f of postLaunchFiles) {
           deliveredFiles.push({
             path: f.path,
-            deliveryHint: f.deliveryHint,
-            surface: classifyDeliveredSurface(f.path, f.deliveryHint),
+            deliveryHint: deliveryHintOf(f),
+            surface: classifyDeliveredSurface(f.path, deliveryHintOf(f)),
             phase: "post_launch",
             contentHash: quickHash(this.safeReadFile(f.absolutePath)),
           });
@@ -460,24 +500,26 @@ export class StartupOrchestrator {
       }
     }
 
-    // 8. Emit delivery manifest, then mark ready
+    // 8. Best-effort delivery manifest — does NOT fail an otherwise-good startup.
     if (deliveredFiles.length > 0) {
-      const surfaceCounts: Record<string, number> = {};
-      for (const f of deliveredFiles) {
-        surfaceCounts[f.surface] = (surfaceCounts[f.surface] ?? 0) + 1;
-      }
-      this.eventBus.emit({
-        type: "node.startup_delivery_manifest",
-        rigId: input.rigId,
-        nodeId: input.nodeId,
-        sessionName: input.sessionName ?? "",
-        deliveredFiles,
-        summary: {
-          preLaunchCount: deliveredFiles.filter(f => f.phase === "pre_launch").length,
-          postLaunchCount: deliveredFiles.filter(f => f.phase === "post_launch").length,
-          surfaceCounts,
-        },
-      });
+      try {
+        const surfaceCounts: Record<string, number> = {};
+        for (const f of deliveredFiles) {
+          surfaceCounts[f.surface] = (surfaceCounts[f.surface] ?? 0) + 1;
+        }
+        this.eventBus.emit({
+          type: "node.startup_delivery_manifest",
+          rigId: input.rigId,
+          nodeId: input.nodeId,
+          sessionName: input.sessionName ?? input.binding.tmuxSession ?? "",
+          deliveredFiles,
+          summary: {
+            preLaunchCount: deliveredFiles.filter(f => f.phase === "pre_launch").length,
+            postLaunchCount: deliveredFiles.filter(f => f.phase === "post_launch").length,
+            surfaceCounts,
+          },
+        });
+      } catch { /* observability write — swallow to avoid blocking startup */ }
     }
     this.sessionRegistry.updateStartupStatus(input.sessionId, "ready", new Date().toISOString());
     this.eventBus.emit({ type: "node.startup_ready", rigId: input.rigId, nodeId: input.nodeId });
@@ -606,7 +648,7 @@ export class StartupOrchestrator {
     postLaunchFiles: ResolvedStartupFile[],
     challengeBlock: string | null,
     includeDurableObligations = false,
-  ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
+  ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[]; bundledFile: ResolvedStartupFile | null } | { ok: false; error: string }> {
     if (!binding.tmuxSession) {
       return { ok: false, error: "No tmux session for the initial session identity prompt" };
     }
@@ -614,6 +656,7 @@ export class StartupOrchestrator {
     const firstSendTextIndex = postLaunchFiles.findIndex((file) => file.deliveryHint === "send_text");
     let prompt = identityAction.value;
     let remainingFiles = postLaunchFiles;
+    let bundledFile: ResolvedStartupFile | null = null;
 
     if (firstSendTextIndex !== -1) {
       const firstSendText = postLaunchFiles[firstSendTextIndex]!;
@@ -622,6 +665,7 @@ export class StartupOrchestrator {
         if (content.length > 0) {
           prompt = `${identityAction.value}\n\n${content}`;
           remainingFiles = postLaunchFiles.filter((_, index) => index !== firstSendTextIndex);
+          bundledFile = firstSendText;
         }
       } catch {
         // Fall back to a standalone identity prompt and let the adapter handle
@@ -642,7 +686,7 @@ export class StartupOrchestrator {
       return { ok: false, error: `Initial session identity prompt failed: ${sendError}` };
     }
 
-    return { ok: true, remainingFiles };
+    return { ok: true, remainingFiles, bundledFile };
   }
 
   /**
@@ -657,13 +701,14 @@ export class StartupOrchestrator {
     binding: NodeBinding,
     preloadActions: StartupAction[],
     postLaunchFiles: ResolvedStartupFile[],
-  ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
+  ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[]; bundledFile: ResolvedStartupFile | null } | { ok: false; error: string }> {
     if (!binding.tmuxSession) {
       return { ok: false, error: "No tmux session for the restore preload prompt" };
     }
 
     const parts = preloadActions.map((a) => a.value);
     let remainingFiles = postLaunchFiles;
+    let bundledFile: ResolvedStartupFile | null = null;
 
     const firstSendTextIndex = postLaunchFiles.findIndex((file) => file.deliveryHint === "send_text");
     if (firstSendTextIndex !== -1) {
@@ -673,6 +718,7 @@ export class StartupOrchestrator {
         if (content.length > 0) {
           parts.push(content);
           remainingFiles = postLaunchFiles.filter((_, index) => index !== firstSendTextIndex);
+          bundledFile = firstSendText;
         }
       } catch {
         // Leave role.md in postLaunchFiles for normal delivery; the preload
@@ -685,7 +731,7 @@ export class StartupOrchestrator {
       return { ok: false, error: `Restore preload prompt failed: ${sendError}` };
     }
 
-    return { ok: true, remainingFiles };
+    return { ok: true, remainingFiles, bundledFile };
   }
 
   private async sendInteractiveText(tmuxSession: string, text: string): Promise<string | null> {
@@ -714,6 +760,24 @@ function quickHash(content: string): string {
   return createHash("sha256").update(content).digest("hex").slice(0, 16);
 }
 
+// Classifies a *delivered file* into a daemon-side surface label for the
+// node.startup_delivery_manifest event. This taxonomy is independently
+// maintained from MEMORY_SURFACES in scripts/analyze-memory-usage.py, which
+// classifies *transcript tool-use activity* (a different signal) into a
+// finer-grained set of labels. They are related but not identical — keep
+// this mapping in mind when reading the two side-by-side in that script's
+// report, and update both if you rename or split a surface here:
+//   role            -> role-guidance
+//   skill           -> (not tracked by analyze-memory-usage.py)
+//   wiki            -> wiki
+//   adr             -> adr
+//   restore-packet  -> restore-packet
+//   context-pack    -> context-pack
+//   guidance        -> project-guidance + role-guidance (split there)
+//   other           -> (not tracked)
+// analyze-memory-usage.py also tracks auto-memory, seat-lessons,
+// work-observations, queue, and peer-messages, none of which apply to files
+// this daemon delivers at startup.
 const SURFACE_PATTERNS: Array<[string, RegExp]> = [
   ["role", /role\.md|agent_spec|guidance\/role/i],
   ["skill", /skills?\//i],

@@ -33,6 +33,15 @@ from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Classifies *transcript tool-use activity* into a surface label, for the
+# "Surface Activity" section of the report. This taxonomy is independently
+# maintained from SURFACE_PATTERNS/classifyDeliveredSurface in
+# packages/daemon/src/domain/startup-orchestrator.ts, which classifies
+# *delivered files* (a different signal, read from the daemon's
+# node.startup_delivery_manifest surfaceCounts payload) for the "Delivery
+# Manifests" section printed alongside it. The label sets don't align 1:1 —
+# see the mapping comment above SURFACE_PATTERNS in that file — so update
+# both if you rename or split a surface here.
 MEMORY_SURFACES = {
     "auto-memory": {
         "patterns": ["memory/", "MEMORY.md"],
@@ -306,6 +315,10 @@ def print_summary(report):
     meta = report["meta"]
     agg = report["aggregate"]
 
+    if not agg:
+        print("No sessions parsed — nothing to report.")
+        return
+
     print("=" * 60)
     print("  Memory Surface Usage Report")
     print("=" * 60)
@@ -316,10 +329,11 @@ def print_summary(report):
 
     print("  Coverage")
     print("  " + "-" * 40)
+    n = agg["session_count"]
     obs = agg["observation_coverage"]
     del_ = agg["delivery_coverage"]
-    print(f"  Observation: {obs:.0%}  ({int(obs * agg['session_count'])}/{agg['session_count']} sessions touch memory)")
-    print(f"  Delivery:    {del_:.0%}  ({int(del_ * agg['session_count'])}/{agg['session_count']} sessions receive startup delivery)")
+    print(f"  Observation: {obs:.0%}  ({round(obs * n)}/{n} sessions touch memory)")
+    print(f"  Delivery:    {del_:.0%}  ({round(del_ * n)}/{n} sessions receive startup delivery)")
     print()
 
     print("  Surface Activity")
