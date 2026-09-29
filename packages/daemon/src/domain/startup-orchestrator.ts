@@ -715,13 +715,13 @@ function quickHash(content: string): string {
 }
 
 const SURFACE_PATTERNS: Array<[string, RegExp]> = [
-  ["guidance", /guidance|CLAUDE\.md|openrig-start|openrig-project-guidance/i],
   ["role", /role\.md|agent_spec|guidance\/role/i],
   ["skill", /skills?\//i],
   ["wiki", /wiki\//i],
   ["adr", /decisions?\//i],
   ["restore-packet", /restore/i],
   ["context-pack", /context-pack/i],
+  ["guidance", /guidance|CLAUDE\.md|openrig-start|openrig-project-guidance/i],
 ];
 
 function classifyDeliveredSurface(path: string, hint: string): string {

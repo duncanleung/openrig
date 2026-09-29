@@ -932,6 +932,33 @@ describe("StartupOrchestrator", () => {
     expect(events.indexOf("node.startup_pending")).toBeLessThan(events.indexOf("node.startup_ready"));
   });
 
+  it("emits node.startup_delivery_manifest with classified files on fresh start", async () => {
+    const seed = seedSession();
+    const events: Array<{ type: string; [k: string]: unknown }> = [];
+    eventBus.subscribe((e) => events.push(e));
+
+    const files: ResolvedStartupFile[] = [
+      { path: "guidance/role.md", absolutePath: "/tmp/role.md", ownerRoot: ".", deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start"] },
+      { path: "skills/my-skill/SKILL.md", absolutePath: "/tmp/skill.md", ownerRoot: ".", deliveryHint: "skill_install", required: false, appliesOn: ["fresh_start"] },
+    ];
+
+    const orch = createOrchestrator({ readFile: () => "test content" });
+    await orch.startNode(makeInput(seed, { resolvedStartupFiles: files }));
+
+    const manifest = events.find((e) => e.type === "node.startup_delivery_manifest");
+    expect(manifest).toBeDefined();
+    expect(manifest!.deliveredFiles).toHaveLength(2);
+
+    const delivered = manifest!.deliveredFiles as Array<{ path: string; surface: string; phase: string; contentHash: string }>;
+    expect(delivered[0]!.phase).toBe("pre_launch");
+    expect(delivered[0]!.contentHash).toBeTruthy();
+    expect(delivered[1]!.surface).toBe("skill");
+
+    const summary = manifest!.summary as { preLaunchCount: number; postLaunchCount: number; surfaceCounts: Record<string, number> };
+    expect(summary.preLaunchCount).toBe(2);
+    expect(summary.postLaunchCount).toBe(0);
+  });
+
   // NS-T04: resolveConcreteHint shared resolver
   it("resolveConcreteHint: SKILL.md path → skill_install", () => {
     expect(resolveConcreteHint("skills/my-skill/SKILL.md", "some content")).toBe("skill_install");
