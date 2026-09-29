@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
@@ -193,6 +194,9 @@ export class StartupOrchestrator {
       }
     }
 
+    // Delivery manifest accumulator — tracks what was delivered for observability.
+    const deliveredFiles: Array<{ path: string; deliveryHint: string; surface: string; phase: "pre_launch" | "post_launch"; contentHash: string }> = [];
+
     // 4. Deliver pre-launch files (filesystem: guidance_merge, skill_install)
     // Always call even with empty list so adapters can provision runtime-specific config (e.g. context collectors)
     try {
@@ -202,6 +206,15 @@ export class StartupOrchestrator {
           errors.push(`Pre-launch file delivery failed: ${f.path}: ${f.error}`);
         }
         return this.fail(input, "failed", errors);
+      }
+      for (const f of preLaunchFiles) {
+        deliveredFiles.push({
+          path: f.path,
+          deliveryHint: f.deliveryHint,
+          surface: classifyDeliveredSurface(f.path, f.deliveryHint),
+          phase: "pre_launch",
+          contentHash: quickHash(this.safeReadFile(f.absolutePath)),
+        });
       }
     } catch (err) {
       errors.push(`Pre-launch delivery error: ${(err as Error).message}`);
@@ -399,6 +412,15 @@ export class StartupOrchestrator {
           }
           return this.fail(input, "failed", errors);
         }
+        for (const f of postLaunchFiles) {
+          deliveredFiles.push({
+            path: f.path,
+            deliveryHint: f.deliveryHint,
+            surface: classifyDeliveredSurface(f.path, f.deliveryHint),
+            phase: "post_launch",
+            contentHash: quickHash(this.safeReadFile(f.absolutePath)),
+          });
+        }
       } catch (err) {
         errors.push(`Post-launch delivery error: ${(err as Error).message}`);
         return this.fail(input, "failed", errors);
@@ -438,7 +460,25 @@ export class StartupOrchestrator {
       }
     }
 
-    // 8. Mark ready
+    // 8. Emit delivery manifest, then mark ready
+    if (deliveredFiles.length > 0) {
+      const surfaceCounts: Record<string, number> = {};
+      for (const f of deliveredFiles) {
+        surfaceCounts[f.surface] = (surfaceCounts[f.surface] ?? 0) + 1;
+      }
+      this.eventBus.emit({
+        type: "node.startup_delivery_manifest",
+        rigId: input.rigId,
+        nodeId: input.nodeId,
+        sessionName: input.sessionName ?? "",
+        deliveredFiles,
+        summary: {
+          preLaunchCount: deliveredFiles.filter(f => f.phase === "pre_launch").length,
+          postLaunchCount: deliveredFiles.filter(f => f.phase === "post_launch").length,
+          surfaceCounts,
+        },
+      });
+    }
     this.sessionRegistry.updateStartupStatus(input.sessionId, "ready", new Date().toISOString());
     this.eventBus.emit({ type: "node.startup_ready", rigId: input.rigId, nodeId: input.nodeId });
 
@@ -667,4 +707,28 @@ export class StartupOrchestrator {
 function isSessionIdentityAction(action: StartupAction): boolean {
   if (action.builtin === "session_identity") return true;
   return action.type === "send_text" && action.value.startsWith("OpenRig session identity:");
+}
+
+function quickHash(content: string): string {
+  if (!content) return "";
+  return createHash("sha256").update(content).digest("hex").slice(0, 16);
+}
+
+const SURFACE_PATTERNS: Array<[string, RegExp]> = [
+  ["guidance", /guidance|CLAUDE\.md|openrig-start|openrig-project-guidance/i],
+  ["role", /role\.md|agent_spec|guidance\/role/i],
+  ["skill", /skills?\//i],
+  ["wiki", /wiki\//i],
+  ["adr", /decisions?\//i],
+  ["restore-packet", /restore/i],
+  ["context-pack", /context-pack/i],
+];
+
+function classifyDeliveredSurface(path: string, hint: string): string {
+  if (hint === "skill_install") return "skill";
+  if (hint === "guidance_merge") return "guidance";
+  for (const [surface, pattern] of SURFACE_PATTERNS) {
+    if (pattern.test(path)) return surface;
+  }
+  return "other";
 }

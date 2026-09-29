@@ -213,6 +213,24 @@ export type RigEvent =
   | { type: "node.startup_pending"; rigId: string; nodeId: string; startupProof?: StartupProofSelection }
   | { type: "node.startup_ready"; rigId: string; nodeId: string }
   | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean }
+  | {
+      type: "node.startup_delivery_manifest";
+      rigId: string;
+      nodeId: string;
+      sessionName: string;
+      deliveredFiles: Array<{
+        path: string;
+        deliveryHint: string;
+        surface: string;
+        phase: "pre_launch" | "post_launch";
+        contentHash: string;
+      }>;
+      summary: {
+        preLaunchCount: number;
+        postLaunchCount: number;
+        surfaceCounts: Record<string, number>;
+      };
+    }
   // OPR.0.4.3.06 — startup proof (challenge-verified orientation). Append-only.
   // `node.startup_challenged` freezes this launch's challenge ground truth
   // (challengeId + contractHash; the expected answer is recomputed, never
