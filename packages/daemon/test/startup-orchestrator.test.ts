@@ -1237,4 +1237,143 @@ describe("StartupOrchestrator", () => {
     expect(deliveredFiles).toContain("guidance/role.md");
     expect(deliveredFiles).toContain("openrig-start.md");
   });
+
+  // -- RIG-36 item 1: Integration tests for delivery manifest observation pipeline --
+
+  it("persists delivery manifest to the events table and is queryable by SQL", async () => {
+    const seed = seedSession();
+    const files: ResolvedStartupFile[] = [
+      { path: "guidance/role.md", absolutePath: "/tmp/role.md", ownerRoot: ".", deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start"] },
+      { path: "skills/deploy/SKILL.md", absolutePath: "/tmp/skill.md", ownerRoot: ".", deliveryHint: "skill_install", required: false, appliesOn: ["fresh_start"] },
+      { path: "wiki/conventions.md", absolutePath: "/tmp/wiki.md", ownerRoot: ".", deliveryHint: "send_text", required: false, appliesOn: ["fresh_start"] },
+    ];
+
+    const orch = createOrchestrator({ readFile: () => "test content" });
+    await orch.startNode(makeInput(seed, { resolvedStartupFiles: files }));
+
+    const row = db.prepare(
+      "SELECT payload, node_id, type FROM events WHERE type = 'node.startup_delivery_manifest'"
+    ).get() as { payload: string; node_id: string; type: string } | undefined;
+
+    expect(row).toBeDefined();
+    expect(row!.node_id).toBe(seed.nodeId);
+    expect(row!.type).toBe("node.startup_delivery_manifest");
+
+    const payload = JSON.parse(row!.payload);
+    expect(payload.rigId).toBe(seed.rigId);
+    expect(payload.nodeId).toBe(seed.nodeId);
+    expect(payload.deliveredFiles).toHaveLength(3);
+    expect(payload.summary.preLaunchCount).toBe(2);
+    expect(payload.summary.postLaunchCount).toBe(1);
+    expect(payload.summary.surfaceCounts).toEqual(
+      expect.objectContaining({ guidance: 1, skill: 1, wiki: 1 })
+    );
+  });
+
+  it("manifest schema contract: every deliveredFile has required fields with correct types", async () => {
+    const seed = seedSession();
+    const files: ResolvedStartupFile[] = [
+      { path: "guidance/role.md", absolutePath: "/tmp/role.md", ownerRoot: ".", deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start"] },
+      { path: "decisions/0001-some-adr.md", absolutePath: "/tmp/adr.md", ownerRoot: ".", deliveryHint: "send_text", required: false, appliesOn: ["fresh_start"] },
+    ];
+
+    const orch = createOrchestrator({ readFile: () => "adr content" });
+    await orch.startNode(makeInput(seed, { resolvedStartupFiles: files }));
+
+    const row = db.prepare(
+      "SELECT payload FROM events WHERE type = 'node.startup_delivery_manifest'"
+    ).get() as { payload: string };
+    const payload = JSON.parse(row.payload);
+
+    for (const file of payload.deliveredFiles) {
+      expect(typeof file.path).toBe("string");
+      expect(typeof file.deliveryHint).toBe("string");
+      expect(typeof file.surface).toBe("string");
+      expect(["pre_launch", "post_launch"]).toContain(file.phase);
+      expect(typeof file.contentHash).toBe("string");
+      expect(file.contentHash.length).toBeGreaterThan(0);
+      expect(file.deliveryHint).not.toBe("auto");
+    }
+
+    expect(typeof payload.summary.preLaunchCount).toBe("number");
+    expect(typeof payload.summary.postLaunchCount).toBe("number");
+    expect(typeof payload.summary.surfaceCounts).toBe("object");
+  });
+
+  it("manifest is not emitted when no files are delivered (restore path)", async () => {
+    const seed = seedSession();
+    const events: Array<{ type: string }> = [];
+    eventBus.subscribe((e) => events.push(e));
+
+    const orch = createOrchestrator();
+    await orch.startNode(makeInput(seed, { resolvedStartupFiles: [], isRestore: true }));
+
+    const manifest = events.find((e) => e.type === "node.startup_delivery_manifest");
+    expect(manifest).toBeUndefined();
+
+    const dbRow = db.prepare(
+      "SELECT count(*) as cnt FROM events WHERE type = 'node.startup_delivery_manifest'"
+    ).get() as { cnt: number };
+    expect(dbRow.cnt).toBe(0);
+  });
+
+  it("manifest surface classifier covers all SURFACE_PATTERNS entries", async () => {
+    const seed = seedSession();
+    const files: ResolvedStartupFile[] = [
+      { path: "guidance/role.md", absolutePath: "/tmp/a", ownerRoot: ".", deliveryHint: "send_text", required: false, appliesOn: ["fresh_start"] },
+      { path: "skills/deploy/SKILL.md", absolutePath: "/tmp/b", ownerRoot: ".", deliveryHint: "skill_install", required: false, appliesOn: ["fresh_start"] },
+      { path: "wiki/patterns.md", absolutePath: "/tmp/c", ownerRoot: ".", deliveryHint: "send_text", required: false, appliesOn: ["fresh_start"] },
+      { path: "decisions/0001-foo.md", absolutePath: "/tmp/d", ownerRoot: ".", deliveryHint: "send_text", required: false, appliesOn: ["fresh_start"] },
+      { path: "restore/packet.md", absolutePath: "/tmp/e", ownerRoot: ".", deliveryHint: "send_text", required: false, appliesOn: ["fresh_start"] },
+      { path: "context-pack/world.md", absolutePath: "/tmp/f", ownerRoot: ".", deliveryHint: "send_text", required: false, appliesOn: ["fresh_start"] },
+      { path: "CLAUDE.md", absolutePath: "/tmp/g", ownerRoot: ".", deliveryHint: "send_text", required: false, appliesOn: ["fresh_start"] },
+      { path: "config.yaml", absolutePath: "/tmp/h", ownerRoot: ".", deliveryHint: "send_text", required: false, appliesOn: ["fresh_start"] },
+    ];
+
+    const orch = createOrchestrator({ readFile: () => "content" });
+    await orch.startNode(makeInput(seed, { resolvedStartupFiles: files }));
+
+    const row = db.prepare(
+      "SELECT payload FROM events WHERE type = 'node.startup_delivery_manifest'"
+    ).get() as { payload: string };
+    const payload = JSON.parse(row.payload);
+    const surfaces = payload.deliveredFiles.map((f: { surface: string }) => f.surface);
+
+    expect(surfaces).toContain("role");
+    expect(surfaces).toContain("skill");
+    expect(surfaces).toContain("wiki");
+    expect(surfaces).toContain("adr");
+    expect(surfaces).toContain("restore-packet");
+    expect(surfaces).toContain("context-pack");
+    expect(surfaces).toContain("guidance");
+    expect(surfaces).toContain("other");
+  });
+
+  it("manifest summary counts are consistent with deliveredFiles array", async () => {
+    const seed = seedSession();
+    const files: ResolvedStartupFile[] = [
+      { path: "guidance/role.md", absolutePath: "/tmp/role.md", ownerRoot: ".", deliveryHint: "guidance_merge", required: false, appliesOn: ["fresh_start"] },
+      { path: "skills/test/SKILL.md", absolutePath: "/tmp/skill.md", ownerRoot: ".", deliveryHint: "skill_install", required: false, appliesOn: ["fresh_start"] },
+    ];
+
+    const orch = createOrchestrator({ readFile: () => "content" });
+    await orch.startNode(makeInput(seed, { resolvedStartupFiles: files }));
+
+    const row = db.prepare(
+      "SELECT payload FROM events WHERE type = 'node.startup_delivery_manifest'"
+    ).get() as { payload: string };
+    const payload = JSON.parse(row.payload);
+
+    const preLaunch = payload.deliveredFiles.filter((f: { phase: string }) => f.phase === "pre_launch").length;
+    const postLaunch = payload.deliveredFiles.filter((f: { phase: string }) => f.phase === "post_launch").length;
+    expect(payload.summary.preLaunchCount).toBe(preLaunch);
+    expect(payload.summary.postLaunchCount).toBe(postLaunch);
+    expect(preLaunch + postLaunch).toBe(payload.deliveredFiles.length);
+
+    let surfaceTotal = 0;
+    for (const count of Object.values(payload.summary.surfaceCounts)) {
+      surfaceTotal += count as number;
+    }
+    expect(surfaceTotal).toBe(payload.deliveredFiles.length);
+  });
 });
