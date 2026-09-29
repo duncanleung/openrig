@@ -102,10 +102,12 @@ When updating the wiki, scan for:
 |-----------|--------------|
 | Architectural decisions | `docs/decisions/` (ADRs) |
 | Project conventions loaded at session start | `CLAUDE.md` |
-| User preferences and corrections | Auto memory (`~/.claude/projects/*/memory/`) |
-| Work context, episodes, failed approaches | **Wiki** |
+| User preferences and user-scoped corrections | Auto memory (`~/.claude/projects/*/memory/`) |
+| Project-scoped corrections and failed approaches | **Wiki** (type: correction / context) |
+| Work context and episodes | **Wiki** (type: context / episode) |
 | Session state for compaction recovery | Restore packets |
-| Per-seat working notes | `LEARNED.md` / `NOTES.md` |
+| Position-specific lessons (seat, pod, rig) | `LEARNED.md` at the owning altitude |
+| Work-tree lived record (what actually happened) | `NOTES.md` in the active mission/slice |
 
 ## Do not
 

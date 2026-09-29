@@ -7,6 +7,7 @@ dist/
 # All docs are internal except as-built and reference
 docs/*
 !docs/as-built/
+!docs/architecture/
 !docs/decisions/
 !docs/reference/
 !docs/releases/
