@@ -460,6 +460,175 @@ def query_delivery_manifests(db_path):
         return {"available": False, "reason": str(e)}
 
 
+# implicit_access: True means the surface is consumed via startup injection
+# (guidance_merge), not via explicit tool calls. Transcript analysis cannot
+# observe these reads, so delivery itself counts as access.
+DECAY_THRESHOLDS = {
+    "wiki": {"stale_after_sessions": 5, "weight": 1.0, "implicit_access": False},
+    "adr": {"stale_after_sessions": 10, "weight": 0.8, "implicit_access": False},
+    "auto-memory": {"stale_after_sessions": 8, "weight": 1.0, "implicit_access": False},
+    "seat-lessons": {"stale_after_sessions": 6, "weight": 0.9, "implicit_access": False},
+    "restore-packet": {"stale_after_sessions": 2, "weight": 0.5, "implicit_access": False},
+    "context-pack": {"stale_after_sessions": 7, "weight": 0.8, "implicit_access": False},
+    "role-guidance": {"stale_after_sessions": 15, "weight": 0.6, "implicit_access": True},
+    "project-guidance": {"stale_after_sessions": 15, "weight": 0.6, "implicit_access": True},
+    "work-observations": {"stale_after_sessions": 3, "weight": 0.7, "implicit_access": False},
+    "queue": {"stale_after_sessions": 3, "weight": 0.9, "implicit_access": False},
+    "peer-messages": {"stale_after_sessions": 3, "weight": 0.5, "implicit_access": False},
+    "guidance": {"stale_after_sessions": 15, "weight": 0.4, "implicit_access": True},
+    "skill": {"stale_after_sessions": 15, "weight": 0.4, "implicit_access": True},
+}
+
+
+def compute_staleness(sessions, delivery_data):
+    """Join delivery manifests with transcript access data to compute per-surface staleness.
+
+    Returns a dict with:
+      - per_surface: {surface: {delivered, accessed, last_accessed_session, staleness_score, stale}}
+      - per_file: [{path, surface, delivered_count, accessed_count, staleness_score, stale}]
+      - stale_count: total files flagged as stale
+      - healthy_count: total files not stale
+    """
+    if not delivery_data.get("available") or delivery_data.get("manifest_count", 0) == 0:
+        return {"available": False, "reason": "no delivery manifests"}
+
+    session_count = len(sessions)
+    if session_count == 0:
+        return {"available": False, "reason": "no sessions parsed"}
+
+    # Build per-surface access counts from transcript data
+    surface_access = defaultdict(lambda: {
+        "sessions_accessing": 0,
+        "total_reads": 0,
+        "total_writes": 0,
+        "last_accessed_idx": -1,
+    })
+    for idx, s in enumerate(sessions):
+        for surface, stats in s["memory_interactions"]["by_surface"].items():
+            sa = surface_access[surface]
+            sa["sessions_accessing"] += 1
+            sa["total_reads"] += stats.get("reads", 0)
+            sa["total_writes"] += stats.get("writes", 0)
+            sa["last_accessed_idx"] = max(sa["last_accessed_idx"], idx)
+
+    # Build per-file delivery counts from manifests
+    file_delivery = defaultdict(lambda: {"count": 0, "surface": "other", "content_hashes": set()})
+    for m in delivery_data.get("manifests", []):
+        summary = m.get("summary", {})
+        surface_counts = summary.get("surfaceCounts", {})
+        for surface, count in surface_counts.items():
+            file_delivery[surface]["count"] += count
+
+    # Build per-surface delivery counts
+    surface_delivery = defaultdict(int)
+    for surface, count in delivery_data.get("surface_totals", {}).items():
+        surface_delivery[surface] = count
+
+    # Compute per-surface staleness
+    per_surface = {}
+    for surface in set(list(surface_delivery.keys()) + list(surface_access.keys())):
+        delivered = surface_delivery.get(surface, 0)
+        sa = surface_access.get(surface, {
+            "sessions_accessing": 0, "total_reads": 0,
+            "total_writes": 0, "last_accessed_idx": -1,
+        })
+        accessed = sa["sessions_accessing"]
+        last_idx = sa["last_accessed_idx"]
+
+        threshold_cfg = DECAY_THRESHOLDS.get(surface, {
+            "stale_after_sessions": 5, "weight": 1.0, "implicit_access": False,
+        })
+        threshold = threshold_cfg["stale_after_sessions"]
+        weight = threshold_cfg["weight"]
+        implicit = threshold_cfg.get("implicit_access", False)
+
+        # Surfaces delivered via guidance_merge are consumed implicitly at
+        # startup — the agent reads them but no tool_use event appears in the
+        # transcript. Treat delivery as access for these surfaces.
+        if implicit and delivered > 0 and accessed == 0:
+            accessed = min(delivered, session_count)
+            last_idx = session_count - 1
+
+        sessions_since_access = session_count - last_idx - 1 if last_idx >= 0 else session_count
+        access_ratio = accessed / max(session_count, 1)
+
+        # Staleness score: 0.0 = fresh, 1.0 = fully stale
+        if accessed == 0 and delivered > 0:
+            staleness_score = 1.0
+        elif accessed == 0:
+            staleness_score = 0.0
+        else:
+            recency = min(sessions_since_access / max(threshold, 1), 1.0)
+            frequency = 1.0 - min(access_ratio, 1.0)
+            staleness_score = round((recency * 0.6 + frequency * 0.4) * weight, 3)
+
+        per_surface[surface] = {
+            "delivered": delivered,
+            "accessed": accessed,
+            "total_reads": sa["total_reads"],
+            "total_writes": sa["total_writes"],
+            "sessions_since_access": sessions_since_access,
+            "staleness_score": staleness_score,
+            "stale": staleness_score >= 0.7 and delivered > 0,
+            "threshold": threshold,
+            "implicit_access": implicit,
+        }
+
+    stale_surfaces = [s for s, v in per_surface.items() if v["stale"]]
+    healthy_surfaces = [s for s, v in per_surface.items() if not v["stale"]]
+
+    return {
+        "available": True,
+        "session_count": session_count,
+        "manifest_count": delivery_data["manifest_count"],
+        "per_surface": per_surface,
+        "stale_surfaces": stale_surfaces,
+        "healthy_surfaces": healthy_surfaces,
+        "stale_count": len(stale_surfaces),
+        "healthy_count": len(healthy_surfaces),
+    }
+
+
+def print_staleness_report(staleness):
+    """Print human-readable staleness report."""
+    if not staleness.get("available"):
+        print(f"  Staleness Analysis: unavailable ({staleness.get('reason', 'unknown')})")
+        print()
+        return
+
+    print("  Staleness Analysis (access-weighted retention)")
+    print("  " + "-" * 58)
+    print(f"  Sessions analyzed: {staleness['session_count']}   "
+          f"Manifests: {staleness['manifest_count']}")
+    print(f"  Stale: {staleness['stale_count']}   Healthy: {staleness['healthy_count']}")
+    print()
+
+    print(f"  {'Surface':<20} {'Delivered':>9} {'Accessed':>9} "
+          f"{'Since':>6} {'Score':>6} {'Status':>8}")
+    print("  " + "-" * 58)
+    for surface, stats in sorted(
+        staleness["per_surface"].items(),
+        key=lambda x: -x[1]["staleness_score"],
+    ):
+        status = "STALE" if stats["stale"] else "ok"
+        print(
+            f"  {surface:<20} {stats['delivered']:>9} {stats['accessed']:>9} "
+            f"{stats['sessions_since_access']:>6} {stats['staleness_score']:>6.2f} "
+            f"{status:>8}"
+        )
+    print()
+
+    if staleness["stale_surfaces"]:
+        print("  Decay candidates:")
+        for surface in staleness["stale_surfaces"]:
+            stats = staleness["per_surface"][surface]
+            print(f"    {surface}: delivered {stats['delivered']}x, "
+                  f"accessed {stats['accessed']}x, "
+                  f"stale for {stats['sessions_since_access']} sessions "
+                  f"(threshold: {stats['threshold']})")
+        print()
+
+
 def find_project_dir(hint=None):
     """Find the transcript directory for this project."""
     if hint and os.path.isdir(hint):
@@ -504,6 +673,7 @@ def main():
             print(f"  skip {os.path.basename(f)}: {e}", file=sys.stderr)
 
     delivery_data = query_delivery_manifests(args.db)
+    staleness_data = compute_staleness(sessions, delivery_data)
 
     report = {
         "meta": {
@@ -516,6 +686,7 @@ def main():
         "sessions": sessions,
         "aggregate": aggregate(sessions),
         "delivery_manifests": delivery_data,
+        "staleness": staleness_data,
     }
 
     if args.json:
@@ -523,6 +694,7 @@ def main():
         print()
     else:
         print_summary(report)
+        print_staleness_report(staleness_data)
 
 
 if __name__ == "__main__":

@@ -24,7 +24,10 @@ aggregate = mod.aggregate
 print_summary = mod.print_summary
 query_delivery_manifests = mod.query_delivery_manifests
 parse_session = mod.parse_session
+compute_staleness = mod.compute_staleness
+print_staleness_report = mod.print_staleness_report
 MEMORY_SURFACES = mod.MEMORY_SURFACES
+DECAY_THRESHOLDS = mod.DECAY_THRESHOLDS
 
 
 # -- Fixtures --
@@ -328,3 +331,147 @@ class TestParseSession:
             assert result["memory_interactions"]["total"] == 0
         finally:
             os.unlink(path)
+
+
+# -- compute_staleness() tests --
+
+def make_delivery_data(surface_totals=None, manifest_count=1, manifests=None):
+    """Build a delivery_data dict matching query_delivery_manifests output."""
+    if surface_totals is None:
+        surface_totals = {"guidance": 2, "wiki": 1}
+    if manifests is None:
+        manifests = [{
+            "summary": {"surfaceCounts": surface_totals},
+            "file_count": sum(surface_totals.values()),
+        }]
+    return {
+        "available": True,
+        "manifest_count": manifest_count,
+        "total_startups": manifest_count,
+        "delivery_rate": 1.0,
+        "surface_totals": surface_totals,
+        "manifests": manifests,
+    }
+
+
+class TestComputeStaleness:
+    def test_no_delivery_data(self):
+        result = compute_staleness([], {"available": False, "reason": "no db"})
+        assert result["available"] is False
+
+    def test_no_manifests(self):
+        result = compute_staleness(
+            [make_session()],
+            {"available": True, "manifest_count": 0, "manifests": []},
+        )
+        assert result["available"] is False
+
+    def test_no_sessions(self):
+        result = compute_staleness([], make_delivery_data())
+        assert result["available"] is False
+
+    def test_delivered_never_accessed_is_stale(self):
+        sessions = [make_session("s1", interactions=0) for _ in range(6)]
+        delivery = make_delivery_data({"wiki": 6})
+        result = compute_staleness(sessions, delivery)
+        assert result["available"] is True
+        assert "wiki" in result["per_surface"]
+        wiki = result["per_surface"]["wiki"]
+        assert wiki["delivered"] == 6
+        assert wiki["accessed"] == 0
+        assert wiki["staleness_score"] == 1.0
+        assert wiki["stale"] is True
+        assert "wiki" in result["stale_surfaces"]
+
+    def test_frequently_accessed_is_healthy(self):
+        sessions = []
+        for i in range(5):
+            s = make_session(f"s{i}", interactions=3)
+            s["memory_interactions"]["by_surface"]["wiki"] = {
+                "total": 3, "reads": 3, "writes": 0, "other": 0,
+                "tools": {"Read": 3}, "tier": "T4-project-evidence",
+            }
+            sessions.append(s)
+        delivery = make_delivery_data({"wiki": 5})
+        result = compute_staleness(sessions, delivery)
+        wiki = result["per_surface"]["wiki"]
+        assert wiki["accessed"] == 5
+        assert wiki["staleness_score"] < 0.7
+        assert wiki["stale"] is False
+        assert "wiki" in result["healthy_surfaces"]
+
+    def test_recently_accessed_not_stale(self):
+        sessions = [make_session(f"s{i}", interactions=0) for i in range(4)]
+        recent = make_session("s4", interactions=2)
+        recent["memory_interactions"]["by_surface"]["wiki"] = {
+            "total": 2, "reads": 2, "writes": 0, "other": 0,
+            "tools": {"Read": 2}, "tier": "T4-project-evidence",
+        }
+        sessions.append(recent)
+        delivery = make_delivery_data({"wiki": 5})
+        result = compute_staleness(sessions, delivery)
+        wiki = result["per_surface"]["wiki"]
+        assert wiki["sessions_since_access"] == 0
+        assert wiki["stale"] is False
+
+    def test_surface_only_accessed_not_delivered(self):
+        sessions = [make_session("s1", interactions=2)]
+        delivery = make_delivery_data({"guidance": 1})
+        result = compute_staleness(sessions, delivery)
+        assert "auto-memory" in result["per_surface"]
+        am = result["per_surface"]["auto-memory"]
+        assert am["delivered"] == 0
+        assert am["stale"] is False
+
+    def test_stale_count_matches(self):
+        sessions = [make_session(f"s{i}", interactions=0) for i in range(10)]
+        delivery = make_delivery_data({"wiki": 10, "adr": 10, "guidance": 10})
+        result = compute_staleness(sessions, delivery)
+        stale = [s for s, v in result["per_surface"].items() if v["stale"]]
+        assert result["stale_count"] == len(stale)
+        assert result["healthy_count"] == len(result["per_surface"]) - len(stale)
+
+    def test_implicit_access_surfaces_not_stale_when_delivered(self):
+        """Surfaces with implicit_access=True (guidance_merge) count delivery as access."""
+        sessions = [make_session(f"s{i}", interactions=0) for i in range(10)]
+        delivery = make_delivery_data({"guidance": 10})
+        result = compute_staleness(sessions, delivery)
+        guidance = result["per_surface"]["guidance"]
+        assert guidance["delivered"] == 10
+        assert guidance["accessed"] == 10
+        assert guidance["implicit_access"] is True
+        assert guidance["stale"] is False
+        assert guidance["staleness_score"] < 0.7
+
+    def test_explicit_access_surface_stale_when_never_read(self):
+        """Surfaces with implicit_access=False stay stale when delivered but never accessed."""
+        sessions = [make_session(f"s{i}", interactions=0) for i in range(6)]
+        delivery = make_delivery_data({"wiki": 6})
+        result = compute_staleness(sessions, delivery)
+        wiki = result["per_surface"]["wiki"]
+        assert wiki["implicit_access"] is False
+        assert wiki["stale"] is True
+
+    def test_threshold_from_config(self):
+        assert DECAY_THRESHOLDS["wiki"]["stale_after_sessions"] == 5
+        assert DECAY_THRESHOLDS["restore-packet"]["stale_after_sessions"] == 2
+        assert DECAY_THRESHOLDS["role-guidance"]["stale_after_sessions"] == 15
+        assert DECAY_THRESHOLDS["guidance"]["implicit_access"] is True
+        assert DECAY_THRESHOLDS["wiki"]["implicit_access"] is False
+
+
+class TestPrintStalenessReport:
+    def test_unavailable(self, capsys):
+        print_staleness_report({"available": False, "reason": "no data"})
+        captured = capsys.readouterr()
+        assert "unavailable" in captured.out
+
+    def test_prints_table(self, capsys):
+        sessions = [make_session("s1", interactions=0) for _ in range(3)]
+        delivery = make_delivery_data({"wiki": 3, "guidance": 3})
+        staleness = compute_staleness(sessions, delivery)
+        print_staleness_report(staleness)
+        captured = capsys.readouterr()
+        assert "Staleness Analysis" in captured.out
+        assert "wiki" in captured.out
+        assert "STALE" in captured.out or "ok" in captured.out
