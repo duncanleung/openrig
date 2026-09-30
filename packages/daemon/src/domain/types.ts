@@ -328,7 +328,26 @@ export type RigEvent =
   // PL-005 Phase B: notification dispatch events. Best-effort delivery;
   // failure does NOT interrupt the underlying action being notified about.
   | { type: "mission_control.notification_sent"; mechanism: string; target: string; qitemId: string | null; sentAt: string }
-  | { type: "mission_control.notification_failed"; mechanism: string; target: string; qitemId: string | null; error: string; failedAt: string };
+  | { type: "mission_control.notification_failed"; mechanism: string; target: string; qitemId: string | null; error: string; failedAt: string }
+  // Memory observability — staleness evaluation and decay recommendations (RIG-36).
+  | {
+      type: "memory.staleness_evaluated";
+      rigId: string;
+      evaluatedAt: string;
+      sessionWindow: number;
+      surfaces: Array<{
+        surface: string;
+        delivered: number;
+        deliveryRate: number;
+        staleness: "fresh" | "aging" | "stale";
+        score: number;
+      }>;
+      recommendations: Array<{
+        action: "review" | "archive" | "promote" | "demote";
+        surface: string;
+        reason: string;
+      }>;
+    };
 
 export type PersistedEvent = RigEvent & {
   seq: number;
