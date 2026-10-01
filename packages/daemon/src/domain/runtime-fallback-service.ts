@@ -146,8 +146,8 @@ export class RuntimeFallbackService {
         return;
       }
 
-      if (node.fallback_state !== "on_fallback") {
-        this.log(`reverse swap skipped — node ${nodeId} is not on_fallback (state=${node.fallback_state})`);
+      if (node.fallback_state !== "on_fallback" && node.fallback_state !== "swap_back_pending") {
+        this.log(`reverse swap skipped — node ${nodeId} is not in a fallback state (state=${node.fallback_state})`);
         return;
       }
 
