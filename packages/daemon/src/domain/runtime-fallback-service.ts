@@ -212,6 +212,23 @@ export class RuntimeFallbackService {
     }
   }
 
+  /** Sweeps all nodes in swap_back_pending state and triggers the reverse handover for each.
+   *  Called when seat.runtime_fallback_swap_back_pending fires so the pending state does not
+   *  become a dead end. */
+  async executeManualSwapBack(): Promise<void> {
+    const pendingNodes = this.db.prepare(
+      "SELECT id, fallback_pool_key FROM nodes WHERE fallback_state = 'swap_back_pending'"
+    ).all() as Array<{ id: string; fallback_pool_key: string | null }>;
+
+    for (const node of pendingNodes) {
+      if (!node.fallback_pool_key) {
+        this.log(`executeManualSwapBack: skipping node ${node.id} — no fallback_pool_key`);
+        continue;
+      }
+      await this.triggerReverseSwap({ nodeId: node.id, poolKey: node.fallback_pool_key });
+    }
+  }
+
   private queryNode(nodeId: string): NodeFallbackRow | null {
     return this.db.prepare(
       `SELECT id, rig_id, logical_id, runtime, fallback_runtime, fallback_model,

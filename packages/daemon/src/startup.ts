@@ -2388,6 +2388,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     queueRepoInstance.attachRuntimeFallbackSwapBackTrigger(
       (opts) => void runtimeFallbackService.triggerReverseSwap(opts)
     );
+    // H6-1: swap_back_pending is not a dead end — drive the reverse swap when the event fires.
+    eventBus.subscribe((event) => {
+      if (event.type === "seat.runtime_fallback_swap_back_pending") {
+        void runtimeFallbackService.executeManualSwapBack();
+      }
+    });
   }
 
   const { app, injectWebSocket } = createAppWithWebSocket(deps);
