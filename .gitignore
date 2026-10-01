@@ -32,6 +32,10 @@ notes/*
 # Local demo proof artifacts
 demo/proof/
 
+# Python
+__pycache__/
+*.pyc
+
 # Build artifacts
 *.tgz
 
