@@ -6,7 +6,7 @@
 // persists a durable verdict to `seat_identity_verdicts`. It reads ONLY tmux
 // pane process identity — NEVER queue/classifier/hook heartbeats.
 
-import { describe, it, expect, vi } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import {
@@ -74,6 +74,119 @@ function seedSeat(
 }
 
 const NOW = () => new Date("2026-07-02T12:00:00.000Z");
+
+describe("A3 Claude shell sampling", () => {
+  const databases: Database.Database[] = [];
+  afterEach(() => { for (const db of databases.splice(0)) db.close(); });
+
+  function fixture(command = "sh", runtime = "claude-code") {
+    const db = createFullTestDb(); databases.push(db);
+    seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1", runtime });
+    db.prepare("UPDATE sessions SET resume_token = 'saved-token'").run();
+    const tmux = makeTmux({ sessions: ["s1@rig"], panePid: { "%1": 10 }, paneCommand: { "%1": command } });
+    const rows = () => [
+      { pid: 10, ppid: 1, pgid: 10, tpgid: 11, executableName: "sh", command: "sh", startedAt: "start" },
+      { pid: 11, ppid: 10, pgid: 11, tpgid: 11, executableName: runtime === "codex" ? "codex" : "claude", command: runtime === "codex" ? "codex resume saved-token" : "claude --resume saved-token", startedAt: "start" },
+    ];
+    const listProcesses = vi.fn(async () => rows());
+    const rec = new SeatIdentityReconciler({ db, tmux, listProcesses, now: NOW });
+    const verdict = () => new SeatIdentityStore(db).getForNode("n1");
+    return { db, tmux, rows, listProcesses, rec, verdict };
+  }
+
+  it("does not sample native processes for direct Claude, but still makes the final command/PID observations", async () => {
+    const f = fixture("claude");
+    await f.rec.reconcileAll();
+    expect(f.verdict()?.verdict).toBe("verified");
+    expect(f.listProcesses).not.toHaveBeenCalled();
+    expect(f.tmux.getPanePid).toHaveBeenCalledTimes(1);
+    expect(f.tmux.getPaneCommand).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not verify an early direct Claude label that becomes a shell; a later stable sweep recovers", async () => {
+    const f = fixture();
+    vi.mocked(f.tmux.getPaneCommand).mockResolvedValueOnce("claude");
+    await f.rec.reconcileAll();
+    expect(f.verdict()?.verdict).toBe("mismatch");
+    expect(f.listProcesses).not.toHaveBeenCalled();
+    await f.rec.reconcileAll();
+    expect(f.verdict()?.verdict).toBe("verified");
+    expect(f.listProcesses).toHaveBeenCalledTimes(2);
+  });
+
+  it("uses the final direct label when an early wrapper becomes direct Claude", async () => {
+    const f = fixture("claude");
+    vi.mocked(f.tmux.getPaneCommand).mockResolvedValueOnce("sh");
+    await f.rec.reconcileAll();
+    expect(f.verdict()).toMatchObject({ verdict: "verified", evidence: { observedCommand: "claude", observedPid: 10 } });
+    expect(f.listProcesses).toHaveBeenCalledTimes(2);
+    expect(f.tmux.getPaneCommand).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["null", "throw"])("keeps an unproved final shell non-green after an unavailable early read: %s", async mode => {
+    const f = fixture();
+    if (mode === "null") vi.mocked(f.tmux.getPaneCommand).mockResolvedValueOnce(null);
+    else vi.mocked(f.tmux.getPaneCommand).mockRejectedValueOnce(new Error("unavailable"));
+    await f.rec.reconcileAll();
+    expect(f.verdict()?.verdict).toBe("mismatch");
+    expect(f.listProcesses).not.toHaveBeenCalled();
+    await f.rec.reconcileAll();
+    expect(f.verdict()?.verdict).toBe("verified");
+  });
+
+  it.each(["null", "throw"])("keeps an unavailable final command unavailable after a successful wrapper proof: %s", async mode => {
+    const f = fixture();
+    vi.mocked(f.tmux.getPaneCommand).mockResolvedValueOnce("sh");
+    if (mode === "null") vi.mocked(f.tmux.getPaneCommand).mockResolvedValueOnce(null);
+    else vi.mocked(f.tmux.getPaneCommand).mockRejectedValueOnce(new Error("final read failed"));
+    await f.rec.reconcileAll();
+    expect(f.verdict()?.verdict).toBe("tmux_unavailable");
+    expect(f.listProcesses).toHaveBeenCalledTimes(2);
+    expect(f.tmux.getPanePid).toHaveBeenCalledTimes(3);
+    expect(f.tmux.getPaneCommand).toHaveBeenCalledTimes(2);
+    await f.rec.reconcileAll();
+    expect(f.verdict()?.verdict).toBe("verified");
+  });
+
+  it.each(["sh", "-bash", " ZSH "])("retains two native phases plus final PID/command for an exact wrapper: %s", async command => {
+    const f = fixture(command);
+    await f.rec.reconcileAll();
+    expect(f.verdict()?.verdict).toBe("verified");
+    expect(f.listProcesses).toHaveBeenCalledTimes(2);
+    expect(f.tmux.getPanePid).toHaveBeenCalledTimes(3);
+    expect(f.tmux.getPaneCommand).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["token", "fingerprint", "final-pid"])("does not accept changed wrapper identity: %s", async mode => {
+    const f = fixture();
+    if (mode === "token") f.listProcesses.mockImplementation(async () => { const rows = f.rows(); rows[1]!.command = "claude --resume different"; return rows; });
+    if (mode === "fingerprint") f.listProcesses.mockResolvedValueOnce(f.rows()).mockImplementation(async () => { const rows = f.rows(); rows[1]!.startedAt = "changed"; return rows; });
+    if (mode === "final-pid") vi.mocked(f.tmux.getPanePid).mockResolvedValueOnce(10).mockResolvedValueOnce(10).mockResolvedValueOnce(12);
+    await f.rec.reconcileAll();
+    expect(f.verdict()?.verdict).toBe("mismatch");
+  });
+
+  it("leaves Codex sampling and command count unchanged", async () => {
+    const f = fixture("codex", "codex");
+    await f.rec.reconcileAll();
+    expect(f.verdict()?.verdict).toBe("verified");
+    expect(f.listProcesses).toHaveBeenCalledTimes(2);
+    expect(f.tmux.getPanePid).toHaveBeenCalledTimes(3);
+    expect(f.tmux.getPaneCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("fences a stop during the early command observation before process sampling or publication", async () => {
+    const f = fixture();
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    vi.mocked(f.tmux.getPaneCommand).mockImplementationOnce(async () => { await gate; return "sh"; });
+    const pending = f.rec.reconcileAll();
+    await new Promise(resolve => setImmediate(resolve));
+    f.rec.stop(); release(); await pending;
+    expect(f.verdict()).toBeNull();
+    expect(f.listProcesses).not.toHaveBeenCalled();
+  });
+});
 
 describe("classifyPaneRuntimeMatch", () => {
   it("no command signal is never a mismatch (present pane, unknown command)", () => {
@@ -339,5 +452,99 @@ describe("seat_identity_verdicts schema (migration 046)", () => {
     expect(store.getForNode("n1")?.verdict).toBe("mismatch");
     expect(db.prepare("SELECT COUNT(*) c FROM seat_identity_verdicts").get()).toEqual({ c: 1 });
     db.close();
+  });
+});
+
+
+describe("SeatIdentityReconciler — bounded polling", () => {
+  it("holds one sweep through delayed listing and verdict reads, then observes a changed occupant", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    const db = createFullTestDb();
+    seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1" });
+    const tmux = makeTmux({ sessions: ["s1@rig"], panePid: { "%1": 42 }, paneCommand: { "%1": "zsh" } });
+    let releaseList!: () => void;
+    let releaseCommand!: () => void;
+    const listGate = new Promise<void>((resolve) => { releaseList = resolve; });
+    const commandGate = new Promise<void>((resolve) => { releaseCommand = resolve; });
+    vi.mocked(tmux.listSessions).mockImplementationOnce(async () => {
+      await listGate;
+      return [{ name: "s1@rig", windows: 1, created: "", attached: false }];
+    });
+    vi.mocked(tmux.getPaneCommand).mockImplementationOnce(async () => { await commandGate; return "claude"; });
+    const rec = new SeatIdentityReconciler({ db, tmux });
+    const store = new SeatIdentityStore(db);
+    rec.start(100);
+    try {
+      await vi.advanceTimersByTimeAsync(2000);
+      // Twenty ticks, but the first availability read is still outstanding.
+      expect(tmux.listSessions).toHaveBeenCalledTimes(1);
+      expect(store.getForNode("n1")).toBeNull();
+      releaseList();
+      await vi.advanceTimersByTimeAsync(1000);
+      // The guard covers the whole sweep, not only its availability probe.
+      expect(tmux.listSessions).toHaveBeenCalledTimes(1);
+      expect(tmux.getPaneCommand).toHaveBeenCalledTimes(1);
+      expect(store.getForNode("n1")).toBeNull();
+      releaseCommand();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(store.getForNode("n1")?.verdict).toBe("verified");
+      await vi.advanceTimersByTimeAsync(100);
+      expect(tmux.listSessions).toHaveBeenCalledTimes(2);
+      expect(store.getForNode("n1")?.verdict).toBe("mismatch");
+    } finally {
+      rec.stop(); releaseList(); releaseCommand();
+      await new Promise((resolve) => setImmediate(resolve));
+      vi.useRealTimers(); db.close();
+    }
+  });
+
+  it("stop/restart fences a pending native observation without releasing its flight early", async () => {
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+    const db = createFullTestDb();
+    seedSeat(db, { nodeId: "c1", sessionName: "c1@rig", pane: "%1", runtime: "codex" });
+    const tmux = makeTmux({ sessions: ["c1@rig"], panePid: { "%1": 10 }, paneCommand: { "%1": "codex" } });
+    const rows = [{ pid: 10, ppid: 1, pgid: 10, tpgid: 10, executableName: "codex", command: "codex", startedAt: "Sat Jan  1 12:00:00 2000" }];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const listProcesses = vi.fn(async () => rows).mockImplementationOnce(async () => { await gate; return rows; });
+    const rec = new SeatIdentityReconciler({ db, tmux, listProcesses });
+    const store = new SeatIdentityStore(db);
+    rec.start(100);
+    try {
+      await vi.advanceTimersByTimeAsync(100);
+      expect(listProcesses).toHaveBeenCalledTimes(1);
+      rec.stop(); rec.start(100);
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(tmux.listSessions).toHaveBeenCalledTimes(1);
+      release();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(store.getForNode("c1")).toBeNull();
+      expect(listProcesses).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(listProcesses).toHaveBeenCalledTimes(3); // two fresh observations
+      expect(store.getForNode("c1")?.verdict).toBe("verified");
+    } finally {
+      rec.stop(); release();
+      await new Promise((resolve) => setImmediate(resolve));
+      vi.useRealTimers(); db.close();
+    }
+  });
+
+  it("releases after availability and per-seat failures and recovers on a later sweep", async () => {
+    const db = createFullTestDb();
+    seedSeat(db, { nodeId: "n1", sessionName: "s1@rig", pane: "%1" });
+    const tmux = makeTmux({ sessions: ["s1@rig"], panePid: { "%1": 42 }, paneCommand: { "%1": "claude" } });
+    vi.mocked(tmux.listSessions).mockRejectedValueOnce(new Error("unavailable"));
+    vi.mocked(tmux.getPaneCommand).mockRejectedValueOnce(new Error("pane read failed"));
+    const rec = new SeatIdentityReconciler({ db, tmux });
+    const store = new SeatIdentityStore(db);
+    try {
+      await rec.reconcileAll();
+      expect(store.getForNode("n1")?.verdict).toBe("tmux_unavailable");
+      await rec.reconcileAll();
+      expect(store.getForNode("n1")?.verdict).toBe("tmux_unavailable");
+      await rec.reconcileAll();
+      expect(store.getForNode("n1")?.verdict).toBe("verified");
+    } finally { rec.stop(); db.close(); }
   });
 });

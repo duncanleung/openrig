@@ -1,4 +1,5 @@
-import { observeCodexPaneProcess, listNativeProcesses, type NativeProcessLister, type CodexProcessObservation } from "./native-process-lineage.js";
+import { observeClaudePaneProcess, observeCodexPaneProcess, listNativeProcesses, type NativeProcessLister, type NativeProcessObservation } from "./native-process-lineage.js";
+import { isShellForeground } from "./shell-classifier.js";
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { TmuxAdapter } from "../adapters/tmux.js";
@@ -96,6 +97,8 @@ export class SeatIdentityReconciler {
   private readonly store: SeatIdentityStore;
   private readonly listProcesses: NativeProcessLister;
   private timer: ReturnType<typeof setInterval> | null = null;
+  private reconciling = false;
+  private generation = 0;
 
   constructor(deps: SeatIdentityReconcilerDeps) {
     this.db = deps.db;
@@ -121,6 +124,18 @@ export class SeatIdentityReconciler {
 
   /** Reconcile every running tmux-bound seat once and persist the verdicts. */
   async reconcileAll(): Promise<void> {
+    // Skip ticks while actual reads are pending; never release on a deadline
+    // that could leave subprocesses alive. Normal polling cost is unchanged.
+    if (this.reconciling) return;
+    this.reconciling = true;
+    try {
+      await this.reconcileSweep(this.generation);
+    } finally {
+      this.reconciling = false;
+    }
+  }
+
+  private async reconcileSweep(generation: number): Promise<void> {
     const seats = this.runningSeats();
     // Prune verdicts for nodes no longer running (keep the table bounded).
     this.store.pruneExcept(seats.map((s) => s.node_id));
@@ -139,6 +154,7 @@ export class SeatIdentityReconciler {
     } catch {
       liveSessions = null;
     }
+    if (generation !== this.generation) return;
     if (liveSessions === null || liveSessions.size === 0) {
       for (const seat of seats) {
         this.store.upsert(this.tmuxUnavailableVerdict(seat, observedAt));
@@ -148,22 +164,42 @@ export class SeatIdentityReconciler {
 
     // Two fresh process snapshots per sweep, not two ps calls per seat. Each
     // phase observes every bound pane; the second begins after the first ends.
-    const codexSeats = seats.filter((seat) => seat.runtime === "codex" && seat.tmux_pane && liveSessions.has(seat.session_name));
+    const nativeSeats: RunningSeatRow[] = [];
+    for (const seat of seats) {
+      if (!seat.tmux_pane || !liveSessions.has(seat.session_name)) continue;
+      if (seat.runtime === "codex") nativeSeats.push(seat);
+      else if (seat.runtime === "claude-code" && seat.resume_token) {
+        // Only shell-label contradictions consume Claude native proof. Keep
+        // computeVerdict's fresh command/PID reads: a later shell transition
+        // without sampled proof must remain non-green for this sweep.
+        try {
+          const command = await this.tmux.getPaneCommand(seat.tmux_pane);
+          if (classifyPaneRuntimeMatch(command, seat.runtime) === "mismatch"
+            && isShellForeground(command?.trim().toLowerCase() ?? "")) nativeSeats.push(seat);
+        } catch { /* No proof selected; the final per-seat observation still runs. */ }
+        if (generation !== this.generation) return;
+      }
+    }
     const sample = async () => {
       let snapshot: ReturnType<NativeProcessLister> | undefined;
-      return Promise.all(codexSeats.map((seat) => observeCodexPaneProcess({
+      return Promise.all(nativeSeats.map((seat) => (seat.runtime === "codex" ? observeCodexPaneProcess : observeClaudePaneProcess)({
         target: seat.tmux_pane!, tmux: this.tmux, expectedToken: seat.resume_token,
         listProcesses: () => snapshot ??= this.listProcesses(),
       })));
     };
     const first = await sample();
+    if (generation !== this.generation) return;
     const second = await sample();
-    const codexProofs = new Map(codexSeats.map((seat, index) => [seat.node_id,
+    if (generation !== this.generation) return;
+    const nativeProofs = new Map(nativeSeats.map((seat, index) => [seat.node_id,
       first[index] && first[index]?.fingerprint === second[index]?.fingerprint ? second[index]! : null]));
     for (const seat of seats) {
       try {
-        this.store.upsert(await this.computeVerdict(seat, liveSessions, observedAt, codexProofs.get(seat.node_id) ?? null));
+        const verdict = await this.computeVerdict(seat, liveSessions, observedAt, nativeProofs.get(seat.node_id) ?? null);
+        if (generation !== this.generation) return;
+        this.store.upsert(verdict);
       } catch {
+        if (generation !== this.generation) return;
         // A single seat's tmux failure must not crash the loop; record it as
         // unavailable observation (non-green for Codex).
         this.store.upsert(this.tmuxUnavailableVerdict(seat, observedAt));
@@ -187,7 +223,7 @@ export class SeatIdentityReconciler {
     seat: RunningSeatRow,
     liveSessions: Set<string>,
     observedAt: string,
-    native: CodexProcessObservation | null,
+    native: NativeProcessObservation | null,
   ): Promise<SeatIdentityVerdict> {
     const base = {
       nodeId: seat.node_id,
@@ -232,7 +268,11 @@ export class SeatIdentityReconciler {
     }
 
     const command = await this.tmux.getPaneCommand(seat.tmux_pane);
-    if (seat.runtime === "codex") {
+    if (command === null && seat.runtime === "claude-code" && seat.resume_token) {
+      return this.tmuxUnavailableVerdict(seat, observedAt);
+    }
+    if (seat.runtime === "codex" || (seat.runtime === "claude-code" && seat.resume_token
+      && classifyPaneRuntimeMatch(command, seat.runtime) === "mismatch" && isShellForeground(command?.trim().toLowerCase() ?? ""))) {
       return {
         ...base, verdict: native?.panePid === pid ? "verified" : "mismatch",
         evidenceSource: "pane_process", reason: native?.panePid === pid ? null : "process_identity_ambiguous",
@@ -273,6 +313,8 @@ export class SeatIdentityReconciler {
 
   /** Stop the scheduler. Safe to call before start or multiple times. */
   stop(): void {
+    // Fence old observations without releasing their flight before settlement.
+    this.generation++;
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;
