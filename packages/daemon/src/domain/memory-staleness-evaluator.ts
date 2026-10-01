@@ -160,7 +160,8 @@ export class MemoryStalenessEvaluator {
     const results: StalenessResult[] = [];
 
     for (const [surface, delivery] of stats) {
-      const threshold = this.thresholds[surface] ?? DEFAULT_THRESHOLDS.other;
+      const fallback = DEFAULT_THRESHOLDS.other!;
+      const threshold = this.thresholds[surface] ?? fallback;
       const deliveryRate = delivery.delivered / Math.max(totalManifests, 1);
 
       let score: number;
@@ -198,7 +199,7 @@ export class MemoryStalenessEvaluator {
 
     for (const s of surfaces) {
       if (s.staleness === "stale") {
-        const threshold = this.thresholds[s.surface] ?? DEFAULT_THRESHOLDS.other;
+        const threshold = this.thresholds[s.surface] ?? DEFAULT_THRESHOLDS.other!;
         if (threshold.implicitAccess) {
           recommendations.push({
             action: "review",
