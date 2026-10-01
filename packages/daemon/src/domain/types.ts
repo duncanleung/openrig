@@ -63,6 +63,8 @@ export interface Node {
   fallbackSwapBack?: FallbackSwapBack | null;
   /** RIG-43: the runtime the seat held BEFORE the forward swap; stored so swap-back can restore it. */
   fallbackOriginalRuntime?: string | null;
+  /** RIG-43: the pool's actual usage-limit expiry deadline (ISO string). */
+  fallbackExpiresAt?: string | null;
   createdAt: string;
 }
 

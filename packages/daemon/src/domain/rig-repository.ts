@@ -458,44 +458,6 @@ export class RigRepository {
     return result.changes > 0;
   }
 
-  /** RIG-43: write node.runtime. MUST be called inside an open transaction so the runtime
-   *  change is atomic with the provenance UPDATE in seat-handover-service commit(). */
-  setNodeRuntime(nodeId: string, runtime: string): boolean {
-    if (!this.hasNodeColumn("fallback_runtime")) return false;
-    const result = this.db
-      .prepare("UPDATE nodes SET runtime = ? WHERE id = ?")
-      .run(runtime, nodeId);
-    return result.changes > 0;
-  }
-
-  /** RIG-43: atomically enter or exit fallback state. Pass null fields to clear (exit). */
-  setNodeFallbackState(nodeId: string, opts: {
-    fallbackState: import("./types.js").FallbackState | null;
-    fallbackPoolKey: string | null;
-    fallbackEnteredAt: string | null;
-    fallbackSwapBack: import("./types.js").FallbackSwapBack | null;
-    fallbackOriginalRuntime?: string | null;
-  }): boolean {
-    if (!this.hasNodeColumn("fallback_state")) return false;
-    const result = this.db
-      .prepare(`UPDATE nodes SET
-        fallback_state = ?,
-        fallback_pool_key = ?,
-        fallback_entered_at = ?,
-        fallback_swap_back = ?,
-        fallback_original_runtime = ?
-        WHERE id = ?`)
-      .run(
-        opts.fallbackState,
-        opts.fallbackPoolKey,
-        opts.fallbackEnteredAt,
-        opts.fallbackSwapBack,
-        opts.fallbackOriginalRuntime ?? null,
-        nodeId,
-      );
-    return result.changes > 0;
-  }
-
   addEdge(rigId: string, sourceId: string, targetId: string, kind: string): Edge {
     const id = ulid();
     this.db

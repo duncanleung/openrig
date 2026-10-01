@@ -623,8 +623,9 @@ export class SeatHandoverService {
         fallbackStateOpts: {
           fallbackState: "on_fallback" as const,
           fallbackPoolKey: input.fallback.poolKey,
-          fallbackEnteredAt: new Date().toISOString(),
+          fallbackEnteredAt: this.now().toISOString(),
           fallbackSwapBack: input.fallback.swapBack,
+          fallbackExpiresAt: input.fallback.expiresAt,
         },
       } : {}),
       // RIG-43: reverse swap — restore original runtime + clear fallback columns atomically.
@@ -681,6 +682,7 @@ export class SeatHandoverService {
       fallbackPoolKey: string | null;
       fallbackEnteredAt: string | null;
       fallbackSwapBack: "at_expiry" | "manual" | null;
+      fallbackExpiresAt?: string | null;
     };
     /** RIG-43: when present, clears all fallback columns and emits seat.runtime_fallback_exited. */
     reverseSwapEvent?: {
@@ -1006,6 +1008,7 @@ export class SeatHandoverService {
       fallbackPoolKey: string | null;
       fallbackEnteredAt: string | null;
       fallbackSwapBack: "at_expiry" | "manual" | null;
+      fallbackExpiresAt?: string | null;
     };
     /** RIG-43: when present, clears all fallback columns and emits seat.runtime_fallback_exited. */
     reverseSwapEvent?: {
@@ -1101,11 +1104,12 @@ export class SeatHandoverService {
               fallback_pool_key = ?,
               fallback_entered_at = ?,
               fallback_swap_back = ?,
-              fallback_original_runtime = ?
+              fallback_original_runtime = ?,
+              fallback_expires_at = ?
             WHERE id = ? AND fallback_state IS NULL
           `).run(input.targetRuntime, continuityOutcome, input.latestSession.session_name, handoverAt,
             fb.fallbackState, fb.fallbackPoolKey, fb.fallbackEnteredAt, fb.fallbackSwapBack,
-            originalRuntime, input.node.id);
+            originalRuntime, fb.fallbackExpiresAt ?? null, input.node.id);
         } else {
           this.db.prepare(`
             UPDATE nodes SET
@@ -1165,7 +1169,8 @@ export class SeatHandoverService {
             fallback_pool_key = NULL,
             fallback_entered_at = NULL,
             fallback_swap_back = NULL,
-            fallback_original_runtime = NULL
+            fallback_original_runtime = NULL,
+            fallback_expires_at = NULL
           WHERE id = ?
         `).run(input.node.id);
         fallbackEvent = this.eventBus.persistWithinTransaction({
@@ -1187,7 +1192,7 @@ export class SeatHandoverService {
           fromRuntime: input.node.runtime,
           toRuntime: input.targetRuntime!,
           poolKey: input.fallbackState.fallbackPoolKey,
-          expiresAt: input.fallbackState.fallbackEnteredAt,
+          expiresAt: input.fallbackState.fallbackExpiresAt ?? null,
           swapBack: input.fallbackState.fallbackSwapBack,
         });
       }
