@@ -2973,6 +2973,7 @@ export class QueueRepository {
 
     // RIG-43: fire reverse-swap trigger for nodes currently on fallback for any resolved pool.
     if (this.runtimeFallbackSwapBackTrigger) {
+      const firedNodes = new Set<string>();
       for (const { qitemId } of usageLimitBlockers) {
         const item = this.getById(qitemId);
         if (!item) continue;
@@ -2983,6 +2984,8 @@ export class QueueRepository {
           "SELECT id FROM nodes WHERE fallback_state = 'on_fallback' AND fallback_pool_key = ?"
         ).all(poolKey) as Array<{ id: string }>;
         for (const { id } of fallbackNodes) {
+          if (firedNodes.has(id)) continue;
+          firedNodes.add(id);
           this.runtimeFallbackSwapBackTrigger({ nodeId: id, poolKey });
         }
       }

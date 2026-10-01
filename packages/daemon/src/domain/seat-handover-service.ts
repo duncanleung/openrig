@@ -351,7 +351,10 @@ export class SeatHandoverService {
 
     const node = this.lookupNode(statusResult.status);
     const guard = this.tmuxAdapter.deliveryGuard;
-    if (guard && !guard.ownsLifecycle(node.id)) {
+    if (!guard) {
+      throw new Error(`[seat-handover] deliveryGuard is not configured — cannot serialize handover for node ${node.id}`);
+    }
+    if (!guard.ownsLifecycle(node.id)) {
       return guard.lifecycle([node.id], () => this.handover(input));
     }
     const latestSession = this.lookupLatestSession(node.id);
