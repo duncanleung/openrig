@@ -117,6 +117,8 @@ export class RuntimeFallbackService {
       } catch (err) {
         this.log(`forward swap threw for ${seatRef}: ${err instanceof Error ? err.message : String(err)}`);
       }
+    } catch (err) {
+      this.log(`forward swap error for node ${nodeId}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       this.inFlight.delete(nodeId);
     }
@@ -182,6 +184,8 @@ export class RuntimeFallbackService {
       } catch (err) {
         this.log(`reverse swap threw for ${seatRef}: ${err instanceof Error ? err.message : String(err)}`);
       }
+    } catch (err) {
+      this.log(`reverse swap error for node ${nodeId}: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       this.inFlight.delete(nodeId);
     }
@@ -191,17 +195,10 @@ export class RuntimeFallbackService {
   private handleManualSwapBack(node: NodeFallbackRow, poolKey: string): void {
     this.log(`manual swap-back configured for node ${node.id} — setting swap_back_pending`);
 
-    // Write swap_back_pending state to DB.
     try {
       this.db.prepare(
         "UPDATE nodes SET fallback_state = 'swap_back_pending' WHERE id = ? AND fallback_state = 'on_fallback'"
       ).run(node.id);
-    } catch (err) {
-      this.log(`failed to set swap_back_pending for node ${node.id}: ${err instanceof Error ? err.message : String(err)}`);
-    }
-
-    // Emit observable event so operator tooling can surface the pending swap-back.
-    try {
       this.eventBus.emit({
         type: "seat.runtime_fallback_swap_back_pending",
         rigId: node.rig_id,
@@ -211,7 +208,7 @@ export class RuntimeFallbackService {
         originalRuntime: node.fallback_original_runtime,
       });
     } catch (err) {
-      this.log(`failed to emit swap_back_pending event for node ${node.id}: ${err instanceof Error ? err.message : String(err)}`);
+      this.log(`failed to complete swap_back_pending for node ${node.id}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 

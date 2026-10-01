@@ -228,7 +228,11 @@ async function main() {
     // instead. Keeping the marker lets the bridge deliver the restore packet
     // location on the next UserPromptSubmit (which the auto-nudge triggers).
     marker.data.postCompactAt = nowIso();
-    writeMarker(marker);
+    try {
+      writeMarker(marker);
+    } catch (writeErr) {
+      process.stderr.write(`[compaction-restore-bridge] writeMarker failed on PostCompact: ${writeErr?.message ?? writeErr}\n`);
+    }
 
     // Auto-continuation: unattended sessions stall at a blank prompt after
     // in-place /compact because no UserPromptSubmit fires. Send a self-nudge
