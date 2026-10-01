@@ -1099,7 +1099,7 @@ export class SeatHandoverService {
               fallback_entered_at = ?,
               fallback_swap_back = ?,
               fallback_original_runtime = ?
-            WHERE id = ?
+            WHERE id = ? AND fallback_state IS NULL
           `).run(input.targetRuntime, continuityOutcome, input.latestSession.session_name, handoverAt,
             fb.fallbackState, fb.fallbackPoolKey, fb.fallbackEnteredAt, fb.fallbackSwapBack,
             originalRuntime, input.node.id);

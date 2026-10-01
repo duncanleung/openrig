@@ -36,6 +36,7 @@ export class RuntimeFallbackService {
   private eventBus: EventBus;
   private seatHandoverService: SeatHandoverService;
   private log: (msg: string) => void;
+  private readonly inFlight = new Set<string>();
 
   constructor(deps: RuntimeFallbackDeps) {
     this.db = deps.db;
@@ -54,60 +55,70 @@ export class RuntimeFallbackService {
   }): Promise<void> {
     const { nodeId, poolKey, expiresAt } = opts;
 
-    const node = this.queryNode(nodeId);
-    if (!node) {
-      this.log(`forward swap skipped — node ${nodeId} not found`);
+    if (this.inFlight.has(nodeId)) {
+      this.log(`forward swap skipped — already in flight for node ${nodeId}`);
       return;
     }
-
-    // Idempotency: skip if already on fallback.
-    if (node.fallback_state != null) {
-      this.log(`forward swap skipped — node ${nodeId} already in fallback state: ${node.fallback_state}`);
-      return;
-    }
-
-    if (!node.fallback_runtime) {
-      this.log(`forward swap skipped — node ${nodeId} has no fallback_runtime declared`);
-      return;
-    }
-
-    // Freshness: don't swap if the usage-limit expiry has already passed.
-    const expiryMs = Date.parse(expiresAt);
-    if (!Number.isNaN(expiryMs) && Date.now() >= expiryMs) {
-      this.log(`forward swap skipped — node ${nodeId} usage-limit expiry has already passed (${expiresAt})`);
-      return;
-    }
-
-    const seatRef = this.resolveSeatRef(node);
-    if (!seatRef) {
-      this.log(`forward swap skipped — could not resolve seatRef for node ${nodeId}`);
-      return;
-    }
-
-    this.log(`triggering forward swap for ${seatRef} (pool=${poolKey}, fallback_runtime=${node.fallback_runtime})`);
-
-    const swapBack = (node.fallback_swap_back as FallbackSwapBack | null) ?? "at_expiry";
+    this.inFlight.add(nodeId);
 
     try {
-      const result = await this.seatHandoverService.handover({
-        seatRef,
-        reason: `usage-limit fallback: pool=${poolKey}`,
-        source: "rebuild",
-        fallback: {
-          runtime: node.fallback_runtime,
-          model: node.fallback_model ?? undefined,
-          poolKey,
-          expiresAt,
-          swapBack,
-        },
-      });
-      if (!result.ok) {
-        this.log(`forward swap failed for ${seatRef}: ${result.message}`);
-      } else {
-        this.log(`forward swap complete for ${seatRef} → ${node.fallback_runtime}`);
+      const node = this.queryNode(nodeId);
+      if (!node) {
+        this.log(`forward swap skipped — node ${nodeId} not found`);
+        return;
       }
-    } catch (err) {
-      this.log(`forward swap threw for ${seatRef}: ${err instanceof Error ? err.message : String(err)}`);
+
+      // Idempotency: skip if already on fallback.
+      if (node.fallback_state != null) {
+        this.log(`forward swap skipped — node ${nodeId} already in fallback state: ${node.fallback_state}`);
+        return;
+      }
+
+      if (!node.fallback_runtime) {
+        this.log(`forward swap skipped — node ${nodeId} has no fallback_runtime declared`);
+        return;
+      }
+
+      // Freshness: don't swap if the usage-limit expiry has already passed.
+      const expiryMs = Date.parse(expiresAt);
+      if (!Number.isNaN(expiryMs) && Date.now() >= expiryMs) {
+        this.log(`forward swap skipped — node ${nodeId} usage-limit expiry has already passed (${expiresAt})`);
+        return;
+      }
+
+      const seatRef = this.resolveSeatRef(node);
+      if (!seatRef) {
+        this.log(`forward swap skipped — could not resolve seatRef for node ${nodeId}`);
+        return;
+      }
+
+      this.log(`triggering forward swap for ${seatRef} (pool=${poolKey}, fallback_runtime=${node.fallback_runtime})`);
+
+      const swapBack = (node.fallback_swap_back as FallbackSwapBack | null) ?? "at_expiry";
+
+      try {
+        const result = await this.seatHandoverService.handover({
+          seatRef,
+          reason: `usage-limit fallback: pool=${poolKey}`,
+          source: "rebuild",
+          fallback: {
+            runtime: node.fallback_runtime,
+            model: node.fallback_model ?? undefined,
+            poolKey,
+            expiresAt,
+            swapBack,
+          },
+        });
+        if (!result.ok) {
+          this.log(`forward swap failed for ${seatRef}: ${result.message}`);
+        } else {
+          this.log(`forward swap complete for ${seatRef} → ${node.fallback_runtime}`);
+        }
+      } catch (err) {
+        this.log(`forward swap threw for ${seatRef}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    } finally {
+      this.inFlight.delete(nodeId);
     }
   }
 
@@ -120,49 +131,59 @@ export class RuntimeFallbackService {
   }): Promise<void> {
     const { nodeId, poolKey } = opts;
 
-    const node = this.queryNode(nodeId);
-    if (!node) {
-      this.log(`reverse swap skipped — node ${nodeId} not found`);
+    if (this.inFlight.has(nodeId)) {
+      this.log(`reverse swap skipped — already in flight for node ${nodeId}`);
       return;
     }
-
-    if (node.fallback_state !== "on_fallback") {
-      this.log(`reverse swap skipped — node ${nodeId} is not on_fallback (state=${node.fallback_state})`);
-      return;
-    }
-
-    const swapBack = (node.fallback_swap_back as FallbackSwapBack | null) ?? "at_expiry";
-
-    if (swapBack === "manual") {
-      this.handleManualSwapBack(node, poolKey);
-      return;
-    }
-
-    const seatRef = this.resolveSeatRef(node);
-    if (!seatRef) {
-      this.log(`reverse swap skipped — could not resolve seatRef for node ${nodeId}`);
-      return;
-    }
-
-    this.log(`triggering reverse swap for ${seatRef} (pool=${poolKey}, restoring to ${node.fallback_original_runtime ?? node.runtime})`);
+    this.inFlight.add(nodeId);
 
     try {
-      const result = await this.seatHandoverService.handover({
-        seatRef,
-        reason: `usage-limit expiry swap-back: pool=${poolKey}`,
-        source: "rebuild",
-        reverseSwap: {
-          poolKey,
-          trigger: "at_expiry",
-        },
-      });
-      if (!result.ok) {
-        this.log(`reverse swap failed for ${seatRef}: ${result.message}`);
-      } else {
-        this.log(`reverse swap complete for ${seatRef} → ${node.fallback_original_runtime}`);
+      const node = this.queryNode(nodeId);
+      if (!node) {
+        this.log(`reverse swap skipped — node ${nodeId} not found`);
+        return;
       }
-    } catch (err) {
-      this.log(`reverse swap threw for ${seatRef}: ${err instanceof Error ? err.message : String(err)}`);
+
+      if (node.fallback_state !== "on_fallback") {
+        this.log(`reverse swap skipped — node ${nodeId} is not on_fallback (state=${node.fallback_state})`);
+        return;
+      }
+
+      const swapBack = (node.fallback_swap_back as FallbackSwapBack | null) ?? "at_expiry";
+
+      if (swapBack === "manual") {
+        this.handleManualSwapBack(node, poolKey);
+        return;
+      }
+
+      const seatRef = this.resolveSeatRef(node);
+      if (!seatRef) {
+        this.log(`reverse swap skipped — could not resolve seatRef for node ${nodeId}`);
+        return;
+      }
+
+      this.log(`triggering reverse swap for ${seatRef} (pool=${poolKey}, restoring to ${node.fallback_original_runtime ?? node.runtime})`);
+
+      try {
+        const result = await this.seatHandoverService.handover({
+          seatRef,
+          reason: `usage-limit expiry swap-back: pool=${poolKey}`,
+          source: "rebuild",
+          reverseSwap: {
+            poolKey,
+            trigger: "at_expiry",
+          },
+        });
+        if (!result.ok) {
+          this.log(`reverse swap failed for ${seatRef}: ${result.message}`);
+        } else {
+          this.log(`reverse swap complete for ${seatRef} → ${node.fallback_original_runtime}`);
+        }
+      } catch (err) {
+        this.log(`reverse swap threw for ${seatRef}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    } finally {
+      this.inFlight.delete(nodeId);
     }
   }
 
