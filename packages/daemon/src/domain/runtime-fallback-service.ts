@@ -153,7 +153,7 @@ export class RuntimeFallbackService {
 
       const swapBack = (node.fallback_swap_back as FallbackSwapBack | null) ?? "at_expiry";
 
-      if (swapBack === "manual") {
+      if (swapBack === "manual" && node.fallback_state === "on_fallback") {
         this.handleManualSwapBack(node, poolKey);
         return;
       }
@@ -196,9 +196,13 @@ export class RuntimeFallbackService {
     this.log(`manual swap-back configured for node ${node.id} — setting swap_back_pending`);
 
     try {
-      this.db.prepare(
+      const result = this.db.prepare(
         "UPDATE nodes SET fallback_state = 'swap_back_pending' WHERE id = ? AND fallback_state = 'on_fallback'"
       ).run(node.id);
+      if (result.changes === 0) {
+        this.log(`handleManualSwapBack: no rows updated for node ${node.id} — state was not on_fallback`);
+        return;
+      }
       this.eventBus.emit({
         type: "seat.runtime_fallback_swap_back_pending",
         rigId: node.rig_id,
@@ -216,16 +220,20 @@ export class RuntimeFallbackService {
    *  Called when seat.runtime_fallback_swap_back_pending fires so the pending state does not
    *  become a dead end. */
   async executeManualSwapBack(): Promise<void> {
-    const pendingNodes = this.db.prepare(
-      "SELECT id, fallback_pool_key FROM nodes WHERE fallback_state = 'swap_back_pending'"
-    ).all() as Array<{ id: string; fallback_pool_key: string | null }>;
+    try {
+      const pendingNodes = this.db.prepare(
+        "SELECT id, fallback_pool_key FROM nodes WHERE fallback_state = 'swap_back_pending'"
+      ).all() as Array<{ id: string; fallback_pool_key: string | null }>;
 
-    for (const node of pendingNodes) {
-      if (!node.fallback_pool_key) {
-        this.log(`executeManualSwapBack: skipping node ${node.id} — no fallback_pool_key`);
-        continue;
+      for (const node of pendingNodes) {
+        if (!node.fallback_pool_key) {
+          this.log(`executeManualSwapBack: skipping node ${node.id} — no fallback_pool_key`);
+          continue;
+        }
+        await this.triggerReverseSwap({ nodeId: node.id, poolKey: node.fallback_pool_key });
       }
-      await this.triggerReverseSwap({ nodeId: node.id, poolKey: node.fallback_pool_key });
+    } catch (err) {
+      this.log(`executeManualSwapBack error: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
