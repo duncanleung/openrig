@@ -22,6 +22,7 @@ import { isHumanSeatSession, validateHumanPark, validateHumanRoute } from "./hum
 import {
   QueueWakeRepository,
   USAGE_LIMIT_BLOCKER_TAG,
+  USAGE_LIMIT_POOL_TAG_PREFIX,
   type ParkWakeStatus,
 } from "./queue-wake-repository.js";
 import { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
@@ -726,6 +727,12 @@ export class QueueRepository {
    *  fixtures fall back to a repository on this same SQLite connection. */
   attachWatchdogJobsRepository(repo: WatchdogJobsRepository): void {
     this.watchdogJobsRepo = repo;
+  }
+
+  /** RIG-43: attach the reverse-swap trigger, called once at startup after handover service is ready. */
+  private runtimeFallbackSwapBackTrigger?: (opts: { nodeId: string; poolKey: string }) => void;
+  attachRuntimeFallbackSwapBackTrigger(trigger: (opts: { nodeId: string; poolKey: string }) => void): void {
+    this.runtimeFallbackSwapBackTrigger = trigger;
   }
 
   /** Startup wires this after queue/watchdog composition. Tests may also call
@@ -2963,6 +2970,23 @@ export class QueueRepository {
       return [...firedEvents, ...resolutionEvents];
     })();
     for (const event of events) this.eventBus.notifySubscribers(event);
+
+    // RIG-43: fire reverse-swap trigger for nodes currently on fallback for any resolved pool.
+    if (this.runtimeFallbackSwapBackTrigger) {
+      for (const { qitemId } of usageLimitBlockers) {
+        const item = this.getById(qitemId);
+        if (!item) continue;
+        const poolTag = item.tags?.find((t) => typeof t === "string" && t.startsWith(USAGE_LIMIT_POOL_TAG_PREFIX));
+        if (!poolTag) continue;
+        const poolKey = poolTag.slice(USAGE_LIMIT_POOL_TAG_PREFIX.length);
+        const fallbackNodes = this.db.prepare(
+          "SELECT id FROM nodes WHERE fallback_state = 'on_fallback' AND fallback_pool_key = ?"
+        ).all(poolKey) as Array<{ id: string }>;
+        for (const { id } of fallbackNodes) {
+          this.runtimeFallbackSwapBackTrigger({ nodeId: id, poolKey });
+        }
+      }
+    }
   }
 
   getById(qitemId: string): QueueItem | null {

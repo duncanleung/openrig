@@ -190,6 +190,9 @@ export interface WakeLadderDeps {
   deliveryEngine?: {
     dispatchEscalation: (row: QueueItem, reason: string) => Promise<{ decision: string; resolved: boolean; notificationKey?: string }>;
   };
+  /** RIG-43: fire-and-forget callback for runtime fallback. Called once per seat per detected
+   *  exhausted pool (idempotent: service checks fallback_state before acting). */
+  runtimeFallbackTrigger?: (opts: { nodeId: string; poolKey: string; expiresAt: string }) => void;
 }
 
 export interface WakeLadderAction {
@@ -654,6 +657,20 @@ export async function runWakeLadderTick(deps: WakeLadderDeps): Promise<WakeLadde
             deps.usageLimitJitterSeconds ?? drawUsageLimitJitterSeconds(),
           );
           blockerByPool.set(usagePool.poolKey, blocker);
+          // RIG-43: check if the seat's node declares a runtime fallback for usage_limit.
+          // Fire the trigger once per pool (blocker creation guards re-fires: the second
+          // ensureUsageLimitBlocker call returns the existing live blocker without creating).
+          if (deps.runtimeFallbackTrigger) {
+            const seatNodeId = resolveSessionNodeId(deps.db, row.destinationSession);
+            if (seatNodeId) {
+              const node = deps.db.prepare(
+                "SELECT id, fallback_runtime, fallback_swap_back, fallback_state FROM nodes WHERE id = ? AND fallback_runtime IS NOT NULL AND fallback_state IS NULL"
+              ).get(seatNodeId) as { id: string; fallback_runtime: string; fallback_swap_back: string; fallback_state: string | null } | undefined;
+              if (node) {
+                deps.runtimeFallbackTrigger({ nodeId: node.id, poolKey: usagePool.poolKey, expiresAt: usagePool.expiresAt });
+              }
+            }
+          }
         }
         deps.queueRepo.update({
           qitemId: row.qitemId,

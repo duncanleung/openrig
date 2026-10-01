@@ -2359,6 +2359,37 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // OPR.0.5.6.1 — bind the delivery policies' late gateway ref.
   lateGatewayDispatch.fn = (op, ref, payload, opts) => gatewaySubsystem.dispatch(op, ref, payload, opts);
 
+  // RIG-43: construct RuntimeFallbackService and wire into wake-ladder + queue-repo.
+  // Uses a dedicated SeatHandoverService instance (rebuild path only; optional deps absent gracefully).
+  {
+    const { SeatHandoverService } = await import("./domain/seat-handover-service.js");
+    const { RuntimeFallbackService } = await import("./domain/runtime-fallback-service.js");
+    const fallbackHandoverService = new SeatHandoverService({
+      db,
+      rigRepo,
+      sessionRegistry,
+      discoveryRepo,
+      eventBus,
+      tmuxAdapter,
+      runtimeAdapters: deps.runtimeAdapters,
+      sessionEnv: launchSessionEnv,
+      tmuxOptionDefaults,
+      occupantInvalidator: deps.occupantInvalidator,
+      // seatActivityService has declareOccupantSwap; agentActivityStore does not.
+      activityOracle: seatActivityService ?? undefined,
+    });
+    const runtimeFallbackService = new RuntimeFallbackService({
+      db,
+      eventBus,
+      seatHandoverService: fallbackHandoverService,
+      log: (msg) => console.log(`[runtime-fallback] ${msg}`),
+    });
+    deps.runtimeFallbackService = runtimeFallbackService;
+    queueRepoInstance.attachRuntimeFallbackSwapBackTrigger(
+      (opts) => void runtimeFallbackService.triggerReverseSwap(opts)
+    );
+  }
+
   const { app, injectWebSocket } = createAppWithWebSocket(deps);
 
   return { app, db, deps, contextMonitor, eventLoopMonitor, injectWebSocket };

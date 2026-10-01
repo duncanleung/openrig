@@ -54,8 +54,23 @@ export interface Node {
   handoverResult: HandoverResult;
   previousOccupant: string | null;
   handoverAt: string | null;
+  /** RIG-43: runtime fallback state columns. Non-null only while a fallback is active. */
+  fallbackRuntime?: string | null;
+  fallbackModel?: string | null;
+  fallbackState?: FallbackState | null;
+  fallbackPoolKey?: string | null;
+  fallbackEnteredAt?: string | null;
+  fallbackSwapBack?: FallbackSwapBack | null;
+  /** RIG-43: the runtime the seat held BEFORE the forward swap; stored so swap-back can restore it. */
+  fallbackOriginalRuntime?: string | null;
   createdAt: string;
 }
+
+/** RIG-43: lifecycle state for runtime fallback. */
+export type FallbackState = "on_fallback" | "swap_back_pending";
+
+/** RIG-43: how the seat returns to its primary runtime. */
+export type FallbackSwapBack = "at_expiry" | "manual";
 
 export interface Edge {
   id: string;
@@ -201,6 +216,10 @@ export type RigEvent =
       sourceOutcome?:
         | { mode: "fork"; forkedFrom: string }
         | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string } }
+  // RIG-43: runtime fallback audit events (seat-level; one per swap direction)
+  | { type: "seat.runtime_fallback_entered"; rigId: string; nodeId: string; logicalId: string; fromRuntime: string | null; toRuntime: string; poolKey: string | null; expiresAt: string | null; swapBack: FallbackSwapBack | null }
+  | { type: "seat.runtime_fallback_exited"; rigId: string; nodeId: string; logicalId: string; fromRuntime: string | null; toRuntime: string | null; poolKey: string; trigger: "at_expiry" | "manual_operator" }
+  | { type: "seat.runtime_fallback_swap_back_pending"; rigId: string; nodeId: string; logicalId: string; poolKey: string; originalRuntime: string | null }
   // Bundle events (cross-rig)
   | { type: "bundle.created"; bundleName: string; bundleVersion: string; archiveHash: string }
   // Teardown events
@@ -1139,6 +1158,22 @@ export interface RigSpecPodMember {
    * `sessionSource.mode: "fork"` per v0 schema (validateStarterRef).
    */
   starterRef?: StarterRefSpec;
+  /** RIG-43: optional runtime fallback declaration. When the primary runtime's
+   *  usage-limit pool is exhausted, the daemon swaps the occupant to this runtime. */
+  fallback?: FallbackSpec;
+}
+
+/** RIG-43 — per-member fallback declaration in rig spec. */
+export interface FallbackSpec {
+  /** Target runtime when the primary is exhausted (e.g. "claude-code"). */
+  runtime: string;
+  /** Optional model override for the fallback occupant. */
+  model?: string;
+  /** Trigger conditions that activate the fallback. v1 supports only "usage_limit". */
+  on: ("usage_limit")[];
+  /** How the seat returns to primary runtime. "at_expiry" swaps back automatically;
+   *  "manual" emits an escalation and waits for operator action. */
+  swapBack: FallbackSwapBack;
 }
 
 export interface RigSpecPodEdge {
