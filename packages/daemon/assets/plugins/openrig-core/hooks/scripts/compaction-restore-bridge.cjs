@@ -228,11 +228,7 @@ async function main() {
     // instead. Keeping the marker lets the bridge deliver the restore packet
     // location on the next UserPromptSubmit (which the auto-nudge triggers).
     marker.data.postCompactAt = nowIso();
-    try {
-      writeMarker(marker);
-    } catch (writeErr) {
-      process.stderr.write(`[compaction-restore-bridge] writeMarker failed on PostCompact: ${writeErr?.message ?? writeErr}\n`);
-    }
+    writeMarker(marker);
 
     // Auto-continuation: unattended sessions stall at a blank prompt after
     // in-place /compact because no UserPromptSubmit fires. Send a self-nudge
@@ -273,10 +269,6 @@ async function main() {
   removeSentinel(payload); // R5: expectation fulfilled — clear the sentinel so it can't false-loud later
 
   const restoreContext = buildRestoreContext(marker);
-
-  // Clean up the marker after successful delivery — it has served its purpose
-  // and deliveryCount prevents re-delivery anyway.
-  try { fs.unlinkSync(marker.filePath); } catch { /* best-effort */ }
 
   process.stdout.write(`${JSON.stringify({
     continue: true,
