@@ -123,7 +123,7 @@ This instruction names a specific model ID. As the model landscape changes, this
 
 This instruction primes the behavior of hand-writing attribution trailers. The Parenthetical explanation ("The users attribution setting… suppresses harness auto-adds but cannot strip text typed into git commit -m HEREDOCs") then further reinforces the concept.
 
-**Positive rewrite:** "Add commit attribution only through the settings file (`~/.claude/settings.json`). The settings file handles attribution automatically; commit messages need no attribution lines."
+**Positive rewrite:** "Write only the attribution lines the harness reminder specifies (e.g., `Claude-Session:`). Do not hand-write `Co-Authored-By: Claude` trailers or `Generated with Claude Code` footers — the settings file suppresses those defaults."
 
 **Another example:** "Do NOT push until orch-lead gives clearance" primes pushing. Better: "Push only after orch-lead gives clearance."
 
