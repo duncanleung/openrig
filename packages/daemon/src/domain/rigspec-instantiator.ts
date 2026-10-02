@@ -1508,6 +1508,7 @@ export class PodRigInstantiator {
             // createMemberNode or `rig up <spec>` seats lose their policy ref.
             permissionPolicy: member.permissionPolicy,
             sessionSource: member.sessionSource,
+            fallback: member.fallback,
             cwd: configResult.config.cwd,
             restorePolicy: configResult.config.restorePolicy,
             podId,
@@ -1845,6 +1846,7 @@ export class PodRigInstantiator {
       // rig-level lives on the rig row; precedence applies at RESOLUTION, not storage.
       permissionPolicy: input.member.permissionPolicy,
       sessionSource: input.member.sessionSource,
+      fallback: input.member.fallback,
       cwd: effectiveCwd,
       restorePolicy: input.member.restorePolicy,
       podId: input.podId,

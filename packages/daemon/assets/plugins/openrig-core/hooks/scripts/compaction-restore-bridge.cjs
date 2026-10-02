@@ -15,6 +15,7 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { spawn } = require("node:child_process");
 
 async function readStdin() {
   return new Promise((resolve) => {
@@ -97,13 +98,34 @@ function findMarker(payload, env = process.env) {
   const key = sessionKey(payload, env);
   if (!key) return null;
   const marker = readMarker(path.join(markerDir(env), `${key}.json`));
-  if (!marker) return null;
-  // Defense-in-depth: refuse a keyed marker that DECLARES a different seat.
-  const declaredName = marker.data && typeof marker.data.sessionName === "string"
-    ? marker.data.sessionName.trim()
-    : "";
-  if (declaredName && sanitizeKey(declaredName) !== key) return null;
-  return marker;
+  if (marker) {
+    // Defense-in-depth: refuse a keyed marker that DECLARES a different seat.
+    const declaredName = marker.data && typeof marker.data.sessionName === "string"
+      ? marker.data.sessionName.trim()
+      : "";
+    if (declaredName && sanitizeKey(declaredName) !== key) return null;
+    return marker;
+  }
+  // PostCompact env-loss fallback: after compaction, OPENRIG_SESSION_NAME may be absent
+  // from the hook environment. The key resolves to the Claude session UUID instead of the
+  // OpenRig session name, so the filename doesn't match. Scan markers for one whose
+  // sessionId matches this session's Claude session ID. Identity-checked: match on
+  // sessionId inside the marker, not on filename — still single-seat, not newest-wins.
+  const claudeSessionId = firstString(
+    payload.session_id, payload.sessionId,
+    env.CLAUDE_CODE_SESSION_ID,
+  );
+  if (!claudeSessionId) return null;
+  const dir = markerDir(env);
+  try {
+    for (const file of fs.readdirSync(dir)) {
+      if (!file.endsWith(".json") || file.endsWith(".expected.json")) continue;
+      const candidate = readMarker(path.join(dir, file));
+      if (!candidate?.data) continue;
+      if (candidate.data.sessionId === claudeSessionId) return candidate;
+    }
+  } catch { /* dir missing or unreadable */ }
+  return null;
 }
 
 // R5 absent-when-needed: the expected-sentinel the PreCompact hook drops FIRST (same seat
@@ -198,8 +220,37 @@ async function main() {
 
   marker.data.lastBridgeEvent = eventName;
   if (eventName === "PostCompact") {
+    // Keep the marker alive so the next UserPromptSubmit can deliver restore
+    // context via additionalContext. The prior approach deleted the marker here
+    // and sent `/postcompact` as an auto-nudge, but `/postcompact` requires a
+    // checkpoint file (.ai/compact-checkpoint-<id>.md) that only the /precompact
+    // SKILL creates — the PreCompact HOOK creates a restore packet in /tmp/
+    // instead. Keeping the marker lets the bridge deliver the restore packet
+    // location on the next UserPromptSubmit (which the auto-nudge triggers).
     marker.data.postCompactAt = nowIso();
     writeMarker(marker);
+
+    // Auto-continuation: unattended sessions stall at a blank prompt after
+    // in-place /compact because no UserPromptSubmit fires. Send a self-nudge
+    // via rig send to drive the next turn. The nudge text is a plain
+    // continuation prompt (not /postcompact) — the bridge's additionalContext
+    // on the resulting UserPromptSubmit delivers the restore packet location.
+    const selfSession = firstString(
+      process.env.OPENRIG_SESSION_NAME,
+      process.env.RIGGED_SESSION_NAME,
+    );
+    if (selfSession) {
+      try {
+        const child = spawn("rig", ["send", selfSession,
+          "Continue from where you left off. A compaction restore packet is available — check the hook context for its location."], {
+          detached: true,
+          stdio: "ignore",
+          env: process.env,
+        });
+        child.unref();
+      } catch { /* best-effort — manual nudge still works */ }
+    }
+
     return;
   }
 
@@ -217,11 +268,13 @@ async function main() {
   writeMarker(marker);
   removeSentinel(payload); // R5: expectation fulfilled — clear the sentinel so it can't false-loud later
 
+  const restoreContext = buildRestoreContext(marker);
+
   process.stdout.write(`${JSON.stringify({
     continue: true,
     hookSpecificOutput: {
       hookEventName: eventName,
-      additionalContext: buildRestoreContext(marker),
+      additionalContext: restoreContext,
     },
   })}\n`);
 }

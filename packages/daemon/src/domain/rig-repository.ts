@@ -137,6 +137,8 @@ interface NodeOptions {
   resolvedSpecName?: string;
   resolvedSpecVersion?: string;
   resolvedSpecHash?: string;
+  /** RIG-43: optional fallback spec to write as fallback_runtime/model/swap_back columns. */
+  fallback?: import("./types.js").FallbackSpec;
 }
 
 export class RigRepository {
@@ -431,6 +433,16 @@ export class RigRepository {
         .run(JSON.stringify(opts.sessionSource), id);
     }
 
+    if (opts?.fallback && this.hasNodeColumn("fallback_runtime")) {
+      this.db.prepare("UPDATE nodes SET fallback_runtime = ?, fallback_model = ?, fallback_swap_back = ? WHERE id = ?")
+        .run(
+          opts.fallback.runtime,
+          opts.fallback.model ?? null,
+          opts.fallback.swapBack,
+          id,
+        );
+    }
+
     return this.rowToNode(
       this.db.prepare("SELECT * FROM nodes WHERE id = ?").get(id) as NodeRow
     );
@@ -689,6 +701,13 @@ export class RigRepository {
       handoverResult: row.handover_result as Node["handoverResult"] ?? null,
       previousOccupant: row.previous_occupant ?? null,
       handoverAt: row.handover_at ?? null,
+      fallbackRuntime: row.fallback_runtime ?? null,
+      fallbackModel: row.fallback_model ?? null,
+      fallbackState: (row.fallback_state as Node["fallbackState"]) ?? null,
+      fallbackPoolKey: row.fallback_pool_key ?? null,
+      fallbackEnteredAt: row.fallback_entered_at ?? null,
+      fallbackSwapBack: (row.fallback_swap_back as Node["fallbackSwapBack"]) ?? null,
+      fallbackOriginalRuntime: row.fallback_original_runtime ?? null,
       createdAt: row.created_at,
     };
   }
@@ -775,6 +794,14 @@ interface NodeRow {
   handover_result: string | null;
   previous_occupant: string | null;
   handover_at: string | null;
+  // RIG-43: runtime fallback columns (nullable — pre-migration rows lack them)
+  fallback_runtime?: string | null;
+  fallback_model?: string | null;
+  fallback_state?: string | null;
+  fallback_pool_key?: string | null;
+  fallback_entered_at?: string | null;
+  fallback_swap_back?: string | null;
+  fallback_original_runtime?: string | null;
   created_at: string;
 }
 

@@ -187,6 +187,8 @@ export function startWakeLadderScheduler(deps: {
   providerService?: Pick<ProviderService, "getReadModel">;
   usageLimitJitterSeconds?: number;
   gatewaySubsystem?: { dispatch: (op: string, entityBindingRef: string, payload: unknown) => { ok: boolean; error?: string } };
+  /** RIG-43: optional runtime-fallback service. Forward-swap trigger is wired from this when present. */
+  runtimeFallbackService?: { triggerForwardSwap(opts: { nodeId: string; poolKey: string; expiresAt: string }): void };
 }): WakeLadderScheduler | null {
   const queueRepo = deps.queueRepo;
   if (!queueRepo) return null;
@@ -215,6 +217,11 @@ export function startWakeLadderScheduler(deps: {
         : {}),
       ...(deps.usageLimitJitterSeconds !== undefined
         ? { usageLimitJitterSeconds: deps.usageLimitJitterSeconds }
+        : {}),
+      // RIG-43: wire forward-swap trigger when RuntimeFallbackService is available.
+      ...(deps.runtimeFallbackService
+        ? { runtimeFallbackTrigger: (opts: { nodeId: string; poolKey: string; expiresAt: string }) =>
+            void deps.runtimeFallbackService!.triggerForwardSwap(opts) }
         : {}),
     }),
     tickIntervalMs: resolveWakeRetryIntervalSeconds() * 1000,

@@ -378,6 +378,8 @@ export interface AppDeps {
    * vars are always derived internally by the composer.
    */
   sessionEnv?: Record<string, string | undefined>;
+  /** RIG-43: runtime fallback service — executes forward and reverse runtime swaps on usage-limit events. */
+  runtimeFallbackService?: import("./domain/runtime-fallback-service.js").RuntimeFallbackService;
 }
 
 const MIME_TYPES: Record<string, string> = {
