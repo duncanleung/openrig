@@ -2390,11 +2390,12 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     );
     // H6-1: swap_back_pending is not a dead end — drive the reverse swap when the event fires.
     // queueMicrotask defers until the outer triggerReverseSwap releases the inFlight lock.
-    eventBus.subscribe((event) => {
+    const unsub = eventBus.subscribe((event) => {
       if (event.type === "seat.runtime_fallback_swap_back_pending") {
         queueMicrotask(() => void runtimeFallbackService.executeManualSwapBack());
       }
     });
+    runtimeFallbackService.bindEventSubscription(unsub);
     // Startup sweep: recover nodes stuck in swap_back_pending from a previous daemon crash.
     void runtimeFallbackService.executeManualSwapBack();
   }
