@@ -17,6 +17,7 @@ interface NodeFallbackRow {
   fallback_state: string | null;
   fallback_swap_back: string | null;
   fallback_original_runtime: string | null;
+  fallback_expires_at: string | null;
 }
 
 interface RigNameRow {
@@ -37,6 +38,8 @@ export class RuntimeFallbackService {
   private seatHandoverService: SeatHandoverService;
   private log: (msg: string) => void;
   private readonly inFlight = new Set<string>();
+  private sweeping = false;
+  private unsubscribe?: () => void;
 
   constructor(deps: RuntimeFallbackDeps) {
     this.db = deps.db;
@@ -166,14 +169,15 @@ export class RuntimeFallbackService {
 
       this.log(`triggering reverse swap for ${seatRef} (pool=${poolKey}, restoring to ${node.fallback_original_runtime ?? node.runtime})`);
 
+      const trigger = node.fallback_state === "swap_back_pending" ? "manual_operator" as const : "at_expiry" as const;
       try {
         const result = await this.seatHandoverService.handover({
           seatRef,
-          reason: `usage-limit expiry swap-back: pool=${poolKey}`,
+          reason: `usage-limit ${trigger === "manual_operator" ? "manual" : "expiry"} swap-back: pool=${poolKey}`,
           source: "rebuild",
           reverseSwap: {
             poolKey,
-            trigger: "at_expiry",
+            trigger,
           },
         });
         if (!result.ok) {
@@ -195,14 +199,14 @@ export class RuntimeFallbackService {
   private handleManualSwapBack(node: NodeFallbackRow, poolKey: string): void {
     this.log(`manual swap-back configured for node ${node.id} — setting swap_back_pending`);
 
+    const result = this.db.prepare(
+      "UPDATE nodes SET fallback_state = 'swap_back_pending' WHERE id = ? AND fallback_state = 'on_fallback'"
+    ).run(node.id);
+    if (result.changes === 0) {
+      this.log(`handleManualSwapBack: no rows updated for node ${node.id} — state was not on_fallback`);
+      return;
+    }
     try {
-      const result = this.db.prepare(
-        "UPDATE nodes SET fallback_state = 'swap_back_pending' WHERE id = ? AND fallback_state = 'on_fallback'"
-      ).run(node.id);
-      if (result.changes === 0) {
-        this.log(`handleManualSwapBack: no rows updated for node ${node.id} — state was not on_fallback`);
-        return;
-      }
       this.eventBus.emit({
         type: "seat.runtime_fallback_swap_back_pending",
         rigId: node.rig_id,
@@ -212,7 +216,7 @@ export class RuntimeFallbackService {
         originalRuntime: node.fallback_original_runtime,
       });
     } catch (err) {
-      this.log(`failed to complete swap_back_pending for node ${node.id}: ${err instanceof Error ? err.message : String(err)}`);
+      this.log(`handleManualSwapBack: emit failed for node ${node.id} (DB state committed, sweep will recover): ${err instanceof Error ? err.message : String(err)}`);
     }
   }
 
@@ -220,6 +224,8 @@ export class RuntimeFallbackService {
    *  Called when seat.runtime_fallback_swap_back_pending fires so the pending state does not
    *  become a dead end. */
   async executeManualSwapBack(): Promise<void> {
+    if (this.sweeping) return;
+    this.sweeping = true;
     try {
       const pendingNodes = this.db.prepare(
         "SELECT id, fallback_pool_key FROM nodes WHERE fallback_state = 'swap_back_pending'"
@@ -234,15 +240,26 @@ export class RuntimeFallbackService {
       }
     } catch (err) {
       this.log(`executeManualSwapBack error: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      this.sweeping = false;
     }
   }
 
   private queryNode(nodeId: string): NodeFallbackRow | null {
     return this.db.prepare(
       `SELECT id, rig_id, logical_id, runtime, fallback_runtime, fallback_model,
-              fallback_state, fallback_swap_back, fallback_original_runtime
+              fallback_state, fallback_swap_back, fallback_original_runtime,
+              fallback_expires_at
        FROM nodes WHERE id = ?`
     ).get(nodeId) as NodeFallbackRow | undefined ?? null;
+  }
+
+  bindEventSubscription(unsub: () => void): void {
+    this.unsubscribe = unsub;
+  }
+
+  dispose(): void {
+    this.unsubscribe?.();
   }
 
   private resolveSeatRef(node: NodeFallbackRow): string | null {
