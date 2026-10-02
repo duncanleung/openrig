@@ -39,6 +39,7 @@ export class RuntimeFallbackService {
   private log: (msg: string) => void;
   private readonly inFlight = new Set<string>();
   private sweeping = false;
+  private sweepRerunRequested = false;
   private unsubscribe?: () => void;
 
   constructor(deps: RuntimeFallbackDeps) {
@@ -224,20 +225,23 @@ export class RuntimeFallbackService {
    *  Called when seat.runtime_fallback_swap_back_pending fires so the pending state does not
    *  become a dead end. */
   async executeManualSwapBack(): Promise<void> {
-    if (this.sweeping) return;
+    if (this.sweeping) { this.sweepRerunRequested = true; return; }
     this.sweeping = true;
     try {
-      const pendingNodes = this.db.prepare(
-        "SELECT id, fallback_pool_key FROM nodes WHERE fallback_state = 'swap_back_pending'"
-      ).all() as Array<{ id: string; fallback_pool_key: string | null }>;
+      do {
+        this.sweepRerunRequested = false;
+        const pendingNodes = this.db.prepare(
+          "SELECT id, fallback_pool_key FROM nodes WHERE fallback_state = 'swap_back_pending'"
+        ).all() as Array<{ id: string; fallback_pool_key: string | null }>;
 
-      for (const node of pendingNodes) {
-        if (!node.fallback_pool_key) {
-          this.log(`executeManualSwapBack: skipping node ${node.id} — no fallback_pool_key`);
-          continue;
+        for (const node of pendingNodes) {
+          if (!node.fallback_pool_key) {
+            this.log(`executeManualSwapBack: skipping node ${node.id} — no fallback_pool_key`);
+            continue;
+          }
+          await this.triggerReverseSwap({ nodeId: node.id, poolKey: node.fallback_pool_key });
         }
-        await this.triggerReverseSwap({ nodeId: node.id, poolKey: node.fallback_pool_key });
-      }
+      } while (this.sweepRerunRequested);
     } catch (err) {
       this.log(`executeManualSwapBack error: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
