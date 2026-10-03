@@ -3,6 +3,7 @@ import type Database from "better-sqlite3";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
+import { isClaudeResumeType } from "../adapters/claude-resume.js";
 import type { StartupAction, StartupProofSelection } from "./types.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
@@ -531,6 +532,22 @@ export class StartupOrchestrator {
         });
       } catch { /* observability write — swallow to avoid blocking startup */ }
     }
+
+    // Managed Claude resume needs agreement on the launched row, not a successful
+    // scrape write: an equal hook/operator token may reject that lower-rank write.
+    // Check after readiness/actions so a concurrent protected update is included.
+    // Omitted type is inferred; claude_name may normalize to a proved claude_id.
+    // An explicit type for another runtime is not that supported normalization.
+    if (!input.skipHarnessLaunch && input.adapter.runtime === "claude-code"
+      && continuityOutcome === "resumed" && input.resumeToken
+      && ((input.resumeType !== undefined && !isClaudeResumeType(input.resumeType))
+        || !this.sessionRegistry.resumeTokenMatches(input.sessionId, "claude_id", input.resumeToken.trim()))) {
+      return this.fail(input, "attention_required", [
+        "Native resume was observed but its requested type or current session metadata conflicts or could not be retained; session preserved.",
+      ]);
+    }
+
+    // 9. Mark ready
     this.sessionRegistry.updateStartupStatus(input.sessionId, "ready", new Date().toISOString());
     this.eventBus.emit({ type: "node.startup_ready", rigId: input.rigId, nodeId: input.nodeId });
 
@@ -568,15 +585,12 @@ export class StartupOrchestrator {
         return result;
       }
 
-      const elapsed = Date.now() - startTime;
-      if (elapsed + delay > timeoutMs) {
-        // One final check before timing out
-        const finalResult = await adapter.checkReady(binding);
-        if (finalResult.ready) return finalResult;
+      const remaining = timeoutMs - (Date.now() - startTime);
+      if (remaining <= 0) {
         return { ready: false, reason: result.reason ?? "readiness timeout" };
       }
 
-      await new Promise((resolve) => setTimeout(resolve, delay));
+      await new Promise((resolve) => setTimeout(resolve, Math.min(delay, remaining)));
       delay = Math.min(delay * 2, maxDelay);
     }
   }

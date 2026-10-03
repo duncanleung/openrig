@@ -121,6 +121,7 @@ interface NodeOptions {
   role?: string;
   runtime?: string;
   model?: string;
+  effort?: string;
   codexConfigProfile?: string;
   /** OPR.0.4.8.3 Seam B: per-seat permission_policy REF (builtin:<name> or spec-relative path). */
   permissionPolicy?: string;
@@ -433,6 +434,11 @@ export class RigRepository {
         .run(JSON.stringify(opts.sessionSource), id);
     }
 
+    if (opts?.effort && this.hasNodeColumn("effort")) {
+      this.db.prepare("UPDATE nodes SET effort = ? WHERE id = ?")
+        .run(opts.effort, id);
+    }
+
     if (opts?.fallback && this.hasNodeColumn("fallback_runtime")) {
       this.db.prepare("UPDATE nodes SET fallback_runtime = ?, fallback_model = ?, fallback_swap_back = ? WHERE id = ?")
         .run(
@@ -455,6 +461,22 @@ export class RigRepository {
     const result = this.db
       .prepare("UPDATE nodes SET model = ? WHERE id = ?")
       .run(model, nodeId);
+    return result.changes > 0;
+  }
+
+  setNodeEffort(nodeId: string, effort: string): boolean {
+    if (!this.hasNodeColumn("effort")) return false;
+    const result = this.db
+      .prepare("UPDATE nodes SET effort = ? WHERE id = ?")
+      .run(effort, nodeId);
+    return result.changes > 0;
+  }
+
+  clearNodeEffort(nodeId: string): boolean {
+    if (!this.hasNodeColumn("effort")) return false;
+    const result = this.db
+      .prepare("UPDATE nodes SET effort = NULL WHERE id = ?")
+      .run(nodeId);
     return result.changes > 0;
   }
 
@@ -679,6 +701,7 @@ export class RigRepository {
       role: row.role,
       runtime: row.runtime,
       model: row.model,
+      effort: row.effort ?? null,
       codexConfigProfile: row.codex_config_profile ?? null,
       permissionPolicy: row.permission_policy ?? null,
       cwd: row.cwd,
@@ -774,6 +797,7 @@ interface NodeRow {
   role: string | null;
   runtime: string | null;
   model: string | null;
+  effort?: string | null;
   codex_config_profile?: string | null;
   permission_policy?: string | null;
   cwd: string | null;

@@ -23,7 +23,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname } from "node:path";
-import { basename, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { assertSafeInstallRef, assertTreeHasNoSymlinks, assertDestinationNamespaceContained, validateContextPackManifestForInstall } from "../lib/context-install.js";
 import { addGitContext, inspectGitContext, updateGitContext } from "../lib/context-git.js";
@@ -377,7 +377,7 @@ Examples:
     .description("Walk the topology tree for one chain filename (instance -> rig -> optional pod -> optional seat), keyed off topology.root")
     .requiredOption("--rig <rig>", "Rig name (the rigs/<rig> altitude)")
     .option("--pod <pod>", "Pod id (the pods/<pod> altitude); omit when no pod context is selected")
-    .option("--seat <seat>", "Seat id (the seats/<seat> altitude); omit for a rig-level trace")
+    .option("--seat <seat>", "Seat folder name (<pod>-<member>, e.g. dev1-qa); omit for a rig-level trace")
     .requiredOption("--name <file>", "Chain filename, identical at every altitude (e.g. LEARNED.md, CULTURE.md)")
     .option("--json", "JSON output for agents")
     .action(async (opts: { rig: string; pod?: string; seat?: string; name: string; json?: boolean }) => {
@@ -818,15 +818,8 @@ Examples:
             throw new Error(`Source directory must contain manifest.yaml: ${source}`);
           }
           validateContextPackManifestForInstall(manifestPath);
-          const installName = opts.name ?? (() => {
-            try {
-              const raw = readFileSync(manifestPath, "utf-8");
-              const m = raw.match(/^name:\s*['"]?([^'"\n]+)['"]?\s*$/m);
-              return m?.[1]?.trim() || basename(source);
-            } catch {
-              return basename(source);
-            }
-          })();
+          const manifest = parseYaml(readFileSync(manifestPath, "utf-8")) as { name: string };
+          const installName = opts.name ?? manifest.name;
           assertSafeInstallRef(installName);
           assertTreeHasNoSymlinks(source);
           mkdirSync(targetRoot, { recursive: true });

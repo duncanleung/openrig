@@ -54,6 +54,9 @@ import { reviewReadIndexesSchema } from "../../src/db/migrations/083_review_read
 import { inventoryEventIndexesSchema } from "../../src/db/migrations/084_inventory_event_indexes.js";
 import { rigClaudeManagedBlockFileSchema } from "../../src/db/migrations/085_rig_claude_managed_block_file.js";
 import { nodePermissionSelectionsSchema } from "../../src/db/migrations/088_node_permission_selections.js";
+import { humanReplyToSchema } from "../../src/db/migrations/090_human_reply_to.js";
+import { humanQuestionsSchema } from "../../src/db/migrations/091_human_questions.js";
+import { nodeEffortSchema } from "../../src/db/migrations/092_node_effort.js";
 import { nodeRuntimeFallbackSchema } from "../../src/db/migrations/090_node_runtime_fallback.js";
 import { nodeFallbackExpiresAtSchema } from "../../src/db/migrations/091_node_fallback_expires_at.js";
 import { rigPolicySchema } from "../../src/db/migrations/041_rig_policy.js";
@@ -113,12 +116,12 @@ import { PodBundleSourceResolver } from "../../src/domain/bundle-source-resolver
 import { NodeCmuxService } from "../../src/domain/node-cmux-service.js";
 import { AgentActivityStore } from "../../src/domain/agent-activity-store.js";
 import { SeatAttentionReconciler } from "../../src/domain/seat-attention-reconciler.js";
-import { createApp } from "../../src/server.js";
+import { createApp, createAppWithWebSocket } from "../../src/server.js";
 import fs from "node:fs";
 
 /** Seam B R6: the canonical full-fixture migration list, exported so file-backed
  *  DB-reopen tests migrate IDENTICALLY to createFullTestDb. */
-export const migrationsForFullTestDb = [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, selfHostIdentitySchema, occupantTenuresSchema, daemonLifecycleSchema, watchdogJobsSchema, occupantGenerationStampsSchema, projectionManifestSchema, watchdogTargetGenerationSchema, appliedLaunchObservationsSchema, appliedLaunchObservationInvalidationsSchema, threadSeatMapSchema, queueTransitionWakesSchema, nodeSessionSourceSchema, scopedOperatingPostureSchema, humanNotificationIntentSchema, reviewReadIndexesSchema, inventoryEventIndexesSchema, rigClaudeManagedBlockFileSchema, nodePermissionSelectionsSchema, nodeRuntimeFallbackSchema, nodeFallbackExpiresAtSchema];
+export const migrationsForFullTestDb = [coreSchema, bindingsSessionsSchema, eventsSchema, snapshotsSchema, checkpointsSchema, resumeMetadataSchema, nodeSpecFieldsSchema, packagesSchema, installJournalSchema, journalSeqSchema, bootstrapSchema, discoverySchema, discoveryFkFix, agentspecRebootSchema, startupContextSchema, chatMessagesSchema, podNamespaceSchema, contextUsageSchema, externalCliAttachmentSchema, rigServicesSchema, seatHandoverObservabilitySchema, nodeCodexConfigProfileSchema, nodePermissionPolicySchema, rigPermissionPolicySchema, nodePolicyProvenanceSchema, rigPolicyProvenanceSchema, streamItemsSchema, queueItemsSchema, queueTransitionsSchema, rigPolicySchema, rigArchiveSchema, resumeProvenanceSchema, resumeVerificationSchema, seatIdentityVerdictsSchema, selfHostIdentitySchema, occupantTenuresSchema, daemonLifecycleSchema, watchdogJobsSchema, occupantGenerationStampsSchema, projectionManifestSchema, watchdogTargetGenerationSchema, appliedLaunchObservationsSchema, appliedLaunchObservationInvalidationsSchema, threadSeatMapSchema, queueTransitionWakesSchema, nodeSessionSourceSchema, scopedOperatingPostureSchema, humanNotificationIntentSchema, reviewReadIndexesSchema, inventoryEventIndexesSchema, rigClaudeManagedBlockFileSchema, nodePermissionSelectionsSchema, humanReplyToSchema, humanQuestionsSchema, nodeEffortSchema, nodeRuntimeFallbackSchema, nodeFallbackExpiresAtSchema];
 
 /**
  * P24 — the DECLARED exclusions for {@link migrationsForFullTestDb}. That list is deliberately a
@@ -262,6 +265,10 @@ export function createTestApp(
     /** Wire the ready runtime adapters into the routes' `runtimeAdapters`, as startup does, so a
      *  route launch can start harnesses. Off by default: existing tests keep no route adapters. */
     wireRuntimeAdapters?: boolean;
+    /** Extra or overriding createApp deps (browser-boundary route tests inject inert spies). */
+    appDeps?: Partial<import("../../src/server.js").AppDeps>;
+    /** Build through createAppWithWebSocket (production upgrade path) and return injectWebSocket. */
+    withWebSocket?: boolean;
     /**
      * Agent Starter v1 vertical M2 R2: optionally expose the in-test
      * StartupOrchestrator + PodRigInstantiator so callers can spy on
@@ -400,7 +407,7 @@ export function createTestApp(
   };
   const upRouter = new UpCommandRouter({ fsOps: upRouterFs });
 
-  const app = createApp({
+  const testAppDeps = {
     rigRepo, sessionRegistry, eventBus, nodeLauncher, startupOrchestrator, tmuxAdapter: tmux, cmuxAdapter: cmux,
     snapshotCapture, snapshotRepo, restoreOrchestrator,
     rigSpecExporter, rigSpecPreflight, rigInstantiator,
@@ -430,10 +437,19 @@ export function createTestApp(
     // across the suite). Tests for the observer itself construct it directly
     // and pass it here explicitly.
     permissionDriftObserver: opts?.permissionDriftObserver ?? { diagnose: () => null },
-    runtimeAdapters: opts?.wireRuntimeAdapters ? adapters : undefined,
-  });
+    // Caller-supplied adapters always reach route handlers; the always-ready
+    // instantiator stubs only when explicitly wired, since they would make
+    // restore routes report resumes.
+    runtimeAdapters: opts?.wireRuntimeAdapters ? adapters : opts?.adapters as Record<string, RuntimeAdapter> | undefined,
+    ...opts?.appDeps,
+  };
+  // withWebSocket: the production createAppWithWebSocket path, returning its injectWebSocket.
+  const built = opts?.withWebSocket
+    ? createAppWithWebSocket(testAppDeps as never)
+    : { app: createApp(testAppDeps as never), injectWebSocket: undefined };
+  const app = built.app;
   return {
-    app, rigRepo, sessionRegistry, eventBus, nodeLauncher, snapshotRepo,
+    app, injectWebSocket: built.injectWebSocket, rigRepo, sessionRegistry, eventBus, nodeLauncher, snapshotRepo,
     snapshotCapture, checkpointStore, restoreOrchestrator,
     rigSpecExporter, rigSpecPreflight, rigInstantiator,
     packageRepo, installRepo, installEngine, installVerifier,

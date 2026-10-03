@@ -11,6 +11,7 @@ import type {
 import { resolveConcreteHint } from "../domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../domain/projection-planner.js";
 import { assessNativeResumeProbe } from "../domain/native-resume-probe.js";
+import { observeClaudePaneProcess, type NativeProcessLister } from "../domain/native-process-lineage.js";
 import { mergeManagedBlock, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
 import { shellQuote } from "./shell-quote.js";
 import { validateClaudeActivityHookDelivery, type ActivityRelayEvent } from "../domain/claude-activity-hooks.js";
@@ -58,6 +59,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   private stateDir: string | null;
   private collectorAssetPath: string | null;
   private autoDriveProviderPrompts: boolean;
+  private listProcesses?: NativeProcessLister;
+  private autoLaunches = new Map<string, { binding: NodeBinding; token: string; executable?: string; fingerprint?: string }>();
   readonly claudeManagedLaunch?: ClaudeManagedLaunch;
   private activityRelayPath: string | null;
   private claudeHooksManifestPath: string | null;
@@ -73,6 +76,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     stateDir?: string;
     collectorAssetPath?: string;
     autoDriveProviderPrompts?: boolean;
+    listProcesses?: NativeProcessLister;
     claudeManagedLaunch?: ClaudeManagedLaunch;
     /** DI source of the activity-relay.cjs asset (parity with the Codex adapter). */
     activityRelayPath?: string;
@@ -90,6 +94,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.stateDir = deps.stateDir ?? null;
     this.collectorAssetPath = deps.collectorAssetPath ?? null;
     this.autoDriveProviderPrompts = deps.autoDriveProviderPrompts ?? false;
+    this.listProcesses = deps.listProcesses;
     this.claudeManagedLaunch = deps.claudeManagedLaunch;
     this.activityRelayPath = deps.activityRelayPath ?? null;
     this.claudeHooksManifestPath = deps.claudeHooksManifestPath ?? null;
@@ -221,6 +226,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     opts: { name: string; resumeToken?: string; forkSource?: import("../domain/runtime-adapter.js").ForkSource },
   ): Promise<HarnessLaunchResult> {
     binding = { ...binding };
+    this.autoLaunches.delete(binding.nodeId);
     opts = { ...opts, ...(opts.forkSource ? { forkSource: { ...opts.forkSource } } : {}) };
     if (!binding.tmuxSession) {
       return { ok: false, error: "No tmux session bound — cannot launch Claude Code harness" };
@@ -255,6 +261,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // resume-cmd builder are the named A2 restore-parity follow-on, not this atom.
     const model = binding.model?.trim();
     const modelArg = model ? ` --model ${shellQuote(model)}` : "";
+    const effort = binding.effort?.trim();
+    const effortArg = effort ? ` --effort ${shellQuote(effort)}` : "";
 
     // Fork branch: build `claude --resume <parent> --fork-session --name <seat>`
     // and capture the NEW post-fork session id. The parent token is NEVER
@@ -270,9 +278,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       if (!parentId) {
         return { ok: false, error: "claude-code fork: forkSource.value is required (parent native_id)" };
       }
-      const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...(model ? ["--model", model] : []),
+      const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []),
         "--resume", parentId, "--fork-session", "--name", opts.name])
-        : `${rendererPrefix}claude ${permissionMode}${modelArg} --resume ${parentId} --fork-session --name ${opts.name}`;
+        : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --resume ${parentId} --fork-session --name ${opts.name}`;
       const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
         : await this.tmux.sendText(binding.tmuxSession, cmd);
       if (!textResult.ok) {
@@ -298,10 +306,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     }
 
     const generatedSessionId = opts.resumeToken ? null : this.sessionIdFactory();
-    const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...(model ? ["--model", model] : []),
+    const cmd = managed ? managed.command(["--permission-mode", binding.permissionMode!, ...(model ? ["--model", model] : []), ...(effort ? ["--effort", effort] : []),
       ...(opts.resumeToken ? ["--resume", opts.resumeToken] : ["--session-id", generatedSessionId!]), "--name", opts.name]) : opts.resumeToken
-      ? `${rendererPrefix}claude ${permissionMode}${modelArg} --resume ${opts.resumeToken} --name ${opts.name}`
-      : `${rendererPrefix}claude ${permissionMode}${modelArg} --session-id ${generatedSessionId} --name ${opts.name}`;
+      ? `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --resume ${opts.resumeToken} --name ${opts.name}`
+      : `${rendererPrefix}claude ${permissionMode}${modelArg}${effortArg} --session-id ${generatedSessionId} --name ${opts.name}`;
 
     const textResult = managed ? await this.tmux.sendShellCommand(binding.tmuxSession, cmd, managed.assertCurrent)
       : await this.tmux.sendText(binding.tmuxSession, cmd);
@@ -314,8 +322,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
     }
 
+    this.autoLaunches.set(binding.nodeId, { binding, token: opts.resumeToken ?? generatedSessionId!, executable: managed?.executable });
     if (opts.resumeToken) {
-      const verification = await this.verifyResumeLaunch(binding.tmuxSession);
+      const verification = await this.verifyResumeLaunch(binding);
       if (!verification.ok) return verification;
       return { ok: true, resumeToken: opts.resumeToken, resumeType: "claude_id", appliedLaunch };
     }
@@ -327,6 +336,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   async checkReady(binding: NodeBinding): Promise<ReadinessResult> {
+    binding = { ...binding };
     if (!binding.tmuxSession) {
       return { ready: false, reason: "No tmux session bound" };
     }
@@ -337,11 +347,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     const paneCommand = await this.tmux.getPaneCommand(binding.tmuxSession);
     const paneContent = (await this.tmux.capturePaneContent(binding.tmuxSession, 40)) ?? "";
-    const probe = assessNativeResumeProbe({
-      runtime: "claude-code",
-      paneCommand,
-      paneContent,
-    });
+    const probe = await this.assessManagedProbe(binding, paneCommand, paneContent);
 
     if (probe.status === "resumed") return { ready: true };
     return { ready: false, reason: probe.detail, code: probe.code };
@@ -359,17 +365,48 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
   // -- Private helpers --
 
-  private async verifyResumeLaunch(tmuxSession: string): Promise<HarnessLaunchResult> {
+  private async assessManagedProbe(binding: NodeBinding, paneCommand: string | null, paneContent: string) {
+    const input = { runtime: "claude-code", paneCommand, paneContent };
+    const probe = assessNativeResumeProbe(input);
+    // Headerless managed launches (including bypass mode) use the same readiness
+    // precedence as resume. This candidate result is returned only after the
+    // exact launch identity below is proved; screen text alone is insufficient.
+    const verifiedProbe = assessNativeResumeProbe({ ...input,
+      claudeAutoIdentityVerified: true, claudeResumeIdentityVerified: true });
+    if (probe.status === "resumed" || verifiedProbe.status !== "resumed") return probe;
+    const launch = this.autoLaunches.get(binding.nodeId);
+    if (!launch || !binding.tmuxPane || !binding.tmuxSession
+      || launch.binding.id !== binding.id || launch.binding.tmuxPane !== binding.tmuxPane
+      || launch.binding.tmuxSession !== binding.tmuxSession
+      || launch.binding.launchGeneration !== binding.launchGeneration) return probe;
+    try {
+      const panes = await this.tmux.listPanes(binding.tmuxSession);
+      if (panes.length !== 1 || panes[0]?.id !== binding.tmuxPane) return probe;
+      const observation = { target: binding.tmuxPane, tmux: this.tmux,
+        listProcesses: this.listProcesses, expectedToken: launch.token, selectedExecutable: launch.executable };
+      const first = await observeClaudePaneProcess(observation);
+      if (!first) return probe;
+      // Pin the first exact process for this launch; retries cannot adopt a replacement.
+      launch.fingerprint ??= first.fingerprint;
+      if (first.fingerprint !== launch.fingerprint) return probe;
+      const native = await observeClaudePaneProcess(observation);
+      if (native?.fingerprint !== launch.fingerprint) return probe;
+      const currentPanes = await this.tmux.listPanes(binding.tmuxSession);
+      if (this.autoLaunches.get(binding.nodeId) !== launch || currentPanes.length !== 1
+        || currentPanes[0]?.id !== binding.tmuxPane
+        || await this.tmux.getPanePid(binding.tmuxSession) !== native.panePid) return probe;
+      return verifiedProbe;
+    } catch { return probe; }
+  }
+
+  private async verifyResumeLaunch(binding: NodeBinding): Promise<HarnessLaunchResult> {
+    const tmuxSession = binding.tmuxSession!;
     const attempts = 16;
 
     for (let attempt = 0; attempt < attempts; attempt++) {
       const paneCommand = await this.tmux.getPaneCommand(tmuxSession);
       const paneContent = (await this.tmux.capturePaneContent(tmuxSession, 40)) ?? "";
-      const probe = assessNativeResumeProbe({
-        runtime: "claude-code",
-        paneCommand,
-        paneContent,
-      });
+      const probe = await this.assessManagedProbe(binding, paneCommand, paneContent);
 
       if (probe.code === "no_conversation_found") {
         return {
@@ -411,17 +448,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
 
     const finalCommand = await this.tmux.getPaneCommand(tmuxSession);
     const finalContent = (await this.tmux.capturePaneContent(tmuxSession, 40)) ?? "";
-    const finalProbe = assessNativeResumeProbe({
-      runtime: "claude-code",
-      paneCommand: finalCommand,
-      paneContent: finalContent,
-    });
+    const finalProbe = await this.assessManagedProbe(binding, finalCommand, finalContent);
 
     if (finalProbe.status === "resumed") {
       return { ok: true };
     }
 
-    if (finalProbe.status === "attention_required") {
+    if (finalProbe.status === "attention_required" || finalProbe.code === "claude_auto_identity_required") {
       return {
         ok: false,
         error: finalProbe.detail,
@@ -726,7 +759,17 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   /**
    * Best-effort: provision the OpenRig context collector for managed Claude sessions.
    * Writes a collector script and merges status line config into .claude/settings.local.json.
-   * Idempotent: safe to call multiple times (merge preserves existing settings).
+   * Idempotent: safe to call multiple times (merge preserves existing settings). A user's own
+   * status line command (anything but the exact command written below), or a file that does not
+   * parse, is left as it is. The collector then never runs for that seat. While a valid sidecar
+   * from an earlier collector is retained, context usage (shown as stale once it ages) and Claude
+   * resume-token capture keep using it. That sidecar's session id may belong to an earlier Claude
+   * session, so capture can record an older session id for such a seat. Once none exists:
+   * - context usage reads unknown (`missing_sidecar`);
+   * - resume-token capture at adoption or handover is skipped (`missing_sidecar`);
+   * - its provider-usage row is an explicit unknown (`no_statusline_cache_yet`) unless an earlier
+   *   cache for that seat is retained.
+   * The read-modify-write below is not safe against a concurrent writer of the same file.
    */
   private provisionContextCollector(binding: { cwd?: string | null; tmuxSession?: string | null }): void {
     if (!this.stateDir || !this.collectorAssetPath || !binding.cwd) return;
@@ -747,15 +790,25 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const settingsPath = nodePath.join(binding.cwd, ".claude", "settings.local.json");
     this.fs.mkdirp(nodePath.dirname(settingsPath));
 
-    const existing = this.readJsonObject(settingsPath);
-
+    // The seat cwd can be a shared repo whose project-local settings other sessions read (#421).
+    // Like the activity hooks, never clobber text we cannot parse. An empty file holds no settings
+    // and is treated as `{}`. Valid JSON that is not an object (for example `[]`) is still
+    // replaced, as before.
+    let existing: Record<string, unknown> = {};
+    if (this.fs.exists(settingsPath)) {
+      const text = this.fs.readFile(settingsPath);
+      if (text.trim() !== "") {
+        let parsed: unknown;
+        try { parsed = JSON.parse(text); } catch { return; }
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) existing = parsed as Record<string, unknown>;
+      }
+    }
+    const statusLine = typeof existing["statusLine"] === "object" && existing["statusLine"] !== null
+      ? existing["statusLine"] as Record<string, unknown> : {};
+    // A user's own status line command wins; only OpenRig's collector command is installed or refreshed.
+    // If this command's shape changes, keep the old shape recognised in isOwnedCollectorCommand, or
+    // seats holding it will never be refreshed.
     const collectorCmd = `node ${collectorDest} ${contextDir} ${providerUsageDir}`;
-    const currentStatusLine = existing["statusLine"];
-    const currentCmd = typeof currentStatusLine === "object" && currentStatusLine !== null
-      ? (currentStatusLine as Record<string, unknown>)["command"]
-      : undefined;
-    const isOpenRigManaged = typeof currentCmd === "string" && currentCmd.includes("context-collector.cjs");
-
     // Check the global ~/.claude/settings.json for a user-defined statusLine.
     // When a user has a global statusLine (e.g., statusline.sh that chains the collector),
     // skip injection — the global setting applies and handles both concerns.
@@ -770,16 +823,17 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
       : undefined;
     const globalHasUserStatusLine = typeof globalCmd === "string" && !globalCmd.includes("context-collector.cjs");
 
+    const current = statusLine["command"];
+    const isOpenRigManaged = typeof current === "string" && (current === collectorCmd || isOwnedCollectorCommand(current));
+
     if (globalHasUserStatusLine) {
       if (isOpenRigManaged) {
         delete existing["statusLine"];
       }
       // else: no project statusLine or user-defined project statusLine — leave as-is
-    } else if (!currentStatusLine || isOpenRigManaged) {
-      existing["statusLine"] = {
-        type: "command",
-        command: collectorCmd,
-      };
+    } else {
+      if (typeof current === "string" && current.trim() !== "" && current !== collectorCmd && !isOwnedCollectorCommand(current)) return;
+      existing["statusLine"] = { ...statusLine, type: "command", command: collectorCmd };
     }
 
     this.fs.writeFile(settingsPath, JSON.stringify(existing, null, 2));
@@ -939,6 +993,21 @@ const OWNED_RELAY_SUFFIX = "/.openrig/hooks/scripts/activity-relay.cjs";
 
 function hookCommand(hook: unknown): string | undefined {
   return isPlainObject(hook) && typeof hook["command"] === "string" ? (hook["command"] as string) : undefined;
+}
+
+// OpenRig-owned context collector. provisionContextCollector writes exactly
+// `node <cwd>/.openrig/context-collector.cjs <contextDir> <providerUsageDir>`, unquoted; older
+// releases wrote the same command without `<providerUsageDir>`. Ownership is either shape with any
+// (possibly stale) paths, on one line. A command that merely contains the path, composed with `;`,
+// `&&`, a pipe or a newline, or naming another file such as `.cjs.backup`, is the user's.
+const OWNED_COLLECTOR_SUFFIX = nodePath.sep + nodePath.join(".openrig", "context-collector.cjs");
+
+function isOwnedCollectorCommand(cmd: string): boolean {
+  if (/[\r\n]/.test(cmd)) return false;
+  const tokens = cmd.trim().split(/\s+/);
+  if ((tokens.length !== 3 && tokens.length !== 4) || tokens[0] !== "node") return false;
+  if (tokens.some((token) => /[;&|<>`$()'"\\]/.test(token))) return false;
+  return tokens[1]!.endsWith(OWNED_COLLECTOR_SUFFIX);
 }
 
 function isOwnedRelayCommand(cmd: string | undefined): boolean {

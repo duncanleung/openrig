@@ -21,6 +21,7 @@ import { LOCAL_HOST_ID } from "../domain/hosts/fanout-contract.js";
 import { remoteJsonRequest } from "../domain/hosts/remote-daemon-http.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { deriveCurrentWork } from "../domain/current-work.js";
+import type { HumanQuestion } from "../domain/human-questions.js";
 
 /**
  * Coordination L3 — Queue HTTP routes (PL-004 Phase A).
@@ -68,6 +69,12 @@ export function queueRoutes(): Hono {
 
   function getRepo(c: { get: (key: string) => unknown }): QueueRepository {
     return c.get("queueRepo" as never) as QueueRepository;
+  }
+  function destinationAdvisory(c: { get: (key: string) => unknown }, sessionRef: string) {
+    // This observation runs after the write commits. An unavailable lookup
+    // must neither fail that write nor misreport membership as unmatched.
+    try { return getRepo(c).destinationAdvisory(sessionRef); }
+    catch { return null; }
   }
   function getInbox(c: { get: (key: string) => unknown }): InboxHandler {
     return c.get("inboxHandler" as never) as InboxHandler;
@@ -142,6 +149,10 @@ export function queueRoutes(): Hono {
         : err.code === "human_registry_unavailable" ? 400
         : err.code === "human_route_fields_required" ? 400
         : err.code === "invalid_human_notification" ? 400
+        // #96: --reply-to refusals are named client errors.
+        : err.code === "reply_to_requires_update" ? 400
+        : err.code === "reply_to_not_found" ? 400
+        : err.code === "invalid_human_questions" ? 400
         // OPR.0.5.1 slice-51-06 D2: summary/evidence_ref on a non-park transition — a client
         // input error surfaced as a structured 400 (the daemon rejects before any mutation).
         : err.code === "summary_evidence_not_persistable" ? 400
@@ -198,10 +209,10 @@ export function queueRoutes(): Hono {
       (c.get("hostRegistryLoader" as never) as (() => ReturnType<typeof loadHostRegistry>) | undefined) ??
       loadHostRegistry;
     const fetchImpl = c.get("remoteFetchImpl" as never) as typeof fetch | undefined;
-    const fail = (detail: string, failureClass: string, remoteStatus?: number): { ok: false; response: Response } => ({
+    const fail = (detail: string, failureClass: string, remoteStatus?: number, outcome?: "indeterminate"): { ok: false; response: Response } => ({
       ok: false,
       response: c.json(
-        { error: "remote_queue_write_failed", hostId, failureClass, ...(remoteStatus !== undefined ? { remoteStatus } : {}), detail },
+        { error: "remote_queue_write_failed", hostId, failureClass, ...(remoteStatus !== undefined ? { remoteStatus } : {}), ...(outcome ? { outcome } : {}), detail },
         502,
       ),
     });
@@ -239,7 +250,7 @@ export function queueRoutes(): Hono {
           res.status,
         );
       case "network":
-        return fail(res.detail, "unreachable");
+        return fail(res.detail, "unreachable", res.status, res.outcome);
       case "http":
         // The origin refused (its own validation/auth/conflict) — its
         // structured error rides through; NO fake success.
@@ -400,6 +411,8 @@ export function queueRoutes(): Hono {
       targetRepo?: string;
       humanIntent?: "decision" | "update" | null;
       humanDetail?: string | null;
+      replyTo?: string | null;
+      humanQuestions?: HumanQuestion[] | null; // shape validated by the repository (invalid_human_questions)
       summary?: string | null;
       evidenceRef?: string | null;
       nudge?: boolean;
@@ -468,12 +481,15 @@ export function queueRoutes(): Hono {
         targetRepo: body.targetRepo,
         humanIntent: body.humanIntent,
         humanDetail: body.humanDetail,
+        replyTo: body.replyTo,
+        humanQuestions: body.humanQuestions,
         summary: body.summary,
         evidenceRef: body.evidenceRef,
         nudge: (body as { nudge?: boolean }).nudge,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
-      return c.json(item, 201);
+      const advisory = destinationAdvisory(c, item.destinationSession);
+      return c.json({ ...item, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -516,7 +532,8 @@ export function queueRoutes(): Hono {
   // OPR.0.3.2.21.FR-4(d-docs) — closure ≠ acceptance.
   //
   // `state=done` with `closure_reason=handed_off_to` records that the
-  // source seat has DELIVERED the work to the next stage. It does NOT
+  // source seat records a handoff claim. A row's handoffAdvisory names
+  // successor custody that this daemon cannot verify. The close does NOT
   // record that the next stage has ACCEPTED the work — that's the next
   // stage's verdict on its own qitem (typically a separate close with
   // its own closure_reason).
@@ -649,7 +666,8 @@ export function queueRoutes(): Hono {
         nudge: (body as { nudge?: boolean }).nudge,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
-      return c.json(result, 201);
+      const advisory = destinationAdvisory(c, result.created.destinationSession);
+      return c.json({ ...result, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -721,7 +739,8 @@ export function queueRoutes(): Hono {
         nudge: body.nudge,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header proved it here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
-      return c.json(result, 201);
+      const advisory = destinationAdvisory(c, result.created.destinationSession);
+      return c.json({ ...result, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }

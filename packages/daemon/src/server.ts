@@ -80,6 +80,7 @@ import type { SkillLibraryDiscoveryService } from "./domain/skill-library-discov
 import { configRoutes } from "./routes/config.js";
 import { hostsRoutes } from "./routes/hosts.js";
 import { hostReadThrough } from "./domain/hosts/read-through.js";
+import { apiOriginProtection } from "./middleware/origin-guard.js";
 import { getSelfHostId, getSelfHostIdSource } from "./domain/hosts/fanout-contract.js";
 import { contextPacksRoutes } from "./routes/context-packs.js";
 import { agentImagesRoutes } from "./routes/agent-images.js";
@@ -115,7 +116,7 @@ import { scopesRoutes } from "./routes/scopes.js";
 import { telemetryRoutes } from "./routes/telemetry.js";
 import { proofRoutes } from "./routes/proof.js";
 import { scopeApproveRoutes } from "./routes/scope-approve.js";
-import { registerTerminalWs } from "./routes/terminal-ws.js";
+import { registerTerminalAuthOnly, registerTerminalWs } from "./routes/terminal-ws.js";
 import { createNodeWebSocket } from "@hono/node-ws";
 import { steeringRoutes } from "./routes/steering.js";
 import { healthSummaryRoutes } from "./routes/health-summary.js";
@@ -140,6 +141,7 @@ import { envRoutes } from "./routes/env.js";
 import type { RigLifecycleService } from "./domain/rig-lifecycle-service.js";
 import { seatRoutes } from "./routes/seat.js";
 import { createRouteTimingMiddleware } from "./domain/route-timing-recorder.js";
+import { browserBoundary, type BrowserBoundaryOptions } from "./middleware/browser-boundary.js";
 
 export interface AppDeps {
   proofSourceWatch?: import("./domain/proof/source-watch.js").ProofSourceWatch;
@@ -291,6 +293,13 @@ export interface AppDeps {
   missionControlBearerToken?: string | null;
   terminalBearerToken?: string | null;
   enableNodeWebSocket?: boolean;
+  /** `ui.enabled`: serve the web UI pages and its terminal WebSocket. Off unless true; /api routes are unaffected. */
+  webUiEnabled?: boolean;
+  /** This machine's own extra names for the /api browser boundary (createDaemon wires the
+   *  Tailscale MagicDNS self-name lookup). Absent: loopback, IP literals and OS names only. */
+  selfNameDiscovery?: () => Promise<string[]>;
+  /** Test hook: one call per /api browser-boundary decision. */
+  browserBoundaryObserver?: BrowserBoundaryOptions["onDecision"];
   specReviewService?: SpecReviewService;
   specLibraryService?: SpecLibraryService;
   /**
@@ -378,6 +387,8 @@ export interface AppDeps {
    * vars are always derived internally by the composer.
    */
   sessionEnv?: Record<string, string | undefined>;
+  /** Per-runtime launch env merged over sessionEnv (OMP's provider keys). */
+  runtimeSessionEnv?: Record<string, Record<string, string | undefined>>;
   /** RIG-43: runtime fallback service — executes forward and reverse runtime swaps on usage-limit events. */
   runtimeFallbackService?: import("./domain/runtime-fallback-service.js").RuntimeFallbackService;
 }
@@ -396,6 +407,9 @@ const MIME_TYPES: Record<string, string> = {
 function resolveDefaultUiDistDir(): string {
   return nodePath.resolve(nodePath.dirname(fileURLToPath(import.meta.url)), "..", "..", "ui", "dist");
 }
+
+export const WEB_UI_OFF_MESSAGE =
+  "The OpenRig web UI is off. To turn it on, run `rig config set ui.enabled true`, then stop and start the daemon (`rig daemon stop`, `rig daemon start`).\n";
 
 function safeResolveUiPath(uiDistDir: string, requestPath: string): string | null {
   const relativePath = requestPath.replace(/^\/+/, "") || "index.html";
@@ -494,6 +508,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("tmuxAdapter" as never, deps.tmuxAdapter);
     c.set("tmuxOptionDefaults" as never, deps.tmuxOptionDefaults);
     c.set("sessionEnv" as never, deps.sessionEnv);
+    c.set("runtimeSessionEnv" as never, deps.runtimeSessionEnv);
     c.set("cmuxAdapter" as never, deps.cmuxAdapter);
     // S10 — the in-daemon gateway subsystem handle (health surface + dispatch seam).
     c.set("gatewaySubsystem" as never, deps.gatewaySubsystem);
@@ -624,6 +639,23 @@ export function createApp(deps: AppDeps): Hono {
     app.use("*", createSlowOpRequestMiddleware(deps.slowOpRecorder));
   }
 
+  // Browser boundary: target name and browser Origin, checked once per /api request
+  // (WebSocket upgrades included), before the Origin guard below, the remote
+  // read-through and every route. It runs first so its refusal codes and remedies
+  // are what callers see.
+  app.use("/api/*", browserBoundary({
+    webUiEnabled: deps.webUiEnabled === true,
+    bearerTokens: [deps.terminalBearerToken, deps.missionControlBearerToken],
+    allowedOrigins: process.env.OPENRIG_ALLOWED_ORIGINS,
+    allowedHosts: process.env.OPENRIG_ALLOWED_HOSTS,
+    discoverSelfNames: deps.selfNameDiscovery,
+    onDecision: deps.browserBoundaryObserver,
+  }));
+
+  // Cross-site request forgery and drive-by daemon API protection.
+  // Rejects requests with unauthorized browser Origin headers on all /api/* routes.
+  app.use("/api/*", apiOriginProtection());
+
   // OPR.0.4.6.MH2 FR-2/FR-7 — the single-host READ-THROUGH edge (the read
   // twin of the mission-control remote-forward). Consumes a `?host=<id>`
   // envelope on allowlisted GET reads; refuses non-GET / non-allowlisted
@@ -723,11 +755,14 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/compaction", compactionRoutes({ bearerToken: deps.terminalBearerToken ?? null }));
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let injectWebSocket: (server: any) => void = () => {};
-  if (deps.enableNodeWebSocket) {
+  // The terminal WebSocket only serves the web UI, so it exists only while the web UI is on.
+  if (deps.enableNodeWebSocket && deps.webUiEnabled === true) {
     const ws = createNodeWebSocket({ app });
     injectWebSocket = ws.injectWebSocket as never;
     _lastInjectWebSocket = injectWebSocket;
     registerTerminalWs(app, ws.upgradeWebSocket as never, { bearerToken: deps.terminalBearerToken ?? null });
+  } else if (deps.enableNodeWebSocket) {
+    registerTerminalAuthOnly(app, { bearerToken: deps.terminalBearerToken ?? null });
   }
   app.route("/api/activity", activityRoutes);
   app.route("/api/ask", askRoutes);
@@ -822,6 +857,11 @@ export function createApp(deps: AppDeps): Hono {
 
     if (requestPath === "/healthz" || requestPath.startsWith("/api/")) {
       return c.notFound();
+    }
+
+    if (deps.webUiEnabled !== true) {
+      c.header("X-OpenRig-Web-UI", "off");
+      return c.text(WEB_UI_OFF_MESSAGE, 404);
     }
 
     if (!hasUiBundle) {

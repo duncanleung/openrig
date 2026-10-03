@@ -143,7 +143,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        'tmux list-panes -t \'my-session:0\' -F "#{pane_id}|#{pane_index}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_active}"'
+        'tmux list-panes -t \'=my-session:0\' -F "#{pane_id}|#{pane_index}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_active}"'
       );
     });
 
@@ -155,7 +155,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        'tmux list-panes -t \'my session\'\"\'\"\'s:0\' -F "#{pane_id}|#{pane_index}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_active}"'
+        'tmux list-panes -t \'=my session\'\"\'\"\'s:0\' -F "#{pane_id}|#{pane_index}|#{pane_current_path}|#{pane_width}|#{pane_height}|#{pane_active}"'
       );
     });
 
@@ -289,7 +289,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'r01-dev1-impl' -c '/home/user/code'"
+        "tmux new-session -d -s 'r01-dev1-impl' -c '/home/user/code' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS='"
       );
     });
 
@@ -301,7 +301,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'r01-dev1-impl' -c '/home/user/my project/code'"
+        "tmux new-session -d -s 'r01-dev1-impl' -c '/home/user/my project/code' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS='"
       );
     });
 
@@ -313,7 +313,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'r01-dev'\"'\"'s session' -c '/tmp'"
+        "tmux new-session -d -s 'r01-dev'\"'\"'s session' -c '/tmp' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS='"
       );
     });
 
@@ -325,7 +325,7 @@ describe("TmuxAdapter", () => {
 
       expect(exec).toHaveBeenCalledOnce();
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'r01-dev1-impl'"
+        "tmux new-session -d -s 'r01-dev1-impl' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS='"
       );
     });
 
@@ -358,8 +358,8 @@ describe("TmuxAdapter", () => {
       await adapter.createSession("r01-test", "/tmp");
 
       const cmd = exec.mock.calls[0]![0] as string;
-      expect(cmd).not.toContain("-e ");
-      expect(cmd).toBe("tmux new-session -d -s 'r01-test' -c '/tmp'");
+      expect(cmd).toContain("-e 'OPENRIG_TRANSCRIPTS_LINES='");
+      expect(cmd).toBe("tmux new-session -d -s 'r01-test' -c '/tmp' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS='");
     });
 
     it("returns { ok: false, code: 'duplicate_session' } on duplicate", async () => {
@@ -390,7 +390,7 @@ describe("TmuxAdapter", () => {
         writeFile, unlink, tmpName: () => "/tmp/text.txt", bufferName: () => "fixture",
       });
       expect(await adapter.sendText("dev'qa@rig", text)).toEqual({ ok: true });
-      expect(writeFile).toHaveBeenCalledWith("/tmp/text.txt", text);
+      expect(writeFile).toHaveBeenCalledWith("/tmp/text.txt", text, { mode: 0o600, flag: "wx" });
       expect(exec.mock.calls.map(([cmd]) => cmd)).toEqual([
         "tmux load-buffer -b 'fixture' '/tmp/text.txt'",
         "tmux paste-buffer -t 'dev'\"'\"'qa@rig' -b 'fixture' -d -r -p",
@@ -464,10 +464,41 @@ describe("TmuxAdapter", () => {
 
       await adapter.killSession("r01-dev1-impl");
 
-      expect(exec).toHaveBeenCalledOnce();
-      expect(exec.mock.calls[0]![0]).toBe(
-        "tmux kill-session -t 'r01-dev1-impl'"
-      );
+      expect(exec.mock.calls.map((call) => call[0])).toEqual([
+        "tmux detach-client -s 'r01-dev1-impl'",
+        "tmux kill-session -t 'r01-dev1-impl'",
+      ]);
+    });
+
+    it("still kills the session when no client is attached", async () => {
+      const exec = vi.fn<ExecFn>(async (cmd: string) => {
+        if (cmd.includes("detach-client")) throw new Error("no current client");
+        return "";
+      });
+      const adapter = new TmuxAdapter(exec);
+
+      const result = await adapter.killSession("r01-dev1-impl");
+
+      expect(result).toEqual({ ok: true });
+      expect(exec.mock.calls.map((call) => call[0])).toEqual([
+        "tmux detach-client -s 'r01-dev1-impl'",
+        "tmux kill-session -t 'r01-dev1-impl'",
+      ]);
+    });
+
+    it("does not kill the session when detach fails unexpectedly", async () => {
+      const exec = vi.fn<ExecFn>(async (cmd: string) => {
+        if (cmd.includes("detach-client")) throw new Error("permission denied");
+        return "";
+      });
+      const adapter = new TmuxAdapter(exec);
+
+      const result = await adapter.killSession("r01-dev1-impl");
+
+      expect(result).toEqual({ ok: false, code: "unknown", message: "permission denied" });
+      expect(exec.mock.calls.map((call) => call[0])).toEqual([
+        "tmux detach-client -s 'r01-dev1-impl'",
+      ]);
     });
 
     it("returns { ok: true } on success", async () => {
@@ -492,10 +523,10 @@ describe("TmuxAdapter", () => {
 
       await adapter.killSession("r01-dev's session");
 
-      expect(exec).toHaveBeenCalledOnce();
-      expect(exec.mock.calls[0]![0]).toBe(
-        "tmux kill-session -t 'r01-dev'\"'\"'s session'"
-      );
+      expect(exec.mock.calls.map((call) => call[0])).toEqual([
+        "tmux detach-client -s 'r01-dev'\"'\"'s session'",
+        "tmux kill-session -t 'r01-dev'\"'\"'s session'",
+      ]);
     });
   });
 
@@ -625,7 +656,7 @@ describe("TmuxAdapter", () => {
       // createSession with canonical name
       await adapter.createSession("dev-impl@auth-feats", "/home/user/code");
       expect(exec.mock.calls[0]![0]).toBe(
-        "tmux new-session -d -s 'dev-impl@auth-feats' -c '/home/user/code'"
+        "tmux new-session -d -s 'dev-impl@auth-feats' -c '/home/user/code' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS='"
       );
 
       // sendKeys targeting canonical name
@@ -858,7 +889,7 @@ describe("TmuxAdapter", () => {
 
       expect(result).toEqual({ ok: true });
       // The raw payload is written to disk via fs, NOT embedded in a shell command.
-      expect(writeFile).toHaveBeenCalledWith("/tmp/openrig-tmux-send-FIXED.txt", BIG);
+      expect(writeFile).toHaveBeenCalledWith("/tmp/openrig-tmux-send-FIXED.txt", BIG, { mode: 0o600, flag: "wx" });
       const cmds = exec.mock.calls.map((c) => c[0] as string);
       expect(cmds).toEqual([
         "tmux load-buffer -b 'openrig_FIXED' '/tmp/openrig-tmux-send-FIXED.txt'",
@@ -883,7 +914,7 @@ describe("TmuxAdapter", () => {
       const result: TmuxResult = await adapter.sendText("dev@rig", MID);
 
       expect(result).toEqual({ ok: true });
-      expect(writeFile).toHaveBeenCalledWith("/tmp/openrig-tmux-send-FIXED.txt", MID);
+      expect(writeFile).toHaveBeenCalledWith("/tmp/openrig-tmux-send-FIXED.txt", MID, { mode: 0o600, flag: "wx" });
       for (const cmd of exec.mock.calls.map((c) => c[0] as string)) expect(cmd).not.toContain(MID);
     });
 
@@ -922,6 +953,20 @@ describe("TmuxAdapter", () => {
         .filter((cmd) => cmd.startsWith("tmux load-buffer"));
       expect(loadCmds).toHaveLength(2);
       expect(loadCmds[0]).not.toBe(loadCmds[1]);
+    });
+
+    it("does not unlink the file if this call failed to create it (e.g. file already exists)", async () => {
+      const exec = vi.fn<ExecFn>().mockResolvedValue("");
+      const { ops, writeFile, unlink } = fixedFileOps();
+      const existErr = new Error("EEXIST: file already exists, open '/tmp/openrig-tmux-send-FIXED.txt'");
+      (existErr as unknown as { code: string }).code = "EEXIST";
+      writeFile.mockRejectedValueOnce(existErr);
+      const adapter = new TmuxAdapter(exec, ops);
+
+      const result = await adapter.sendText("dev@rig", BIG);
+
+      expect(result.ok).toBe(false);
+      expect(unlink).not.toHaveBeenCalled();
     });
   });
 

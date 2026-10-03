@@ -6,6 +6,13 @@ import { randomUUID } from "node:crypto";
 
 export type ExecFn = (cmd: string) => Promise<string>;
 
+interface TmuxShellCommandOptions {
+  /** Pi can send commands within the terminal byte bound directly. */
+  stageIfLong?: boolean;
+  /** A staged single-executable runner must replace the staging shell. */
+  execInScript?: boolean;
+}
+
 /**
  * Argv exec: run the multiplexer WITHOUT a shell (execFile-style — the
  * binary is argv[0], the rest are verbatim arguments, no quoting layer).
@@ -196,6 +203,14 @@ function classifyWriteError(err: unknown): TmuxResult {
 }
 
 /** Shell-quote a string using single quotes (POSIX-safe). */
+/** One pane's text from a batched capture, with the time its chunk was read (#309 review). `text` is null for a
+ *  session that is gone or an empty capture. */
+export interface PaneCapture { text: string | null; capturedAt: Date }
+
+/** The most sessions one batched capture chains (#308). Not a byte bound: a chunk whose output overflows exec's buffer
+ *  fails and is split in half. */
+const CAPTURE_BATCH = 24;
+
 function shellQuote(s: string): string {
   // Replace each ' with '"'"' (end quote, double-quote the apostrophe, resume quote)
   return "'" + s.replace(/'/g, "'\"'\"'") + "'";
@@ -357,8 +372,18 @@ export class TmuxAdapter {
           const result = classifyWriteError(error);
           // Only termination consumes positive absence. Unknown probe failures
           // still refuse, and guard-on never reaches this observation.
-          if (allowAbsent && !result.ok && result.code === "session_not_found"
-            && !/permission denied|operation not permitted|EACCES|EPERM/i.test(result.message)) return result;
+          if (allowAbsent && !result.ok
+            && !/permission denied|operation not permitted|EACCES|EPERM/i.test(result.message)) {
+            if (result.code === "session_not_found") return result;
+            // list-panes reports a missing session as "can't find window" on
+            // native tmux. Do not broaden write-error classification: only
+            // termination may confirm the bound session's positive absence.
+            if (/can't find window/i.test(result.message)) {
+              const probe = await this.probeSession(bound.session);
+              guard.checkInput(identity);
+              if (probe.state === "absent") return { ok: false, code: "session_not_found", message: result.message };
+            }
+          }
           throw error;
         }
         const pane = fresh ? created.pane : bound.pane;
@@ -446,9 +471,16 @@ export class TmuxAdapter {
   }
 
   async listPanes(target: string): Promise<TmuxPane[]> {
+    // Callers name a session (optionally with a window), or an immutable tmux
+    // id. Exact session matching prevents observing a prefix neighbor's pane.
+    // A bare leading '=' belongs to the literal session name. Only qualified
+    // targets already carry tmux's encoded exact-match syntax.
+    const namedTarget = target.includes(":") && target.startsWith("=") ? target : `=${target}`;
+    const exactTarget = /^[%$@]\d+$/.test(target) ? target
+      : namedTarget.includes(":") ? namedTarget : `${namedTarget}:`;
     try {
-      const output = await this.run(["tmux", "list-panes", "-t", target, "-F", PANE_FORMAT],
-        `tmux list-panes -t ${shellQuote(target)} -F "${PANE_FORMAT}"`);
+      const output = await this.run(["tmux", "list-panes", "-t", exactTarget, "-F", PANE_FORMAT],
+        `tmux list-panes -t ${shellQuote(exactTarget)} -F "${PANE_FORMAT}"`);
       return parseLines(output, parsePaneLine);
     } catch (err) {
       if (isNoServerError(err) || isTmuxTransportAbsentError(err)) return [];
@@ -471,8 +503,9 @@ export class TmuxAdapter {
       // Use `tmux has-session` directly for reliable existence check — avoids
       // parsing format-string output from `list-sessions` which can fail when
       // tab delimiters are malformed across tmux versions.
-      await this.run(["tmux", "has-session", "-t", name],
-        `tmux has-session -t ${shellQuote(name)}`);
+      const target = `=${name}`; // canonical session name, never a prefix lookup
+      await this.run(["tmux", "has-session", "-t", target],
+        `tmux has-session -t ${shellQuote(target)}`);
       return { state: "present" }; // exit 0 = session exists
     } catch (err) {
       if (isSessionAbsenceError(err)) {
@@ -514,12 +547,21 @@ export class TmuxAdapter {
   finishLaunchBinding(session: string): void { this.freshManaged.delete(session); }
 
   private async createSessionUnchecked(name: string, cwd?: string, env?: Record<string, string>): Promise<TmuxResult> {
+    // These are the daemon's resolved capture settings, not seat overrides.
+    // An empty per-session value prevents the tmux server's inherited values
+    // from pinning an old policy over config.json inside a newly launched seat.
+    // Explicit seat settings remain authoritative.
+    const seatEnv = {
+      OPENRIG_TRANSCRIPTS_LINES: "",
+      OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS: "",
+      ...env,
+    };
     const argv = ["tmux", "new-session", "-d", "-s", name];
     if (cwd != null) argv.push("-c", cwd);
-    if (env) for (const [k, v] of Object.entries(env)) argv.push("-e", `${k}=${v}`);
+    for (const [k, v] of Object.entries(seatEnv)) argv.push("-e", `${k}=${v}`);
     const legacyParts = ["tmux", "new-session", "-d", "-s", shellQuote(name)];
     if (cwd != null) legacyParts.push("-c", shellQuote(cwd));
-    if (env) for (const [k, v] of Object.entries(env)) legacyParts.push("-e", shellQuote(`${k}=${v}`));
+    for (const [k, v] of Object.entries(seatEnv)) legacyParts.push("-e", shellQuote(`${k}=${v}`));
     try {
       await this.run(argv, legacyParts.join(" "));
       return { ok: true };
@@ -551,8 +593,10 @@ export class TmuxAdapter {
     const path = this.fileOps.tmpName();
     const buffer = this.fileOps.bufferName();
     let bufferLoaded = false;
+    let created = false;
     try {
-      await this.fileOps.writeFile(path, text);
+      await this.fileOps.writeFile(path, text, { mode: 0o600, flag: "wx" });
+      created = true;
       await this.run(["tmux", "load-buffer", "-b", buffer, path],
         `tmux load-buffer -b ${shellQuote(buffer)} ${shellQuote(path)}`);
       bufferLoaded = true;
@@ -571,9 +615,11 @@ export class TmuxAdapter {
       }
       return classifyWriteError(err);
     } finally {
-      try {
-        await this.fileOps.unlink(path);
-      } catch { /* best-effort cleanup */ }
+      if (created) {
+        try {
+          await this.fileOps.unlink(path);
+        } catch { /* best-effort cleanup */ }
+      }
     }
   }
 
@@ -585,24 +631,33 @@ export class TmuxAdapter {
    * The shell removes its private script when consumed (not when pasted).
    * A shell that never consumes the invocation leaves the file for diagnosis.
    */
-  async sendShellCommand(target: string, command: string, beforeInput?: () => void): Promise<TmuxResult> {
+  async sendShellCommand(target: string, command: string, beforeInput?: () => void, options: TmuxShellCommandOptions = {}): Promise<TmuxResult> {
     // Keep the managed selector for nested paste/Enter checks. A resolved pane
     // ID can also occur in detached bindings after a tmux restart; resolving it
     // again would lose the unambiguous session/node and its existing lease.
     // Each nested write still validates the lease and targets its observed pane.
-    return this.guardedInput(target, () => this.sendShellCommandUnchecked(target, command, beforeInput));
+    return this.guardedInput(target, () => this.sendShellCommandUnchecked(target, command, beforeInput, options));
   }
 
-  private async sendShellCommandUnchecked(target: string, command: string, beforeInput?: () => void): Promise<TmuxResult> {
-    const path = this.fileOps.tmpName();
-    const invocation = `/bin/sh ${shellQuote(path)}`;
+  private async sendShellCommandUnchecked(target: string, command: string, beforeInput: (() => void) | undefined, options: TmuxShellCommandOptions): Promise<TmuxResult> {
+    const commandBytes = Buffer.byteLength(command, "utf8");
+    let path = options.stageIfLong && commandBytes <= 512 ? undefined : this.fileOps.tmpName();
+    let invocation = path ? `/bin/sh ${shellQuote(path)}` : command;
     if (Buffer.byteLength(invocation, "utf8") > 512) {
-      return { ok: false, code: "launch_path_too_long", message: "Temporary launch-script path exceeds the safe terminal input bound" };
+      // Pi commands below the canonical tty limit still fit when staging cannot.
+      if (options.stageIfLong && commandBytes < 1024) {
+        path = undefined;
+        invocation = command;
+      } else {
+        return { ok: false, code: "launch_path_too_long", message: "Temporary launch-script path exceeds the safe terminal input bound" };
+      }
     }
     let created = false;
     try {
-      await this.fileOps.writeFile(path, `/bin/rm -f -- ${shellQuote(path)}\n${command}\n`, { mode: 0o600, flag: "wx" });
-      created = true;
+      if (path) {
+        await this.fileOps.writeFile(path, `/bin/rm -f -- ${shellQuote(path)}\n${options.execInScript ? "exec " : ""}${command}\n`, { mode: 0o600, flag: "wx" });
+        created = true;
+      }
       const text = beforeInput ? await this.guardedInput(target, (pane, check) => this.sendTextUnchecked(pane, invocation, () => { check(); beforeInput(); }))
         : await this.sendText(target, invocation);
       if (!text.ok) return text;
@@ -618,7 +673,7 @@ export class TmuxAdapter {
     } catch (err) {
       return classifyWriteError(err);
     } finally {
-      if (created) {
+      if (created && path) {
         try { await this.fileOps.unlink(path); } catch { /* best-effort cleanup */ }
       }
     }
@@ -682,6 +737,15 @@ export class TmuxAdapter {
   }
 
   private async killSessionUnchecked(name: string): Promise<TmuxResult> {
+    // Detach first so `detach-on-destroy off` cannot switch views onto another session.
+    try {
+      await this.run(["tmux", "detach-client", "-s", name],
+        `tmux detach-client -s ${shellQuote(name)}`);
+    } catch (err) {
+      // tmux 3.7 says "no current client" when nothing is attached (and for a missing session, which the kill classifies).
+      const message = err instanceof Error ? err.message : String(err);
+      if (!message.toLowerCase().includes("no current client")) return classifyWriteError(err);
+    }
     try {
       await this.run(["tmux", "kill-session", "-t", name],
         `tmux kill-session -t ${shellQuote(name)}`);
@@ -873,6 +937,84 @@ export class TmuxAdapter {
   }
 
   /** Capture pane content (last N lines). Returns null if unavailable. */
+  /**
+   * Capture many sessions' panes with a few tmux calls instead of one per session (#308). One `list-sessions` says
+   * which targets exist: a missing one maps to null (as a failed per-target capture) without a fork. The live ones
+   * are captured in chunks of CAPTURE_BATCH chained commands (a `display-message` marker, then `capture-pane`), each
+   * pane's output delimited by a marker unique to the call, so the text equals what `capturePaneContent` returns.
+   * Targets are exact (`=<name>:`): no prefix match, and a name with a "." still resolves. tmux stops a chain at its
+   * first failing command, so a chunk that fails is split in half and retried (an oversized output, or a session gone
+   * since the listing); a single session that still fails is left OUT of the map, and the caller reads it per target.
+   * Null when tmux can't be listed at all. Each entry carries the time its own chunk was read (`capturedAt`), so a
+   * slow later chunk can't make an earlier capture look fresh.
+   */
+  async capturePanesContent(targets: string[], lines: number = 20, now: () => Date = () => new Date()): Promise<Map<string, PaneCapture> | null> {
+    let live: Set<string>;
+    try {
+      const listing = await this.run(["tmux", "list-sessions", "-F", "#{session_name}"], "tmux list-sessions -F '#{session_name}'");
+      live = new Set(listing.split("\n").map((s) => s.trim()).filter(Boolean));
+    } catch {
+      return null;
+    }
+    const out = new Map<string, PaneCapture>();
+    const listedAt = now();
+    const present: string[] = [];
+    for (const t of new Set(targets)) {
+      if (live.has(t)) present.push(t);
+      else out.set(t, { text: null, capturedAt: listedAt });
+    }
+    // A chunk that fails is split in half and retried, down to one session: its output overflowed exec's buffer (wide,
+    // colour-dense panes: each capture is the visible pane plus the requested history) or a session vanished since
+    // the listing. A single session that still fails is left out: the caller reads it per target.
+    /** Capture one chunk with a single chained tmux call into `out`; on failure, split it in half and retry each half. */
+    const captureChunk = async (chunk: string[]): Promise<void> => {
+      const nonce = randomUUID().replace(/-/g, "");
+      const mark = (k: number) => `__openrig_capture_${nonce}_${k}__`;
+      const argv = ["tmux", ...chunk.flatMap((t, k) => [
+        ...(k > 0 ? [";"] : []),
+        "display-message", "-p", "-t", `=${t}:`, mark(k), ";", "capture-pane", "-p", "-t", `=${t}:`, "-S", `-${lines}`,
+      ])];
+      const legacy = "tmux " + chunk.map((t, k) =>
+        `display-message -p -t ${shellQuote(`=${t}:`)} ${shellQuote(mark(k))} \\; capture-pane -p -t ${shellQuote(`=${t}:`)} -S -${lines}`,
+      ).join(" \\; ");
+      let output: string;
+      let capturedAt: Date;
+      try {
+        output = await this.run(argv, legacy);
+        capturedAt = now(); // when THIS chunk's panes were read, not when the sweep ends
+      } catch {
+        if (chunk.length > 1) {
+          const half = Math.ceil(chunk.length / 2);
+          await captureChunk(chunk.slice(0, half));
+          await captureChunk(chunk.slice(half));
+        }
+        return; // a single session that failed: read per target by the caller
+      }
+      const segments: Array<string[] | null> = chunk.map(() => null);
+      let cur = -1;
+      const outLines = output.split("\n");
+      if (outLines.length && outLines[outLines.length - 1] === "") outLines.pop(); // the final newline, not a line
+      for (const line of outLines) {
+        const m = line.startsWith(`__openrig_capture_${nonce}_`) ? /_(\d+)__$/.exec(line) : null;
+        if (m && line === mark(Number(m[1]))) {
+          cur = Number(m[1]);
+          segments[cur] = [];
+        } else if (cur >= 0) {
+          segments[cur]!.push(line);
+        }
+      }
+      chunk.forEach((t, k) => {
+        const seg = segments[k];
+        if (seg == null) return; // its marker never printed: read per target
+        // capture-pane prints its lines newline-terminated, as the per-target read returns them
+        const text = seg.length ? seg.join("\n") + "\n" : "";
+        out.set(t, { text: text === "" ? null : text, capturedAt });
+      });
+    };
+    for (let i = 0; i < present.length; i += CAPTURE_BATCH) await captureChunk(present.slice(i, i + CAPTURE_BATCH));
+    return out;
+  }
+
   async capturePaneContent(paneId: string, lines: number = 20): Promise<string | null> {
     try {
       const output = await this.run(["tmux", "capture-pane", "-p", "-t", paneId, "-S", `-${lines}`],
@@ -1007,6 +1149,50 @@ export class TmuxAdapter {
    *   - `null` when the target is missing OR the value is unparseable
    *     (consumers treat null as "no signal", distinct from "idle").
    */
+  /** Every session's current-window `#{window_activity}` in ONE tmux call, keyed by session name: the same value
+   *  `readPaneLastActivity(<session name>)` reads (display-message -t <session> resolves to the session's current
+   *  window). Only well-formed timestamps are included, so a missing key means "read it the per-target way". Null when
+   *  tmux can't be read at all. The session name is the LAST field, so a separator inside it stays intact. */
+  async readAllSessionWindowActivity(): Promise<Map<string, number> | null> {
+    try {
+      const format = ["#{window_active}", "#{window_activity}", "#{session_name}"].join(TMUX_FIELD_SEPARATOR);
+      const output = await this.run(["tmux", "list-windows", "-a", "-F", format], `tmux list-windows -a -F '${format}'`);
+      const out = new Map<string, number>();
+      for (const line of output.split("\n")) {
+        const first = line.indexOf(TMUX_FIELD_SEPARATOR), second = line.indexOf(TMUX_FIELD_SEPARATOR, first + 1);
+        if (first < 0 || second < 0) continue;
+        const active = line.slice(0, first), activity = line.slice(first + 1, second).trim(), session = line.slice(second + 1);
+        if (!session || active !== "1" || !/^\d+$/.test(activity)) continue;
+        const n = Number(activity);
+        if (Number.isFinite(n) && n > 0) out.set(session, n);
+      }
+      return out;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Every pane's pid and current command in ONE tmux call, keyed by pane id (%N): the values `getPanePid` /
+   *  `getPaneCommand` read per pane. Panes without a valid pid are left out (read those per pane). Null when tmux can't
+   *  be read at all. The command is the LAST field, so a separator inside it stays intact. */
+  async readAllPaneProcesses(): Promise<Map<string, { pid: number; command: string | null }> | null> {
+    try {
+      const format = ["#{pane_id}", "#{pane_pid}", "#{pane_current_command}"].join(TMUX_FIELD_SEPARATOR);
+      const output = await this.run(["tmux", "list-panes", "-a", "-F", format], `tmux list-panes -a -F '${format}'`);
+      const out = new Map<string, { pid: number; command: string | null }>();
+      for (const line of output.split("\n")) {
+        const first = line.indexOf(TMUX_FIELD_SEPARATOR), second = line.indexOf(TMUX_FIELD_SEPARATOR, first + 1);
+        if (first <= 0 || second < 0) continue;
+        const id = line.slice(0, first), pid = parseInt(line.slice(first + 1, second).trim(), 10);
+        if (!Number.isFinite(pid) || pid <= 0) continue;
+        out.set(id, { pid, command: line.slice(second + 1).trim() || null });
+      }
+      return out;
+    } catch {
+      return null;
+    }
+  }
+
   async readPaneLastActivity(paneId: string): Promise<number | null> {
     try {
       const output = await this.run(

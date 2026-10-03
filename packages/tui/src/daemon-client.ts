@@ -88,7 +88,11 @@ export class DaemonClient {
       const res = await this.fetchImpl(`${this.baseUrl}/api/activity/events`, {
         headers: { ...this.headers, accept: "text/event-stream" },
       });
-      if (!res.ok || !(res.headers.get("content-type") ?? "").includes("text/event-stream")) return null;
+      if (!res.ok || !(res.headers.get("content-type") ?? "").includes("text/event-stream")) {
+        // No subscriber will own a rejected body; release its connection now.
+        void res.body?.cancel().catch(() => {});
+        return null;
+      }
       return res;
     } catch {
       return null; // unreachable daemon at open — the leg stays off; refresh still works
@@ -97,7 +101,11 @@ export class DaemonClient {
 
   private async get(route: string, fetchImpl = this.fetchImpl): Promise<unknown> {
     const res = await fetchImpl(`${this.baseUrl}${route}`, { headers: this.headers, signal: AbortSignal.timeout(5_000) });
-    if (!res.ok) throw new Error(`daemon read failed: GET ${route} → ${res.status}`);
+    if (!res.ok) {
+      const parsed = await res.json().catch(() => null);
+      const detail = parsed && typeof parsed === "object" && "error" in parsed ? ` — ${(parsed as { error: unknown }).error}` : "";
+      throw new Error(`daemon read failed: GET ${route} → ${res.status}${detail}`);
+    }
     return res.json();
   }
 

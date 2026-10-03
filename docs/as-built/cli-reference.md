@@ -1280,6 +1280,28 @@ Notes:
 
 Usage: `rig queue <subcommand>` — L3 owned-work queue plus inbox/outbox.
 
+`create` generates a `qitem-<UTC YYYYMMDDHHMMSS>-<16 lowercase hex>` ID unless
+`--id` supplies the identity. In either case it prints the ID to stderr **before
+sending**. This is not proof of persistence. After an unknown outcome, reconcile with
+`rig queue show <id> --full --json` at the same endpoint, then reuse `--id <id>`
+with unchanged source, destination, body and options if retrying. A negative read
+does not rule out a pending commit; omitting the original ID starts new work.
+For a forwarded create, replace `<destination-daemon-url>` with the registered
+destination host's daemon URL and use
+`OPENRIG_URL='<destination-daemon-url>' rig queue show <id> --full --json`.
+`--json` keeps stdout as one JSON document; the pre-send receipt is on stderr.
+
+Reusing an ID with the same source and destination returns the existing row,
+without creating new work or delivering it again. If the supplied body differs,
+the response includes `createWarning.code: "qitem_body_not_saved"` and the CLI
+warns on stderr that the changed body was **not saved**. The original row is
+unchanged; HTTP success and the CLI success exit remain compatible with existing
+retry callers. With `--verify`, `persisted` and `delivery` describe that returned
+original row, not the unsaved body. This warning requires a daemon containing
+this change; an older daemon can return the original row without it. Other
+changed options are not compared by this body warning; retry with the same full
+payload. A different source or destination remains an ID-reuse conflict.
+
 Subcommands:
 - `create --source <session> --destination <session> (--body <text> | --body-file <path> | --body-context <ref>) [--mission <id>] [--slice <id>] [--priority <p>] [--tier <t>] [--tags <csv>] [--target-repo <name>] [--host <id>] [--no-nudge] [--expires-at <iso>] [--id <qitemId>] [--json]` — `--body-context <ref>` resolves a complete context pack, snapshots that content into the qitem body, and adds a `body-context:<ref>` provenance tag; it is mutually exclusive with `--body` / `--body-file`, and missing members abort before qitem creation. v0.3.2 slice-21 FR-4 adds `--body-file <path>` (use `-` for stdin) which kills the backtick-shell-corruption class for multiline bodies, and first-class `--mission <id>` / `--slice <id>` flags that translate to `mission:<id>` / `slice:<id>` tags (compose with `--tags`). v0.4.6 (OPR.0.4.6.MH3) adds `--host <id>` / the `agent@rig@host` destination form — see § Cross-host queue routing below.
 - `claim <qitemId> --destination <session> [--json]` — pending → in-progress; computes closure_required_at from tier
@@ -1787,6 +1809,7 @@ Subcommands:
 - `validate <path> [options]` — validate plugin manifest + skill frontmatter against the agentskills.io spec.
 
 Notes:
+- `used-by` includes bare `<id>` and `shared:<id>` profile references from user and shipped agents, even if the plugin is not installed. Resource definitions without a consuming profile are listed separately; JSON rows distinguish `kind: consumer` from `kind: definition`.
 - Plugin discovery aggregates `$OPENRIG_HOME/plugins/` (vendored at runtime by the operator) with the daemon's bundled plugin cache.
 - `openrig-core` ships bundled with the daemon (11 skills). Additional plugins (`gstack` — 45 skills; `obra-superpowers` — 14 skills) ship as substrate references for plugin authors to copy-install per the `OPENRIG-INSTALL.md` workflow inside each plugin's source tree.
 - A first-class `rig plugin install <substrate-path>` verb is deferred to 0.3.2.

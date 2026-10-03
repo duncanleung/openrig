@@ -7,10 +7,15 @@ import { serializePodBundleManifest, type PodBundleManifest, type PodBundleAgent
 import type { RigSpec, StartupBlock } from "./types.js";
 
 export interface PodAssemblerFsOps extends AgentResolverFsOps {
+  /** Raw bytes, for files the bundle copies verbatim (agent packages, culture, docs, startup files). */
+  readFileBuffer(path: string): Uint8Array;
+  realpath(path: string): string;
   mkdirp(path: string): void;
-  writeFile(path: string, content: string): void;
+  /** Source permission bits, used to preserve executable bundle assets. */
+  fileMode?(path: string): number;
+  writeFile(path: string, content: string | Uint8Array, mode?: number): void;
   copyDir(src: string, dest: string): void;
-  listFiles(dirPath: string): string[];
+  listFiles(dirPath: string, onReadError?: (path: string, error: unknown) => boolean): string[];
 }
 
 export interface PodAssembleOptions {
@@ -124,15 +129,20 @@ export class PodBundleAssembler {
           throw new Error(`Failed to resolve agent_ref "${member.agentRef}" for member ${pod.id}.${member.id}: ${result.code === "validation_failed" ? (result as { errors: string[] }).errors.join("; ") : (result as { error: string }).error}`);
         }
 
-        // Preserve recovery exports while recording unresolved skills, including imports.
-        for (const agent of [result.resolved, ...result.imports]) {
-          for (const skill of agent.spec.resources.skills) {
-            const skillPath = nodePath.resolve(agent.sourcePath, skill.path);
-            if (!this.fs.exists(skillPath)) {
-              unresolvedSkills.add(`Agent "${agent.spec.name}" has unresolved declared skill "${skill.id}" at "${skill.path}" (missing or inaccessible)`);
-            }
-          }
-        }
+        // Limit recoverable read errors to the resolved agents' declared skill trees.
+        const declaredSkills = [result.resolved, ...result.imports].flatMap(agent =>
+          agent.spec.resources.skills.map(skill => ({
+            path: nodePath.resolve(agent.sourcePath, skill.path),
+            warning: `Agent "${agent.spec.name}" has unresolved declared skill "${skill.id}" at "${skill.path}" (missing or inaccessible)`,
+          })),
+        );
+        for (const skill of declaredSkills) if (!this.fs.exists(skill.path)) unresolvedSkills.add(skill.warning);
+        const onReadError = (path: string, error: unknown): boolean => {
+          if (!["ENOENT", "EACCES", "EPERM"].includes((error as { code?: string })?.code ?? "")) return false;
+          const affected = declaredSkills.filter(skill => path === skill.path || path.startsWith(skill.path + nodePath.sep));
+          for (const skill of affected) unresolvedSkills.add(skill.warning);
+          return affected.length > 0;
+        };
 
         // Dedup: skip if already collected (but still record rewrite)
         const agentVendorPath = `agents/${result.resolved.spec.name}`;
@@ -140,7 +150,7 @@ export class PodBundleAssembler {
 
         if (resolvedAgentPaths.has(result.resolved.sourcePath)) continue;
         resolvedAgentPaths.add(result.resolved.sourcePath);
-        this.vendorDirectory(result.resolved.sourcePath, nodePath.join(opts.outputDir, agentVendorPath), collectedFiles, agentVendorPath);
+        this.vendorDirectory(result.resolved.sourcePath, nodePath.join(opts.outputDir, agentVendorPath), collectedFiles, agentVendorPath, onReadError);
 
         // Collect import entries — always record provenance, only vendor once
         const importEntries: PodBundleAgentImportEntry[] = [];
@@ -150,7 +160,7 @@ export class PodBundleAssembler {
           // Vendor files only once (dedup by path), but always record importEntry
           if (!resolvedAgentPaths.has(imp.sourcePath)) {
             resolvedAgentPaths.add(imp.sourcePath);
-            this.vendorDirectory(imp.sourcePath, nodePath.join(opts.outputDir, importVendorPath), collectedFiles, importVendorPath);
+            this.vendorDirectory(imp.sourcePath, nodePath.join(opts.outputDir, importVendorPath), collectedFiles, importVendorPath, onReadError);
           }
 
           importEntries.push({
@@ -230,15 +240,22 @@ export class PodBundleAssembler {
   }
 
   private collectRigFile(relPath: string, rigRoot: string, outputDir: string, collected: string[]): void {
-    const absPath = nodePath.resolve(rigRoot, relPath);
-    if (!absPath.startsWith(rigRoot)) {
+    const root = nodePath.resolve(rigRoot);
+    const absPath = nodePath.resolve(root, relPath);
+    if (absPath !== root && !absPath.startsWith(nodePath.join(root, nodePath.sep))) {
       throw new Error(`Path traversal detected: "${relPath}" escapes rig root`);
     }
     if (!this.fs.exists(absPath)) return; // optional files may not exist
-    const content = this.fs.readFile(absPath);
+    const realRoot = this.fs.realpath(root);
+    const realPath = this.fs.realpath(absPath);
+    if (realPath !== realRoot && !realPath.startsWith(nodePath.join(realRoot, nodePath.sep))) {
+      throw new Error(`"${relPath}" resolves outside the rig root through a symlink; copy the file into the rig to bundle it`);
+    }
+    const content = this.fs.readFileBuffer(realPath);
+    const mode = this.fs.fileMode?.(realPath);
     assertShippableSubstance([{ path: relPath, bytes: content }]);
     this.fs.mkdirp(nodePath.dirname(nodePath.join(outputDir, relPath)));
-    this.fs.writeFile(nodePath.join(outputDir, relPath), content);
+    this.fs.writeFile(nodePath.join(outputDir, relPath), content, mode);
     collected.push(relPath);
   }
 
@@ -249,21 +266,26 @@ export class PodBundleAssembler {
     }
   }
 
-  private vendorDirectory(srcDir: string, destDir: string, collected: string[], relPrefix: string): void {
-    const files = this.fs.listFiles(srcDir);
-    const sources = files.map((file) => ({
-      file,
-      content: this.fs.readFile(nodePath.join(srcDir, file)),
-    }));
+  private vendorDirectory(srcDir: string, destDir: string, collected: string[], relPrefix: string, onReadError?: (path: string, error: unknown) => boolean): void {
+    const files = this.fs.listFiles(srcDir, onReadError);
+    const sources: Array<{ file: string; content: Uint8Array; mode: number | undefined }> = [];
+    for (const file of files) {
+      const sourcePath = nodePath.join(srcDir, file);
+      try {
+        sources.push({ file, content: this.fs.readFileBuffer(sourcePath), mode: this.fs.fileMode?.(sourcePath) });
+      } catch (error) {
+        if (!onReadError?.(sourcePath, error)) throw error;
+      }
+    }
     assertShippableSubstance(sources.map(({ file, content }) => ({
       path: nodePath.join(relPrefix, file),
       bytes: content,
     })));
     this.fs.mkdirp(destDir);
-    for (const { file, content } of sources) {
+    for (const { file, content, mode } of sources) {
       const destPath = nodePath.join(destDir, file);
       this.fs.mkdirp(nodePath.dirname(destPath));
-      this.fs.writeFile(destPath, content);
+      this.fs.writeFile(destPath, content, mode);
       collected.push(nodePath.join(relPrefix, file).replace(/\\/g, "/"));
     }
   }

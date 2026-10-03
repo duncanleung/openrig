@@ -102,6 +102,8 @@ interface NodeRow {
   // 0.5.2-07 A4-profile: the seat's SPEC-pinned codex config profile (nodes.codex_config_profile),
   // threaded onto the successor binding for the same reason as model — the adapter emits `-p <profile>`.
   codex_config_profile: string | null;
+  // #75: the seat's configured reasoning effort (nodes.effort), threaded onto successor binding.
+  effort: string | null;
   // RIG-43: fallback columns needed for forward swap runtime selection and reverse swap restoration.
   fallback_original_runtime?: string | null;
   fallback_runtime?: string | null;
@@ -132,6 +134,8 @@ interface SeatHandoverServiceDeps {
    *  mirroring the launch identity env. Defaults to {} (the three core identity
    *  vars are always derived internally). */
   sessionEnv?: Record<string, string | undefined>;
+  /** Extra env for one runtime only (OMP's provider keys), merged over sessionEnv. */
+  runtimeSessionEnv?: Record<string, Record<string, string | undefined>>;
   /** Injectable id source for the successor session name (tests). */
   newSuccessorId?: () => string;
   /** Runtime adapters keyed by runtime — used to launch a fresh successor into
@@ -139,10 +143,14 @@ interface SeatHandoverServiceDeps {
   runtimeAdapters?: Record<string, RuntimeAdapter>;
   /** Claude sidecar reader for discovered-mode resume-token capture (B2). */
   contextUsageStore?: ResumeTokenCaptureDeps["contextUsageStore"];
+  /** #421 — start time of the pane's current Claude process; a sidecar sampled earlier is skipped. */
+  claudeProcessStartedAt?: ResumeTokenCaptureDeps["claudeProcessStartedAt"];
   /** Codex thread-id capturer for discovered-mode resume-token capture (B2). */
   resumeTokenCapturer?: ResumeTokenCaptureDeps["resumeTokenCapturer"];
   /** OPR.0.4.6.PI1 FR-6 — pi-runner sidecar reader for Pi resume-token capture. */
   piRunnerStateStore?: ResumeTokenCaptureDeps["piRunnerStateStore"];
+  /** OMP runner sidecar reader for independently isolated OMP seats. */
+  ompRunnerStateStore?: ResumeTokenCaptureDeps["ompRunnerStateStore"];
   /** Readiness timeout for the successor launch (tests shorten it). */
   readinessTimeoutMs?: number;
   /** Injectable sleep for the successor readiness backoff (tests). */
@@ -243,6 +251,7 @@ export class SeatHandoverService {
     this.planner = new SeatHandoverPlanner({ rigRepo: deps.rigRepo });
     this.successorLauncher = new SuccessorSessionLauncher(deps.tmuxAdapter, deps.discoveryRepo, {
       sessionEnv: deps.sessionEnv,
+      runtimeSessionEnv: deps.runtimeSessionEnv,
       newId: deps.newSuccessorId,
       runtimeAdapters: deps.runtimeAdapters,
       readinessTimeoutMs: deps.readinessTimeoutMs,
@@ -251,8 +260,10 @@ export class SeatHandoverService {
     });
     this.captureDeps = {
       contextUsageStore: deps.contextUsageStore ?? null,
+      claudeProcessStartedAt: deps.claudeProcessStartedAt ?? null,
       resumeTokenCapturer: deps.resumeTokenCapturer ?? null,
       piRunnerStateStore: deps.piRunnerStateStore ?? null,
+      ompRunnerStateStore: deps.ompRunnerStateStore ?? null,
     };
   }
 
@@ -477,7 +488,7 @@ export class SeatHandoverService {
       // spec (else the running topology drifts from the founder-designed one at every handover).
       // A4-profile: likewise carry the codex config profile (adapter emits -p) — the restore path
       // already threads it; handover must too, or a profile-pinned codex seat reverts at handover.
-      node: { id: node.id, runtime: effectiveRuntime, cwd: node.cwd, launchPosture: successorPosture, ...permissionOverride, model: effectiveModel, codexConfigProfile: node.codex_config_profile ?? undefined },
+      node: { id: node.id, runtime: effectiveRuntime, cwd: node.cwd, launchPosture: successorPosture, ...permissionOverride, model: effectiveModel, effort: node.effort ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined },
       departingSessionName: latestSession.session_name,
       occupantGeneration,
       // OPR.0.5.5.5: a fork-sourced successor launches as a NATIVE FORK of the
@@ -849,7 +860,7 @@ export class SeatHandoverService {
   private emitCaptureSkip(
     input: { rigId: string; nodeId: string; sessionId: string; sessionName: string },
     runtime: string,
-    reason: "missing_sidecar" | "parse_error" | "probe_timeout" | "invalid_token",
+    reason: "missing_sidecar" | "parse_error" | "probe_timeout" | "invalid_token" | "stale_sidecar",
   ): void {
     try {
       this.eventBus.emit({
@@ -972,7 +983,7 @@ export class SeatHandoverService {
 
   private lookupNode(status: SeatStatus): NodeRow {
     return this.db.prepare(
-      "SELECT id, runtime, cwd, model, codex_config_profile, fallback_original_runtime, fallback_runtime, fallback_state FROM nodes WHERE rig_id = ? AND logical_id = ?"
+      "SELECT id, runtime, cwd, model, codex_config_profile, effort, fallback_original_runtime, fallback_runtime, fallback_state FROM nodes WHERE rig_id = ? AND logical_id = ?"
     ).get(status.rig_id, status.logical_id) as NodeRow;
   }
 
