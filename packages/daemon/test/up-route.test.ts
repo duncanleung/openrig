@@ -74,6 +74,56 @@ describe("Up API route", () => {
     expect(body.error).toContain("not found");
   });
 
+  it("does not let an archived namesake make a live rig name ambiguous", async () => {
+    const archived = rigRepo.createRig("restore-name");
+    rigRepo.archiveRig(archived.id);
+    rigRepo.createRig("restore-name");
+
+    const res = await app.request("/api/up", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: "restore-name" }),
+    });
+
+    expect(res.status).toBe(404);
+    expect((await res.json()).code).toBe("no_snapshot");
+  });
+
+  it("restores the sole archived rig by name when no active rig has that name", async () => {
+    const rig = rigRepo.createRig("archived-restore");
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker" });
+    const session = sessionRegistry.registerSession(node.id, "worker@archived-restore");
+    db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+      .run("claude_name", "tok-archived", "relaunch_fresh", session.id);
+    sessionRegistry.updateStatus(session.id, "running");
+    snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+    sessionRegistry.updateStatus(session.id, "exited");
+    rigRepo.archiveRig(rig.id);
+
+    const res = await app.request("/api/up", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: "archived-restore" }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ status: "restored", rigId: rig.id });
+  });
+
+  it("keeps two active rigs with the same name ambiguous", async () => {
+    rigRepo.createRig("ambiguous-restore");
+    rigRepo.createRig("ambiguous-restore");
+
+    const res = await app.request("/api/up", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sourceRef: "ambiguous-restore" }),
+    });
+
+    expect(res.status).toBe(409);
+    expect((await res.json()).code).toBe("ambiguous_name");
+  });
+
   // T6: Startup wiring
   it("createDaemon wires /api/up route", async () => {
     db.close();
@@ -114,6 +164,25 @@ describe("Up API route", () => {
     expect(body.nodes[0].status).toBe("fresh-primed");
   });
 
+  it.each([[false, true, true], [true, undefined, true], [true, false, false], [false, undefined, false]] as const)("non-interruptive stored %s / option %s restores as %s; plan does not write", async (stored, option, expected) => {
+    const rig = rigRepo.createRig("saved-choice");
+    rigRepo.setRigNonInterruptive(rig.id, stored);
+    const node = rigRepo.addNode(rig.id, "worker", { role: "worker" });
+    const session = sessionRegistry.registerSession(node.id, "worker@saved-choice");
+    db.prepare("UPDATE sessions SET resume_type = ?, resume_token = ?, restore_policy = ? WHERE id = ?")
+      .run("claude_name", "retained", "relaunch_fresh", session.id);
+    sessionRegistry.updateStatus(session.id, "running");
+    snapshotCapture.captureSnapshot(rig.id, "auto-pre-down");
+    sessionRegistry.updateStatus(session.id, "exited");
+    const request = (plan: boolean) => app.request("/api/up", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sourceRef: "saved-choice", nonInterruptive: option, plan }) });
+    expect((await request(true)).status).toBe(200);
+    expect(rigRepo.getRigNonInterruptive(rig.id)).toBe(stored);
+    const response = await request(false);
+    expect(response.status).toBe(200);
+    expect(rigRepo.getRigNonInterruptive(rig.id)).toBe(expected);
+    if (expected) expect((await response.json()).warnings.join(" ")).toContain("saved for this rig");
+  });
+
   it("POST /api/up restoring an existing rig name returns validation blockers", async () => {
     const rig = rigRepo.createRig("restore-blocked");
     const fixtureNode = rigRepo.addNode(rig.id, "worker", { role: "worker" });
@@ -144,7 +213,7 @@ describe("Up API route", () => {
     const res = await app.request("/api/up", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sourceRef: "restore-blocked" }),
+      body: JSON.stringify({ sourceRef: "restore-blocked", nonInterruptive: true }),
     });
 
     expect(res.status).toBe(409);
@@ -153,6 +222,7 @@ describe("Up API route", () => {
     expect(body.code).toBe("pre_restore_validation_failed");
     expect(body.rigResult).toBe("not_attempted");
     expect(body.blockers[0].path).toBe(missingPath);
+    expect(rigRepo.getRigNonInterruptive(rig.id)).toBe(false);
   });
 
   // L3b: rig-name path falls back to manual snapshot when no auto-pre-down exists.

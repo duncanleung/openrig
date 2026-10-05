@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { isShellForeground } from "./shell-classifier.js";
 import { runAsyncSite } from "./sync-site-wrap.js";
+import { readNativeExecutablePaths } from "./native-process-executable.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -12,6 +13,8 @@ export interface NativeProcessRow {
   pgid?: number;
   tpgid?: number;
   executableName?: string;
+  /** OS executable path, not argv[0], for otherwise unresolved Claude rows. */
+  executablePath?: string;
   startedAt?: string;
 }
 
@@ -40,8 +43,20 @@ function claudeExecutable(token: string, selectedExecutable?: string): boolean {
 
 function claudeProcess(row: NativeProcessRow, selectedExecutable?: string): boolean {
   const argv0 = tokens(row.command)[0] ?? "";
-  return claudeExecutable(argv0, selectedExecutable)
-    && executableName(row.executableName ?? "") === executableName(argv0);
+  if (!claudeExecutable(argv0, selectedExecutable)) return false;
+  if (executableName(row.executableName ?? "") === executableName(argv0)) return true;
+  // Native Claude can retain its versioned OS name while rewriting argv[0] to
+  // claude. A version only selects candidates for an OS path read; it is not proof.
+  return needsClaudeExecutablePath(row) && !!row.executablePath
+    && claudeExecutable(row.executablePath, selectedExecutable)
+    && executableName(row.executablePath) === executableName(row.executableName ?? "");
+}
+
+function needsClaudeExecutablePath(row: NativeProcessRow): boolean {
+  const argv0 = tokens(row.command)[0] ?? "";
+  return claudeExecutable(argv0)
+    && executableName(row.executableName ?? "") !== executableName(argv0)
+    && /^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(row.executableName ?? "");
 }
 
 function commandUsesExpectedToken(command: string, runtime: NativeRuntime, expectedToken: string): boolean {
@@ -95,12 +110,36 @@ function claudeSessionToken(args: string[]): string | null {
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index]!;
     if (index === 0 && /^\(\d+\.\d+\.\d+[^)]*\)$/.test(arg)) continue;
-    if (["--permission-mode", "--model", "--name"].includes(arg)) { index += 1; continue; }
-    if (/^--(?:permission-mode|model|name)=/.test(arg) || arg === "--dangerously-skip-permissions") continue;
+    if (["--permission-mode", "--model", "--name", "--effort"].includes(arg)) { index += 1; continue; }
+    if (/^--(?:permission-mode|model|name|effort)=/.test(arg) || arg === "--dangerously-skip-permissions") continue;
     const identity = arg.match(/^--(?:session-id|resume)(?:=(.*))?$/);
     if (!identity) return null; // Unknown argv is not positive identity proof.
     const value = identity[1] ?? args[++index];
     if (token !== null || !value || value.startsWith("-")) return null;
+    token = value;
+  }
+  return token;
+}
+
+// Delivery-only reading of a Claude argv, which also accepts --settings (the
+// strict selector above does not). null: the argv parsed and names no session.
+// "unparsed": an argument was not recognised, so the argv proves nothing.
+function claudeSessionIdentity(args: string[]): string | null | { unparsed: true } {
+  const unparsed = { unparsed: true } as const;
+  let token: string | null = null;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (index === 0 && /^\(\d+\.\d+\.\d+[^)]*\)$/.test(arg)) continue;
+    if (["--permission-mode", "--model", "--name", "--settings", "--effort"].includes(arg)) {
+      const value = args[++index];
+      if (!value || value.startsWith("-")) return unparsed;
+      continue;
+    }
+    if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg) || arg === "--dangerously-skip-permissions") continue;
+    const identity = arg.match(/^--(?:session-id|resume)(?:=(.*))?$/);
+    if (!identity) return unparsed; // Unknown argv is not positive identity proof.
+    const value = identity[1] ?? args[++index];
+    if (token !== null || !value || value.startsWith("-")) return unparsed;
     token = value;
   }
   return token;
@@ -145,7 +184,7 @@ export async function listNativeProcesses(): Promise<NativeProcessRow[]> {
       const { stdout } = await execFileAsync("ps", ["-Ao", "pid,ppid,pgid,tpgid,ucomm,lstart,command"], { encoding: "utf-8", maxBuffer: 8 * 1024 * 1024, env: { ...process.env, LC_ALL: "C" } });
       return stdout;
     });
-    return output.split("\n").slice(1).flatMap((line) => {
+    const rows: NativeProcessRow[] = output.split("\n").slice(1).flatMap((line) => {
       // ucomm may contain spaces on every platform: macOS app helpers (`Slack Helper`), and on
       // Linux task names set by prctl(PR_SET_NAME) or process.title (`tmux: server`,
       // `node (vitest 1)`). lstart always begins with a weekday word and runs to the year, and
@@ -154,6 +193,12 @@ export async function listNativeProcesses(): Promise<NativeProcessRow[]> {
       const match = line.trim().match(/^(\d+)\s+(\d+)\s+(-?\d+)\s+(-?\d+)\s+(.+?)\s+(\w{3}\s+\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/);
       return match ? [{ pid: Number(match[1]), ppid: Number(match[2]), pgid: Number(match[3]), tpgid: Number(match[4]), executableName: match[5]!, startedAt: match[6]!, command: match[7]! }] : [];
     });
+    const candidates = rows.filter(needsClaudeExecutablePath);
+    if (candidates.length > 0) {
+      const paths = await readNativeExecutablePaths(candidates.map(row => row.pid));
+      for (const row of candidates) row.executablePath = paths.get(row.pid);
+    }
+    return rows;
   } catch { return []; }
 }
 
@@ -183,7 +228,7 @@ function nativeProcessCandidates(rows: NativeProcessRow[], panePid: number, runt
     }
   }
   return matches.map(({ process, chain }) => ({ panePid, process,
-    fingerprint: JSON.stringify(chain.map(row => [row.pid, row.ppid, row.startedAt, row.pgid, row.tpgid, row.executableName, row.command])) }));
+    fingerprint: JSON.stringify(chain.map(row => [row.pid, row.ppid, row.startedAt, row.pgid, row.tpgid, row.executableName, row.command, row.executablePath])) }));
 }
 
 function selectNativeProcess(rows: NativeProcessRow[], panePid: number, expectedToken?: string | null, requireResume = false, runtime: NativeRuntime = "codex", selectedExecutable?: string): NativeProcessObservation | null {
@@ -266,6 +311,31 @@ export async function observeClaudePaneStartedAt(input: Parameters<typeof observ
   return (await verifyClaudePaneRuntime(input))?.process.startedAt ?? null;
 }
 
+/** A launcher shim that spawns (rather than execs) Claude leaves several Claude
+ * processes on one parent chain. That chain is one runtime: the deepest process
+ * receives input, and a shim's argv may carry the identity its child lacks.
+ * Returns the chain deepest-first, or null when candidates sit on separate
+ * branches, which stays ambiguous. */
+function claudeLauncherChain(candidates: NativeProcessObservation[], rows: NativeProcessRow[]): NativeProcessObservation[] | null {
+  if (candidates.length <= 1) return candidates;
+  const byPid = new Map(rows.map((row) => [row.pid, row]));
+  const ancestors = (observation: NativeProcessObservation): Set<number> => {
+    const seen = new Set<number>();
+    let current = byPid.get(observation.process.ppid);
+    while (current && !seen.has(current.pid)) {
+      seen.add(current.pid);
+      if (current.pid === observation.panePid) break;
+      current = byPid.get(current.ppid);
+    }
+    return seen;
+  };
+  const deepest = candidates.find((candidate) => {
+    const above = ancestors(candidate);
+    return candidates.every((other) => other === candidate || above.has(other.process.pid));
+  });
+  return deepest ? [deepest, ...candidates.filter((candidate) => candidate !== deepest)] : null;
+}
+
 export interface ClaudeDeliveryObservation {
   state: "verified" | "unknown" | "idle_shell" | "conflict";
   detail: string;
@@ -280,15 +350,27 @@ export async function observeClaudeDelivery(input: Parameters<typeof observeNati
       if (!pid) return unknown;
       const rows = await (input.listProcesses ?? listNativeProcesses)();
       const candidates = nativeProcessCandidates(rows, pid, "claude-code", input.selectedExecutable);
-      if (candidates.length > 1) return { state: "conflict", detail: "Multiple Claude processes occupy the bound foreground" };
-      const native = candidates[0];
+      const chain = claudeLauncherChain(candidates, rows);
+      if (!chain) return { state: "conflict", detail: "Multiple Claude processes occupy the bound foreground" };
+      const native = chain[0];
       if (native) {
-        const token = claudeSessionToken(tokens(native.process.command).slice(1));
         const fingerprint = native.fingerprint;
-        if (!token || !input.expectedToken) return { ...unknown, fingerprint };
-        return token === input.expectedToken
+        const identities = chain.map((link) => claudeSessionIdentity(tokens(link.process.command).slice(1)));
+        const named = new Set(identities.filter((value): value is string => typeof value === "string"));
+        if (named.size > 1) return { state: "conflict", detail: "Claude processes in the bound foreground name different conversations", fingerprint };
+        if (!input.expectedToken) return { ...unknown, fingerprint };
+        // argv records launch identity, not the current conversation: /clear can
+        // rotate the hook-persisted token without replacing this process. A sole
+        // launch-token mismatch cannot distinguish that from stale resume metadata.
+        // Do not promote either source over the other; ordinary delivery warns on
+        // uncertainty. Live lineage/binding conflicts and strict resume proof stay
+        // separate. A shim's token is never inherited by an opaque child.
+        if (named.size === 1 && !named.has(input.expectedToken)) {
+          return { state: "unknown", detail: "Claude launch identity differs from the stored conversation; current conversation is unverified", fingerprint };
+        }
+        return identities[0] === input.expectedToken
           ? { state: "verified", detail: "Expected Claude conversation in the bound foreground", fingerprint }
-          : { state: "conflict", detail: "The bound foreground names a different Claude conversation", fingerprint };
+          : { ...unknown, fingerprint };
       }
       const other = selectNativeProcess(rows, pid);
       if (other) return { state: "conflict", detail: "A different native runtime occupies the bound foreground", fingerprint: other.fingerprint };

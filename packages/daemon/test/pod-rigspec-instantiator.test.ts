@@ -10,6 +10,7 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
+import { reconcileSkillLoadout } from "../src/domain/skill-catalog.js";
 import { PodRigInstantiator } from "../src/domain/rigspec-instantiator.js";
 import { ContinuityPolicyMaterializer } from "../src/domain/continuity-policy-materializer.js";
 import { parseWatchdogSpec } from "../src/domain/watchdog-policy-engine.js";
@@ -296,6 +297,47 @@ profiles:
       db?.close();
       fs.rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it.each(["claude-code", "codex"] as const)("reports bundle precedence after real %s reconciliation", async (runtime) => {
+    const root = fs.mkdtempSync(nodePath.join(os.tmpdir(), "instantiator-bundle-precedence-"));
+    let db: ReturnType<typeof createFullTestDb> | undefined;
+    try {
+      const installed = nodePath.join(root, "installed");
+      const catalog = nodePath.join(root, "catalog");
+      const project = nodePath.join(root, "project");
+      const skill = (body: string) => `---\nname: shared\ndescription: Skill fixture\n---\n${body}\n`;
+      for (const dir of ["installed/agents/impl", "installed/agents/impl/skills/shared", "catalog/shared", "project"]) fs.mkdirSync(nodePath.join(root, dir), { recursive: true });
+      fs.writeFileSync(nodePath.join(catalog, "catalog.yaml"), "schema: openrig.skill-catalog/v1\nsystem: []\n");
+      fs.writeFileSync(nodePath.join(catalog, "shared/SKILL.md"), skill("Catalog"));
+      fs.writeFileSync(nodePath.join(installed, "agents/impl/skills/shared/SKILL.md"), skill("Bundle"));
+      fs.writeFileSync(nodePath.join(installed, "agents/impl/agent.yaml"), 'name: impl\nversion: "1.0"\nresources:\n  skills:\n    - id: shared\n      path: skills/shared\nprofiles:\n  default:\n    uses:\n      skills: [shared]\n');
+      execFileSync("git", ["init", "-q", catalog]);
+      execFileSync("git", ["-C", catalog, "add", "."]);
+      execFileSync("git", ["-C", catalog, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "catalog"]);
+      const reconciler = vi.fn(reconcileSkillLoadout);
+      const fixture = setup(undefined, undefined, undefined, undefined, undefined, {
+        fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf8"), exists: fs.existsSync },
+        skillsRootResolver: () => catalog, skillReconciler: reconciler,
+      });
+      db = fixture.db;
+      const rig = makeRigSpec({ pods: [{ id: "dev", label: "Dev", edges: [], members: [
+        { id: "impl", agentRef: "local:agents/impl", profile: "default", runtime, cwd: project },
+      ] }] });
+      const result = await fixture.inst.instantiate(RigSpecCodec.serialize(rig), installed);
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(reconciler).toHaveBeenCalledOnce();
+      expect(reconciler.mock.results[0]?.value.ok).toBe(true);
+      const owner = reconciler.mock.calls[0]![0].topologyOwner;
+      expect(JSON.stringify(result)).toContain(`${owner}: skill_bundle_precedence`);
+      expect(JSON.stringify(result)).toContain("the managed catalog was not changed");
+      const selected = reconciler.mock.calls[0]![0].loadout.entries.find(e => e.id === "shared")!;
+      expect(selected.sourceDir).toBe(nodePath.join(installed, "agents/impl/skills/shared"));
+      expect(fs.readFileSync(nodePath.join(project, runtime === "codex" ? ".agents" : ".claude", "skills/shared/SKILL.md"), "utf8")).toBe(skill("Bundle"));
+      const adapter = runtime === "codex" ? fixture.codexAdapter : fixture.adapter;
+      const plan = vi.mocked(adapter.project).mock.calls[0]![0];
+      expect(plan.entries.find(e => e.effectiveId === "shared")?.absolutePath).toContain("installed/agents/impl/skills/shared");
+    } finally { db?.close(); fs.rmSync(root, { recursive: true, force: true }); }
   });
 
   it("dedupes role guidance when the same file is referenced by resources.guidance and startup.files", async () => {
@@ -1101,6 +1143,73 @@ profiles:
     const killSession = tmux.killSession as ReturnType<typeof vi.fn>;
     expect(killSession).toHaveBeenCalled();
 
+    db.close();
+  });
+
+  it("removes a failed rig when its launched tmux session is already absent", async () => {
+    const { db, rigRepo, inst, adapter, tmux } = setup({
+      [nodePath.resolve(RIG_ROOT, "agents/impl/agent.yaml")]: agentYaml("impl"),
+    });
+    (adapter.project as ReturnType<typeof vi.fn>).mockResolvedValue({
+      projected: [], skipped: [], failed: [{ effectiveId: "x", error: "disk full" }],
+    });
+    tmux.probeSession = vi.fn(async () => ({ state: "absent" }));
+    tmux.killSession = vi.fn(async () => ({ ok: false, code: "guard_target_unknown", message: "ambiguous target" }));
+    const prior = rigRepo.createRig("test-rig");
+
+    const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+
+    expect(result.ok).toBe(false);
+    expect(adapter.project).toHaveBeenCalled();
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(rigRepo.findRigsByName("test-rig").map((rig) => rig.id)).toEqual([prior.id]);
+    expect(rigRepo.findUnarchivedRigsByName("test-rig").map((rig) => rig.id)).toEqual([prior.id]);
+    db.close();
+  });
+
+  it("retains a failed rig when the tmux server cannot be reached", async () => {
+    const { db, rigRepo, inst, adapter, tmux } = setup({
+      [nodePath.resolve(RIG_ROOT, "agents/impl/agent.yaml")]: agentYaml("impl"),
+    });
+    (adapter.project as ReturnType<typeof vi.fn>).mockResolvedValue({
+      projected: [], skipped: [], failed: [{ effectiveId: "x", error: "disk full" }],
+    });
+    tmux.probeSession = vi.fn(async () => ({
+      state: "transport_unavailable", cause: "no server running on /tmp/tmux-501/default",
+    }));
+    tmux.killSession = vi.fn(async () => ({ ok: true }));
+    const prior = rigRepo.createRig("test-rig");
+
+    const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+
+    expect(result.ok).toBe(false);
+    expect(adapter.project).toHaveBeenCalled();
+    expect(tmux.killSession).not.toHaveBeenCalled();
+    expect(rigRepo.findRigsByName("test-rig")).toHaveLength(2);
+    expect(rigRepo.findUnarchivedRigsByName("test-rig")).toHaveLength(1);
+    expect(rigRepo.findUnarchivedRigsByName("test-rig")[0]?.id).not.toBe(prior.id);
+    db.close();
+  });
+
+  it("retains a failed rig if the tmux server vanishes between probe and kill", async () => {
+    const { db, rigRepo, inst, adapter, tmux } = setup({
+      [nodePath.resolve(RIG_ROOT, "agents/impl/agent.yaml")]: agentYaml("impl"),
+    });
+    (adapter.project as ReturnType<typeof vi.fn>).mockResolvedValue({
+      projected: [], skipped: [], failed: [{ effectiveId: "x", error: "disk full" }],
+    });
+    tmux.probeSession = vi.fn(async () => ({ state: "present" }));
+    tmux.killSession = vi.fn(async () => ({
+      ok: false, code: "session_not_found", message: "no server running on /tmp/tmux-501/default",
+    }));
+    const prior = rigRepo.createRig("test-rig");
+
+    const result = await inst.instantiate(RigSpecCodec.serialize(makeRigSpec()), RIG_ROOT);
+
+    expect(result.ok).toBe(false);
+    expect(tmux.killSession).toHaveBeenCalled();
+    expect(rigRepo.findRigsByName("test-rig")).toHaveLength(2);
+    expect(rigRepo.findUnarchivedRigsByName("test-rig")[0]?.id).not.toBe(prior.id);
     db.close();
   });
 

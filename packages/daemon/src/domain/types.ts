@@ -1,3 +1,5 @@
+import type { StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
+
 export interface Rig {
   id: string;
   name: string;
@@ -234,8 +236,8 @@ export type RigEvent =
   | { type: "pod.created"; rigId: string; podId: string; namespace: string; label: string }
   | { type: "pod.deleted"; rigId: string; podId: string }
   | { type: "node.startup_pending"; rigId: string; nodeId: string; startupProof?: StartupProofSelection }
-  | { type: "node.startup_ready"; rigId: string; nodeId: string }
-  | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean }
+  | { type: "node.startup_ready"; rigId: string; nodeId: string; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string; diagnostics?: StartupSubmissionDiagnostic[] } }
+  | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean; submissionDiagnostics?: StartupSubmissionDiagnostic[] }
   | {
       type: "node.startup_delivery_manifest";
       rigId: string;
@@ -341,12 +343,9 @@ export type RigEvent =
   // file disappears + audit-log entry. Clean Library + traceable.").
   | { type: "workflow_spec.removed"; sourcePath: string; specId: string | null; specName: string | null; specVersion: string | null; reason: "file_disappeared" }
   // PL-005 Phase A: Mission Control / Queue Observability events.
-  // Action audit + cross-CLI-version drift detection. view_refreshed
-  // is emitted when a Mission Control view is recomputed (SSE
-  // consumers can choose whether to re-fetch).
+  // Action audit + cross-CLI-version drift detection.
   | { type: "mission_control.action_executed"; actionId: string; actionVerb: string; qitemId: string | null; actorSession: string }
   | { type: "mission_control.cli_drift_detected"; rigName: string; missingField: string; observedAt: string }
-  | { type: "mission_control.view_refreshed"; viewName: string; cause: string }
   // PL-005 Phase B: notification dispatch events. Best-effort delivery;
   // failure does NOT interrupt the underlying action being notified about.
   | { type: "mission_control.notification_sent"; mechanism: string; target: string; qitemId: string | null; sentAt: string }
@@ -903,6 +902,8 @@ export interface ImportSpec {
 }
 
 export interface StartupFile {
+  /** Explicit per-seat role orientation; never inferred from the filename. */
+  orientation?: "role";
   /** Startup artifacts are files; context packs are composed separately. */
   kind?: "file";
   path: string;
