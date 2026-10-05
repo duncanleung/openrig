@@ -5,7 +5,7 @@ export const reviewFindingsSchema: Migration = {
   sql: `
 CREATE TABLE review_findings (
   id                    INTEGER PRIMARY KEY AUTOINCREMENT,
-  run_trace_id          TEXT NOT NULL,
+  run_trace_id          TEXT NOT NULL REFERENCES review_runs(trace_id) ON DELETE CASCADE,
   finding_id            TEXT NOT NULL,
   file                  TEXT,
   lines                 TEXT,
