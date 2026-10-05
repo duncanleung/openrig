@@ -99,6 +99,10 @@ import { usageSamplesLatestIndexesSchema } from "./migrations/094_usage_samples_
 import { rigNonInterruptiveSchema } from "./migrations/095_rig_non_interruptive.js";
 import { nodeRuntimeFallbackSchema } from "./migrations/090_node_runtime_fallback.js";
 import { nodeFallbackExpiresAtSchema } from "./migrations/091_node_fallback_expires_at.js";
+import { sessionDigestsSchema } from "./migrations/096_session_digests.js";
+import { reviewRunsSchema } from "./migrations/097_review_runs.js";
+import { reviewFindingsSchema } from "./migrations/098_review_findings.js";
+import { dailyTokenSnapshotsSchema } from "./migrations/099_daily_token_snapshots.js";
 import type { Migration } from "./migrate.js";
 
 /** Ordered migrations; numbers may be reserved by independent changes. */
@@ -199,4 +203,8 @@ export const ALL_MIGRATIONS: Migration[] = [
   rigNonInterruptiveSchema,
   nodeRuntimeFallbackSchema,
   nodeFallbackExpiresAtSchema,
+  sessionDigestsSchema,
+  reviewRunsSchema,
+  reviewFindingsSchema,
+  dailyTokenSnapshotsSchema,
 ];
