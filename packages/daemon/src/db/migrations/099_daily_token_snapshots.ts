@@ -4,7 +4,8 @@ import type { Migration } from "../migrate.js";
  * Durable daily rollup of token usage per seat.
  *
  * Relation to usage_samples (062): usage_samples holds raw append-only samples
- * with daemon-enforced retention (default 14 days, queue-retention.ts:19-20).
+ * with daemon-enforced retention (RETENTION_DEFAULTS.usageSamplesRetentionDays,
+ * configurable via retention.usage_samples_days, default 14 days).
  * This table snapshots daily deltas BEFORE retention prunes them, so it is the
  * only long-horizon token usage record. It cannot be rebuilt from usage_samples
  * beyond the retention window.
