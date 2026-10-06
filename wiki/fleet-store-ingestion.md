@@ -78,8 +78,8 @@ migrations 096–099.
 - ~~**Phase 2: Lifecycle hooks**~~ — shipped. `session.stopped` events trigger
   `ingestSessionByNodeId` (single transcript) + debounced `ingestRecentReviews`
   (10-min window). Event bus subscription wired at boot, unsubscribed at shutdown.
-- **Review findings full reconciliation** — DELETE stale findings inside the
-  upsertReviewRun transaction.
+- ~~**Review findings full reconciliation**~~ — shipped. `upsertReviewRun` now
+  DELETEs stale findings inside the transaction after upserting the current batch.
 - **Overlap guard** — boolean in-flight guard on the scheduler. Review dismissed
   as non-blocking (idempotent upserts prevent corruption), but cheap hardening.
 - **Configurable interval** — currently hardcoded 5 min.

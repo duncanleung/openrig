@@ -164,6 +164,7 @@ export class FleetStore {
     runId: number;
     created: boolean;
     findingsUpserted: number;
+    findingsDeleted: number;
   } {
     const result = this.db.transaction(() => {
       const existingRun = this.db.prepare(
@@ -252,10 +253,26 @@ export class FleetStore {
         findingsUpserted++;
       }
 
+      let findingsDeleted = 0;
+      if (findings.length > 0) {
+        const placeholders = findings.map(() => "?").join(", ");
+        const ids = findings.map((f) => f.findingId);
+        const del = this.db.prepare(
+          `DELETE FROM review_findings WHERE run_trace_id = ? AND finding_id NOT IN (${placeholders})`,
+        ).run(run.traceId, ...ids);
+        findingsDeleted = del.changes;
+      } else if (existingRun) {
+        const del = this.db.prepare(
+          "DELETE FROM review_findings WHERE run_trace_id = ?",
+        ).run(run.traceId);
+        findingsDeleted = del.changes;
+      }
+
       return {
         runId: existingRun?.id ?? Number(runInfo.lastInsertRowid),
         created: !existingRun,
         findingsUpserted,
+        findingsDeleted,
       };
     })();
 
