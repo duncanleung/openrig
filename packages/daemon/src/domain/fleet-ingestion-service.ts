@@ -16,6 +16,7 @@ export interface FleetIngestionServiceDeps {
   fleetStore: FleetStore;
   homedir: string;
   reducerPath: string;
+  eventBus?: { subscribe: (cb: (event: { type: string; nodeId?: string }) => void) => () => void };
 }
 
 export interface ReconcileResult {
@@ -263,6 +264,21 @@ function adaptFinding(
   };
 }
 
+/** Find a single transcript file by its native session UUID. */
+function findTranscriptBySessionId(homedir: string, nativeSessionId: string): string | null {
+  const projectsDir = join(homedir, ".claude", "projects");
+  if (!existsSync(projectsDir)) return null;
+  const target = `${nativeSessionId}.jsonl`;
+  try {
+    for (const projectEntry of readdirSync(projectsDir, { withFileTypes: true })) {
+      if (!projectEntry.isDirectory()) continue;
+      const candidate = join(projectsDir, projectEntry.name, target);
+      if (existsSync(candidate)) return candidate;
+    }
+  } catch { /* unreadable */ }
+  return null;
+}
+
 /** Scan ~/.claude/projects/ for JSONL transcript files. */
 function discoverTranscripts(homedir: string): string[] {
   const projectsDir = join(homedir, ".claude", "projects");
@@ -322,12 +338,15 @@ export class FleetIngestionService {
   private readonly fleetStore: FleetStore;
   private readonly homedir: string;
   private readonly reducerPath: string;
+  private readonly eventBus?: FleetIngestionServiceDeps["eventBus"];
+  private eventUnsubscribe?: () => void;
 
   constructor(deps: FleetIngestionServiceDeps) {
     this.db = deps.db;
     this.fleetStore = deps.fleetStore;
     this.homedir = deps.homedir;
     this.reducerPath = deps.reducerPath;
+    this.eventBus = deps.eventBus;
   }
 
   async reconcile(opts?: { force?: boolean }): Promise<ReconcileResult> {
@@ -468,6 +487,138 @@ export class FleetIngestionService {
     }
 
     return result;
+  }
+
+  /** Ingest a single session's transcript by its node ID (from a session.stopped event). */
+  async ingestSessionByNodeId(nodeId: string): Promise<{ ingested: boolean; nativeSessionId: string | null; error?: string }> {
+    try {
+      const row = this.db.prepare(
+        "SELECT native_session_id_at_boot FROM occupant_tenures WHERE node_id = ? ORDER BY generation_ordinal DESC LIMIT 1",
+      ).get(nodeId) as { native_session_id_at_boot: string | null } | undefined;
+
+      const nativeSessionId = row?.native_session_id_at_boot ?? null;
+      if (!nativeSessionId) {
+        return { ingested: false, nativeSessionId: null, error: "no native session ID for node" };
+      }
+
+      const transcriptPath = findTranscriptBySessionId(this.homedir, nativeSessionId);
+      if (!transcriptPath) {
+        return { ingested: false, nativeSessionId, error: "transcript file not found" };
+      }
+
+      const hash = sourceHash(transcriptPath);
+      const reducerOutput = await runReducer(this.reducerPath, transcriptPath);
+      const identity = lookupOccupantTenure(this.db, nativeSessionId);
+      const input = adaptDigest(reducerOutput, transcriptPath, identity, hash);
+      this.fleetStore.upsertDigest(input);
+
+      return { ingested: true, nativeSessionId };
+    } catch (err) {
+      return { ingested: false, nativeSessionId: null, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /** Ingest review logs modified within the given time window. */
+  async ingestRecentReviews(sinceMs: number = 10 * 60 * 1000): Promise<ReviewReconcileResult> {
+    const cutoff = Date.now() - sinceMs;
+    const allDirs = discoverReviewLogs(this.homedir);
+    const recentDirs = allDirs.filter((dir) => {
+      try {
+        const metricsPath = join(dir, "metrics.json");
+        return statSync(metricsPath).mtime.getTime() >= cutoff;
+      } catch {
+        return false;
+      }
+    });
+
+    const result: ReviewReconcileResult = { discovered: recentDirs.length, ingested: 0, skipped: 0, errors: [] };
+    for (const logDir of recentDirs) {
+      try {
+        const metricsPath = join(logDir, "metrics.json");
+        const hash = sourceHash(metricsPath);
+
+        if (hash !== null) {
+          const raw = JSON.parse(readFileSync(metricsPath, "utf-8")) as Record<string, unknown>;
+          const traceId = typeof raw.traceId === "string" ? raw.traceId : sha256Hex(logDir);
+          const existing = this.db.prepare(
+            "SELECT source_hash FROM review_runs WHERE trace_id = ?",
+          ).get(traceId) as { source_hash: string | null } | undefined;
+          if (existing?.source_hash === hash) {
+            result.skipped++;
+            continue;
+          }
+        }
+
+        const metricsRaw = JSON.parse(readFileSync(metricsPath, "utf-8")) as Record<string, unknown>;
+        const run = adaptReviewRun(metricsRaw, logDir, hash);
+
+        const findings: ReviewFindingInput[] = [];
+        const reportPath = join(logDir, "report.json");
+        if (existsSync(reportPath)) {
+          try {
+            const reportRaw = JSON.parse(readFileSync(reportPath, "utf-8")) as unknown;
+            const arr = Array.isArray(reportRaw) ? reportRaw
+              : Array.isArray((reportRaw as Record<string, unknown>)?.findings)
+                ? (reportRaw as Record<string, unknown>).findings as unknown[]
+                : [];
+            for (const f of arr) {
+              if (f && typeof f === "object") {
+                findings.push(adaptFinding(run.traceId, f as Record<string, unknown>));
+              }
+            }
+          } catch { /* report.json optional */ }
+        }
+
+        this.fleetStore.upsertReviewRun(run, findings);
+        result.ingested++;
+      } catch (err) {
+        result.errors.push(`${resolve(logDir)}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
+    return result;
+  }
+
+  /** Subscribe to session.stopped events for immediate ingestion. Returns unsubscribe fn. */
+  subscribeLifecycleEvents(): () => void {
+    if (!this.eventBus) return () => {};
+    if (this.eventUnsubscribe) return this.eventUnsubscribe;
+
+    const DEBOUNCE_MS = 2_000;
+    let reviewTimer: ReturnType<typeof setTimeout> | null = null;
+
+    this.eventUnsubscribe = this.eventBus.subscribe((event) => {
+      if (event.type !== "session.stopped" || !event.nodeId) return;
+
+      const nodeId = event.nodeId;
+      this.ingestSessionByNodeId(nodeId).then((r) => {
+        if (r.ingested) {
+          console.log(`[fleet-ingestion] lifecycle: ingested session for node ${nodeId} (${r.nativeSessionId})`);
+        } else if (r.error !== "no native session ID for node") {
+          console.log(`[fleet-ingestion] lifecycle: skip node ${nodeId} — ${r.error}`);
+        }
+      }).catch((err: unknown) => {
+        console.error(`[fleet-ingestion] lifecycle ingest error for node ${nodeId}:`, err);
+      });
+
+      if (reviewTimer) clearTimeout(reviewTimer);
+      reviewTimer = setTimeout(() => {
+        reviewTimer = null;
+        this.ingestRecentReviews().catch((err: unknown) => {
+          console.error("[fleet-ingestion] lifecycle review ingest error:", err);
+        });
+      }, DEBOUNCE_MS);
+    });
+
+    return this.eventUnsubscribe;
+  }
+
+  /** Unsubscribe from lifecycle events. */
+  unsubscribeLifecycleEvents(): void {
+    if (this.eventUnsubscribe) {
+      this.eventUnsubscribe();
+      this.eventUnsubscribe = undefined;
+    }
   }
 
   private rollUpDay(seatSession: string, day: string): DailyTokenSnapshotInput {

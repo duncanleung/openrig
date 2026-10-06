@@ -1,6 +1,6 @@
 ---
 title: Project Wiki Index
-last_updated: 2026-09-27
+last_updated: 2026-10-06
 ---
 
 # OpenRig Project Wiki
@@ -13,6 +13,7 @@ pages as leads, not facts. Verify before acting on stale entries.
 
 ## Active topics
 
+- [[fleet-store-ingestion]] — FleetIngestionService: auto-ingest digests, reviews, and token snapshots into fleet analytics tables
 - [[hook-dedup-and-cwd-home]] — activity-hook dedup logic, cwdIsHome guard removal, and why global/project scopes are distinct
 - [[research-analyst-seat]] — research pod added to all rigs, rationale and runtime choices
 - [[ope-to-rig-rename]] — Linear project renamed from OPE to RIG, codebase references updated

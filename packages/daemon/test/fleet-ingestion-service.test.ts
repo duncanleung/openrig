@@ -371,3 +371,159 @@ describe("runQueueRetentionSweep — snapshot rollup before prune", () => {
     expect(pruneRan).toBe(true);
   });
 });
+
+// ── Phase 2: Lifecycle event subscription ──────────────────────────────────
+
+describe("FleetIngestionService — lifecycle events", () => {
+  let db: Database;
+  let tmpDir: string;
+
+  beforeEach(() => {
+    db = freshDb();
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS occupant_tenures (
+        id TEXT PRIMARY KEY,
+        node_id TEXT,
+        generation_ordinal INTEGER,
+        generation_uuid TEXT,
+        kind TEXT,
+        native_session_id_at_boot TEXT
+      )
+    `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS nodes (
+        node_id TEXT PRIMARY KEY,
+        rig_id TEXT,
+        logical_id TEXT,
+        session_name TEXT
+      )
+    `);
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS rigs (
+        rig_id TEXT PRIMARY KEY,
+        name TEXT
+      )
+    `);
+    tmpDir = mkdtempSync(join(tmpdir(), "fleet-lifecycle-"));
+  });
+
+  it("ingestSessionByNodeId returns error when no native session ID exists", async () => {
+    const svc = makeService(db, tmpDir);
+    const result = await svc.ingestSessionByNodeId("nonexistent-node");
+    expect(result.ingested).toBe(false);
+    expect(result.nativeSessionId).toBeNull();
+    expect(result.error).toBe("no native session ID for node");
+  });
+
+  it("ingestSessionByNodeId returns error when transcript file not found", async () => {
+    db.prepare(
+      "INSERT INTO occupant_tenures (id, node_id, generation_ordinal, generation_uuid, kind, native_session_id_at_boot) VALUES (?, ?, ?, ?, ?, ?)",
+    ).run("t1", "node-1", 1, "gen-1", "claude", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+
+    const svc = makeService(db, tmpDir);
+    const result = await svc.ingestSessionByNodeId("node-1");
+    expect(result.ingested).toBe(false);
+    expect(result.nativeSessionId).toBe("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
+    expect(result.error).toBe("transcript file not found");
+  });
+
+  it("subscribeLifecycleEvents fires ingestSessionByNodeId on session.stopped", async () => {
+    type Subscriber = (event: { type: string; nodeId?: string }) => void;
+    const subscribers: Subscriber[] = [];
+    const mockEventBus = {
+      subscribe: (cb: Subscriber) => {
+        subscribers.push(cb);
+        return () => { subscribers.splice(subscribers.indexOf(cb), 1); };
+      },
+    };
+
+    const svc = new FleetIngestionService({
+      db,
+      fleetStore: new FleetStore(db),
+      homedir: tmpDir,
+      reducerPath: "/nonexistent/reducer.mjs",
+      eventBus: mockEventBus,
+    });
+
+    const ingestSpy = vi.spyOn(svc, "ingestSessionByNodeId").mockResolvedValue({
+      ingested: true,
+      nativeSessionId: "test-session-id",
+    });
+
+    svc.subscribeLifecycleEvents();
+    expect(subscribers).toHaveLength(1);
+
+    subscribers[0]!({ type: "session.stopped", nodeId: "node-42" });
+
+    await vi.waitFor(() => expect(ingestSpy).toHaveBeenCalledWith("node-42"));
+
+    svc.unsubscribeLifecycleEvents();
+    expect(subscribers).toHaveLength(0);
+  });
+
+  it("subscribeLifecycleEvents ignores non-session.stopped events", () => {
+    type Subscriber = (event: { type: string; nodeId?: string }) => void;
+    const subscribers: Subscriber[] = [];
+    const mockEventBus = {
+      subscribe: (cb: Subscriber) => {
+        subscribers.push(cb);
+        return () => { subscribers.splice(subscribers.indexOf(cb), 1); };
+      },
+    };
+
+    const svc = new FleetIngestionService({
+      db,
+      fleetStore: new FleetStore(db),
+      homedir: tmpDir,
+      reducerPath: "/nonexistent/reducer.mjs",
+      eventBus: mockEventBus,
+    });
+
+    const ingestSpy = vi.spyOn(svc, "ingestSessionByNodeId").mockResolvedValue({
+      ingested: false,
+      nativeSessionId: null,
+    });
+
+    svc.subscribeLifecycleEvents();
+    subscribers[0]!({ type: "node.added", nodeId: "node-99" });
+    expect(ingestSpy).not.toHaveBeenCalled();
+    svc.unsubscribeLifecycleEvents();
+  });
+
+  it("ingestRecentReviews only processes review logs modified within the window", async () => {
+    const logsDir = join(tmpDir, ".claude", "logs", "code-review");
+    const recentDir = join(logsDir, "dual-repo-branch-20261006T200000Z");
+    const oldDir = join(logsDir, "dual-repo-branch-20260901T100000Z");
+
+    mkdirSync(recentDir, { recursive: true });
+    mkdirSync(oldDir, { recursive: true });
+
+    const recentMetrics = {
+      traceId: "recent-trace",
+      metricsJson: "{}",
+    };
+    const oldMetrics = {
+      traceId: "old-trace",
+      metricsJson: "{}",
+    };
+
+    writeFileSync(join(recentDir, "metrics.json"), JSON.stringify(recentMetrics));
+    writeFileSync(join(oldDir, "metrics.json"), JSON.stringify(oldMetrics));
+
+    const { utimesSync } = await import("node:fs");
+    const oldTime = new Date(Date.now() - 30 * 60 * 1000);
+    utimesSync(join(oldDir, "metrics.json"), oldTime, oldTime);
+
+    const svc = makeService(db, tmpDir);
+    const result = await svc.ingestRecentReviews(10 * 60 * 1000);
+
+    expect(result.discovered).toBe(1);
+    expect(result.ingested).toBe(1);
+
+    const row = db.prepare("SELECT trace_id FROM review_runs WHERE trace_id = ?").get("recent-trace");
+    expect(row).toBeDefined();
+
+    const oldRow = db.prepare("SELECT trace_id FROM review_runs WHERE trace_id = ?").get("old-trace");
+    expect(oldRow).toBeUndefined();
+  });
+});
