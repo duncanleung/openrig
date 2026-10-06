@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
-import { DaemonClient } from "../client.js";
+import { DaemonClient, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, daemonStatusGuard } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -25,7 +25,7 @@ export function fleetCommand(depsOverride?: StatusDeps): Command {
       const client = await getClient();
       if (!client) return;
       const data = JSON.parse(readFileSync(file, "utf-8"));
-      const response = await client.post<{ ok: boolean; id?: number; created?: boolean; error?: string }>("/api/fleet/digests", data);
+      const response = await client.post<{ ok: boolean; id?: number; created?: boolean; error?: string }>("/api/fleet/digests", data, { headers: terminalAuthHeaders() });
       if (response.status >= 400) {
         console.error(`Error: ${response.data.error ?? "Unknown error"}`);
         process.exitCode = 1;
@@ -42,7 +42,7 @@ export function fleetCommand(depsOverride?: StatusDeps): Command {
       const client = await getClient();
       if (!client) return;
       const data = JSON.parse(readFileSync(file, "utf-8"));
-      const response = await client.post<{ ok: boolean; runId?: number; created?: boolean; findingsUpserted?: number; error?: string }>("/api/fleet/reviews", data);
+      const response = await client.post<{ ok: boolean; runId?: number; created?: boolean; findingsUpserted?: number; error?: string }>("/api/fleet/reviews", data, { headers: terminalAuthHeaders() });
       if (response.status >= 400) {
         console.error(`Error: ${response.data.error ?? "Unknown error"}`);
         process.exitCode = 1;
@@ -59,7 +59,7 @@ export function fleetCommand(depsOverride?: StatusDeps): Command {
       const client = await getClient();
       if (!client) return;
       const data = JSON.parse(readFileSync(file, "utf-8"));
-      const response = await client.post<{ ok: boolean; id?: number; created?: boolean; upserted?: number; error?: string }>("/api/fleet/snapshots", data);
+      const response = await client.post<{ ok: boolean; id?: number; created?: boolean; upserted?: number; error?: string }>("/api/fleet/snapshots", data, { headers: terminalAuthHeaders() });
       if (response.status >= 400) {
         console.error(`Error: ${response.data.error ?? "Unknown error"}`);
         process.exitCode = 1;

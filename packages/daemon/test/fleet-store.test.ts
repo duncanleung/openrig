@@ -246,6 +246,82 @@ describe("099 daily_token_snapshots — upsert idempotence", () => {
   });
 });
 
+describe("upsert returned id — regression for stale lastInsertRowid", () => {
+  let db: Database;
+  let store: FleetStore;
+  beforeEach(() => {
+    db = freshDb();
+    store = new FleetStore(db);
+  });
+
+  it("upsertDigest returns the correct id on the update path", () => {
+    const first = store.upsertDigest(digest());
+    expect(first.created).toBe(true);
+    const expectedId = first.id;
+
+    store.upsertSnapshot(snapshot());
+
+    const second = store.upsertDigest(digest({ totalTurns: 99 }));
+    expect(second.created).toBe(false);
+    expect(second.id).toBe(expectedId);
+  });
+
+  it("upsertReviewRun returns the correct runId on the update path", () => {
+    const first = store.upsertReviewRun(run(), [finding()]);
+    expect(first.created).toBe(true);
+    const expectedId = first.runId;
+
+    store.upsertDigest(digest());
+
+    const second = store.upsertReviewRun(run({ mustFix: 1 }), [finding({ score: 90 })]);
+    expect(second.created).toBe(false);
+    expect(second.runId).toBe(expectedId);
+  });
+
+  it("upsertSnapshot returns the correct id on the update path", () => {
+    const first = store.upsertSnapshot(snapshot());
+    expect(first.created).toBe(true);
+    const expectedId = first.id;
+
+    store.upsertDigest(digest());
+
+    const second = store.upsertSnapshot(snapshot({ totalTokensDelta: 99999 }));
+    expect(second.created).toBe(false);
+    expect(second.id).toBe(expectedId);
+  });
+});
+
+describe("stats — MAX(timestamp) regression for re-ingest ordering", () => {
+  let db: Database;
+  let store: FleetStore;
+  beforeEach(() => {
+    db = freshDb();
+    store = new FleetStore(db);
+  });
+
+  it("last_ingested_at reflects the most recent re-ingest, not the highest rowid", () => {
+    store.upsertDigest(digest({ nativeSessionId: "old" }));
+    store.upsertDigest(digest({ nativeSessionId: "new" }));
+
+    db.prepare("UPDATE session_digests SET ingested_at = '2026-01-01T00:00:00' WHERE native_session_id = 'new'").run();
+    db.prepare("UPDATE session_digests SET ingested_at = '2026-12-31T23:59:59' WHERE native_session_id = 'old'").run();
+
+    const s = store.stats();
+    expect(s.session_digests.last_ingested_at).toBe("2026-12-31T23:59:59");
+  });
+
+  it("last_snapshot_at reflects the most recent re-ingest, not the highest rowid", () => {
+    store.upsertSnapshot(snapshot({ day: "2026-01-01" }));
+    store.upsertSnapshot(snapshot({ day: "2026-12-31" }));
+
+    db.prepare("UPDATE daily_token_snapshots SET snapshot_at = '2026-01-01T00:00:00' WHERE day = '2026-12-31'").run();
+    db.prepare("UPDATE daily_token_snapshots SET snapshot_at = '2026-12-31T23:59:59' WHERE day = '2026-01-01'").run();
+
+    const s = store.stats();
+    expect(s.daily_token_snapshots.last_snapshot_at).toBe("2026-12-31T23:59:59");
+  });
+});
+
 describe("fleet store stats — row counts and last timestamps", () => {
   let db: Database;
   let store: FleetStore;

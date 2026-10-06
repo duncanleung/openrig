@@ -157,7 +157,7 @@ export class FleetStore {
         ingested_at = datetime('now')
     `).run(d);
 
-    return { id: Number(info.lastInsertRowid), created: !existing };
+    return { id: existing?.id ?? Number(info.lastInsertRowid), created: !existing };
   }
 
   upsertReviewRun(run: ReviewRunInput, findings: ReviewFindingInput[]): {
@@ -253,7 +253,7 @@ export class FleetStore {
       }
 
       return {
-        runId: Number(runInfo.lastInsertRowid),
+        runId: existingRun?.id ?? Number(runInfo.lastInsertRowid),
         created: !existingRun,
         findingsUpserted,
       };
@@ -290,34 +290,28 @@ export class FleetStore {
         snapshot_at = datetime('now')
     `).run(s);
 
-    return { id: Number(info.lastInsertRowid), created: !existing };
+    return { id: existing?.id ?? Number(info.lastInsertRowid), created: !existing };
   }
 
   stats(): FleetStoreStats {
-    const q = (table: string) => {
-      const row = this.db.prepare(
-        `SELECT COUNT(*) AS count, MAX(rowid) AS max_id FROM ${table}`,
-      ).get() as { count: number; max_id: number | null };
-      return row;
+    const agg = (table: string, tsCol?: string) => {
+      const sql = tsCol
+        ? `SELECT COUNT(*) AS count, MAX(${tsCol}) AS ts FROM ${table}`
+        : `SELECT COUNT(*) AS count FROM ${table}`;
+      const row = this.db.prepare(sql).get() as { count: number; ts?: string | null };
+      return { count: row.count, ts: row.ts ?? null };
     };
 
-    const lastIngested = (table: string, col: string) => {
-      const row = this.db.prepare(
-        `SELECT ${col} AS ts FROM ${table} ORDER BY rowid DESC LIMIT 1`,
-      ).get() as { ts: string | null } | undefined;
-      return row?.ts ?? null;
-    };
-
-    const digests = q("session_digests");
-    const runs = q("review_runs");
-    const findings = q("review_findings");
-    const snapshots = q("daily_token_snapshots");
+    const digests = agg("session_digests", "ingested_at");
+    const runs = agg("review_runs", "ingested_at");
+    const findings = agg("review_findings");
+    const snapshots = agg("daily_token_snapshots", "snapshot_at");
 
     return {
-      session_digests: { count: digests.count, last_ingested_at: lastIngested("session_digests", "ingested_at") },
-      review_runs: { count: runs.count, last_ingested_at: lastIngested("review_runs", "ingested_at") },
+      session_digests: { count: digests.count, last_ingested_at: digests.ts },
+      review_runs: { count: runs.count, last_ingested_at: runs.ts },
       review_findings: { count: findings.count },
-      daily_token_snapshots: { count: snapshots.count, last_snapshot_at: lastIngested("daily_token_snapshots", "snapshot_at") },
+      daily_token_snapshots: { count: snapshots.count, last_snapshot_at: snapshots.ts },
     };
   }
 
