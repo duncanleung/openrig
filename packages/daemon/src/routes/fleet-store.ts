@@ -13,8 +13,8 @@ import type { FleetIngestionService } from "../domain/fleet-ingestion-service.js
 export interface FleetStoreRouteDeps {
   db: () => Database;
   bearerToken?: string | null;
-  /** Optional ingestion service — enables POST /reconcile. */
-  fleetIngestion?: FleetIngestionService;
+  /** Optional ingestion service — enables POST /reconcile. Getter to support late init. */
+  fleetIngestion?: () => FleetIngestionService | undefined;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -306,7 +306,7 @@ export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
   });
 
   writeApp.post("/reconcile", async (c) => {
-    const ingestion = deps.fleetIngestion;
+    const ingestion = deps.fleetIngestion?.();
     if (!ingestion) {
       return c.json({ ok: false, code: "not_configured", error: "Fleet ingestion service not available." }, 503);
     }

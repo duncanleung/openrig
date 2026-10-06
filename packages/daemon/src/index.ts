@@ -363,7 +363,7 @@ export async function startServer(port?: number) {
         startPeriodicSnapshotScheduler(deps);
         // Fleet ingestion: roll up snapshots before retention prunes usage_samples,
         // then start the periodic reconciliation timer (5 min default).
-        // deps.fleetIngestion is assigned here so the lazy route handler can see it.
+        // deps.fleetIngestion is assigned here; the route reads it via a getter closure.
         deps.fleetIngestion = new FleetIngestionService({
           db: deps.rigRepo.db,
           fleetStore: new FleetStore(deps.rigRepo.db),
