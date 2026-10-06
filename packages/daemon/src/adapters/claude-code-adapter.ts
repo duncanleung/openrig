@@ -37,6 +37,8 @@ export interface ClaudeAdapterFsOps {
   readdir?(dirPath: string): string[];
   /** User home directory (for session file lookup). */
   homedir?: string;
+  /** Atomically replace a file (for mode-preserving relay delivery). */
+  rename?(oldPath: string, newPath: string): void;
 }
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
@@ -566,6 +568,31 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     if ((this.fs.statMode(dest) & 0o777) !== srcMode) this.fs.chmod(dest, srcMode);
   }
 
+  /**
+   * Copy src to dest atomically via temp sibling + rename. Skips when dest
+   * content already matches. Falls back to non-atomic copyFile when rename
+   * is unavailable or when the atomic path throws.
+   */
+  private deliverFileAtomically(src: string, dest: string): void {
+    if (this.fs.exists(dest) && this.fs.readFile(src) === this.fs.readFile(dest)) {
+      this.preserveMode(src, dest);
+      return;
+    }
+    if (this.fs.rename) {
+      const tmp = `${dest}.${process.pid}.tmp`;
+      try {
+        this.fs.copyFile(src, tmp);
+        this.preserveMode(src, tmp);
+        this.fs.rename(tmp, dest);
+        return;
+      } catch {
+        // Atomic delivery failed; fall back to non-atomic copy below.
+      }
+    }
+    this.fs.copyFile(src, dest);
+    this.preserveMode(src, dest);
+  }
+
   private pluginAppliesToClaude(entry: ProjectionEntry): boolean {
     const explicit = entry.pluginType ?? "auto";
     if (explicit === "claude") return true;
@@ -979,8 +1006,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     //    hook fires for all projects and a project-level duplicate doubles the POST.
     if (deliverable && !globalCoversRelay) {
       this.fs.mkdirp(nodePath.dirname(relayDest));
-      this.fs.copyFile(this.activityRelayPath!, relayDest);
-      this.preserveMode(this.activityRelayPath!, relayDest);
+      this.deliverFileAtomically(this.activityRelayPath!, relayDest);
       for (const { event, timeout } of derivedEvents) {
         const groups = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
         const hook: Record<string, unknown> = { type: "command", command: ownedCmd };

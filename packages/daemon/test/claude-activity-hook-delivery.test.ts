@@ -474,3 +474,45 @@ describe("Claude activity-hook — REAL SHIPPED-spec resolver -> planner -> adap
     }
   });
 });
+
+describe("Claude activity-hook delivery — atomic relay delivery", () => {
+  function enableFsWithRename(extra?: Store): ReturnType<typeof mockFs> & { _renamed: Array<[string, string]> } {
+    const base = enableFs(extra);
+    const renamed: Array<[string, string]> = [];
+    return Object.assign(base, {
+      rename: (oldPath: string, newPath: string) => {
+        renamed.push([oldPath, newPath]);
+        base._store[newPath] = base._store[oldPath] ?? "";
+        if (oldPath in base._modes) base._modes[newPath] = base._modes[oldPath]!;
+        delete base._store[oldPath];
+        delete base._modes[oldPath];
+      },
+      _renamed: renamed,
+    });
+  }
+
+  it("delivers relay via temp+rename when rename is available", async () => {
+    const fs = enableFsWithRename();
+    await makeAdapter(fs).project(plan([activityEntry()]), binding());
+    expect(fs._store[RELAY_DEST]).toBe("// relay");
+    expect(fs._modes[RELAY_DEST]! & 0o777).toBe(0o755);
+    expect(fs._renamed.length).toBe(1);
+    expect(fs._renamed[0]![1]).toBe(RELAY_DEST);
+    expect(fs._renamed[0]![0]).toMatch(/\.tmp$/);
+  });
+
+  it("skips copy when dest content already matches src", async () => {
+    const fs = enableFsWithRename({ [RELAY_DEST]: "// relay" });
+    fs._modes[RELAY_DEST] = 0o755;
+    await makeAdapter(fs).project(plan([activityEntry()]), binding());
+    expect(fs._renamed.length).toBe(0);
+  });
+
+  it("falls back to non-atomic copy when rename throws", async () => {
+    const fs = enableFsWithRename();
+    fs.rename = () => { throw new Error("rename failed"); };
+    await makeAdapter(fs).project(plan([activityEntry()]), binding());
+    expect(fs._store[RELAY_DEST]).toBe("// relay");
+    expect(fs._modes[RELAY_DEST]! & 0o777).toBe(0o755);
+  });
+});
