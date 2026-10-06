@@ -319,6 +319,10 @@ Tell the kernel operator what you want to do. It asks about your goal, presents
 three teams with one recommendation, and fits the team to the providers you have.
 Review that choice before launching it.
 
+`rig specs preview starter --kind rig` and the factory preview include the three
+choices and their uses, in text and JSON. The reminder respects a team you already
+picked; previewing a spec does not launch it.
+
 | Team | Agents and runtimes | For |
 | --- | --- | --- |
 | `starter` | `dev-build` (Claude Code) and `dev-review` (Codex, pinned `gpt-6-astra`) | One bounded change |
@@ -436,6 +440,13 @@ partial terminal view is not a healthy team. Repeated terminal-open calls can
 create another provider workspace; return to the one already open when you
 want to preserve it. This is terminal integration, not native plugin enrollment.
 
+For team views with interactive panes, the open result distinguishes the dashboard
+overview from the team's lead conversation and asks whether you can see the team.
+This reminder is omitted from the default kernel view and entirely read-only watch
+views. If the provider cannot open, each labelled fallback command joins a different
+seat. Keep all returned commands
+complete when sharing them; a created workspace alone does not confirm visibility.
+
 ## Continue real project work
 
 Return to the same owner with the next outcome, citing the earlier result.
@@ -488,7 +499,12 @@ missing or ambiguous source instead of selecting an arbitrary historical row.
 Repair the named source, retry, or leave the seat stopped. Check the retained
 queue, project notes and observed result before continuing work.
 
-`rig setup` prints the short form of this path once setup is ready; `rig status`
+`rig setup` prints the short form of this path after ready, incomplete and dry-run
+results; JSON output includes it as `nextSteps`. This guidance does not mean the
+kernel is ready: retain any named failures, check the actual seat state, then
+offer `rig terminal open saved:kernel`. If the view cannot open, relay its printed
+operator attach command in full. Hand the goal and project folder to the ready
+operator rather than implementing the project during installation. `rig status`
 points back here while no rigs are registered.
 
 ### Use the startup and work TUI
