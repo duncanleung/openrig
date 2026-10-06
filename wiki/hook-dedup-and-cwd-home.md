@@ -2,7 +2,7 @@
 title: Hook dedup and cwdIsHome guard
 type: context
 confidence: high
-last_verified: 2026-09-27
+last_verified: 2026-10-06
 tags: [daemon, hooks, dedup, claude-code]
 related: [[observer-capture-and-activity-hooks]]
 source: session
@@ -38,11 +38,29 @@ already covered all events — the opposite of what dedup should do.
 Dedup applies unconditionally. If global `settings.json` covers all relay
 events, no project-level relay hooks are written — even when cwd is `$HOME`.
 
+## Relay deployment path (PR #13, 2026-10-06)
+
+The relay script (`activity-relay.cjs`) now deploys to `~/.openrig/hooks/scripts/`
+instead of `<cwd>/.openrig/hooks/scripts/`. The old project-local path was
+vulnerable to `git clean -fdx` removing the relay script, which caused silent
+hook failure.
+
+The home directory is resolved via `this.fs.homedir ?? process.env.HOME ?? cwd`.
+The `restore-check-service.ts` relay path uses the same resolution chain.
+
+Delivery uses an atomic temp+rename pattern (`deliverFileAtomically`): write to
+a temp sibling, `preserveMode`, then `rename(2)`. This prevents a concurrent
+hook invocation from reading a half-written relay. The method skips the copy
+when the destination content already matches the source, and falls back to
+non-atomic `copyFile` when `rename` is unavailable or throws.
+
 ## Files
 
 - `packages/daemon/src/adapters/claude-code-adapter.ts` — dedup logic at the
-  `globalCoversRelay` assignment
+  `globalCoversRelay` assignment; `deliverFileAtomically` helper; relay path
+  construction at `reconcileClaudeActivityHooks`
 - `packages/daemon/test/observer-dedup-e2e.test.ts` — E2E tests for all dedup
   scenarios including cwd=home
 - `packages/daemon/test/claude-activity-hook-delivery.test.ts` — unit tests
-  for hook delivery with cwd=home
+  for hook delivery with cwd=home, atomic delivery, skip-when-identical,
+  and rename-throws fallback

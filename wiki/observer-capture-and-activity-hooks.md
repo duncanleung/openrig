@@ -2,7 +2,7 @@
 title: Observer capture and activity hooks
 type: context
 confidence: high
-last_verified: 2026-09-27
+last_verified: 2026-10-06
 tags: [daemon, observer, hooks, ope-2, ope-3, ope-5]
 related: [[hook-dedup-and-cwd-home]]
 source: session
@@ -16,8 +16,9 @@ Three tickets implemented together in PR #1 and PR #2:
 
 - **RIG-2**: Observer provisioning — statusLine context collector injection
   with dedup when a global user statusLine exists
-- **RIG-3**: Activity hooks — relay script delivery to project-level
-  `settings.local.json` with global-covers-relay dedup
+- **RIG-3**: Activity hooks — relay script delivery to
+  `settings.local.json` with global-covers-relay dedup. Relay script deploys
+  to `~/.openrig/hooks/scripts/` (global path, PR #13)
 - **RIG-5**: E2E test suite for dedup logic with real filesystem operations
 
 ## Key design decisions
@@ -33,6 +34,17 @@ Three tickets implemented together in PR #1 and PR #2:
 3. **settings.local.json**: the adapter writes to `settings.local.json`, never
    `settings.json`. This is a Claude Code convention — `.local` files are
    project-scoped and gitignored.
+
+## Relay path and atomic delivery (PR #13, 2026-10-06)
+
+The relay script originally deployed to `<cwd>/.openrig/hooks/scripts/`. This
+path was inside the project working tree, so `git clean -fdx` removed it and
+caused silent hook failure. PR #13 moved deployment to `~/.openrig/hooks/scripts/`
+(global, outside any working tree).
+
+Delivery uses `deliverFileAtomically`: temp sibling + `rename(2)` for atomic
+replacement, with a content-match skip and a non-atomic fallback. The
+`restore-check-service.ts` relay path was updated to match.
 
 ## ADRs
 
