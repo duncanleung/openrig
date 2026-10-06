@@ -298,15 +298,26 @@ export interface RetentionSweepSummary {
   usageSamplesBatches: number;
 }
 
+export interface RetentionSweepDeps {
+  /** Optional: roll up token snapshots BEFORE pruning usage_samples so no data is lost. */
+  fleetIngestion?: { rollUpSnapshots(opts?: { days?: number }): Promise<unknown> };
+  /** Retention window so rollup covers rows that are about to be pruned. */
+  usageSamplesRetentionDays?: number;
+}
+
 /**
  * The boot-sweep / daily-tick entry point: drain both retention passes in
  * bounded batches, yielding to the event loop between batches so a large
  * backlog can never wedge the daemon. Idempotent and safe to run on every boot.
  * Each pass stops when a batch is empty or the safety batch-cap is hit.
+ *
+ * When `deps.fleetIngestion` is provided, snapshot rollup runs BEFORE
+ * pruneUsageSamples so data expiring from the retention window is captured first.
  */
 export async function runQueueRetentionSweep(
   db: Database.Database,
   opts: RetentionOptions,
+  deps?: RetentionSweepDeps,
 ): Promise<RetentionSweepSummary> {
   const maxBatches = opts.maxBatchesPerTable ?? RETENTION_DEFAULTS.maxBatchesPerTable;
   const summary: RetentionSweepSummary = {
@@ -334,6 +345,18 @@ export async function runQueueRetentionSweep(
     summary.watchdogDeleted += batch.deletedRows;
     summary.watchdogBatches++;
     await yieldToLoop();
+  }
+
+  // Roll up token snapshots BEFORE pruning usage_samples — the only safe ordering.
+  if (deps?.fleetIngestion) {
+    const retentionDays = deps.usageSamplesRetentionDays
+      ?? opts.usageSamplesRetentionDays
+      ?? RETENTION_DEFAULTS.usageSamplesRetentionDays;
+    try {
+      await deps.fleetIngestion.rollUpSnapshots({ days: retentionDays + 1 });
+    } catch (err) {
+      console.error(`[queue-retention] snapshot rollup before prune failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   for (let i = 0; i < maxBatches; i++) {

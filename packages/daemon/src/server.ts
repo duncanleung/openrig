@@ -393,6 +393,8 @@ export interface AppDeps {
   runtimeSessionEnv?: Record<string, Record<string, string | undefined>>;
   /** RIG-43: runtime fallback service — executes forward and reverse runtime swaps on usage-limit events. */
   runtimeFallbackService?: import("./domain/runtime-fallback-service.js").RuntimeFallbackService;
+  /** Fleet ingestion service — enables POST /api/fleet/reconcile. */
+  fleetIngestion?: import("./domain/fleet-ingestion-service.js").FleetIngestionService;
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -824,7 +826,7 @@ export function createApp(deps: AppDeps): Hono {
   // 51-08 A3 — usage series + top-N burn over usage_samples (one projection, CLI+HTTP).
   app.route("/api/telemetry", telemetryRoutes({ db: () => deps.rigRepo.db,
     source: { hostId: getSelfHostId(), bootEpoch: deps.daemonBootEpoch ?? null } }));
-  app.route("/api/fleet", fleetStoreRoutes({ db: () => deps.rigRepo.db, bearerToken: deps.terminalBearerToken ?? null }));
+  app.route("/api/fleet", fleetStoreRoutes({ db: () => deps.rigRepo.db, bearerToken: deps.terminalBearerToken ?? null, fleetIngestion: () => deps.fleetIngestion }));
   // OPR.0.4.4.19 FR-9 — scope approve: frontmatter stamp + audit row.
   app.route("/api/scope/approve", scopeApproveRoutes());
   app.route("/api/proof", proofRoutes());

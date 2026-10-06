@@ -8,10 +8,13 @@ import type {
   ReviewFindingInput,
   DailyTokenSnapshotInput,
 } from "../domain/fleet-store.js";
+import type { FleetIngestionService } from "../domain/fleet-ingestion-service.js";
 
 export interface FleetStoreRouteDeps {
   db: () => Database;
   bearerToken?: string | null;
+  /** Optional ingestion service — enables POST /reconcile. Getter to support late init. */
+  fleetIngestion?: () => FleetIngestionService | undefined;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -299,6 +302,43 @@ export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
       return c.json({ ok: true, ...result });
     } catch {
       return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
+    }
+  });
+
+  writeApp.post("/reconcile", async (c) => {
+    const ingestion = deps.fleetIngestion?.();
+    if (!ingestion) {
+      return c.json({ ok: false, code: "not_configured", error: "Fleet ingestion service not available." }, 503);
+    }
+
+    let body: Record<string, unknown> = {};
+    try {
+      const raw = await c.req.json().catch(() => ({}));
+      if (raw && typeof raw === "object") body = raw as Record<string, unknown>;
+    } catch { /* empty body is fine */ }
+
+    const force = body.force === true;
+    const digestsOnly = body.digests === true;
+    const reviewsOnly = body.reviews === true;
+    const snapshotsOnly = body.snapshots === true;
+
+    try {
+      if (digestsOnly) {
+        const result = await ingestion.reconcileDigests({ force });
+        return c.json({ ok: true, digests: result });
+      }
+      if (reviewsOnly) {
+        const result = await ingestion.reconcileReviews({ force });
+        return c.json({ ok: true, reviews: result });
+      }
+      if (snapshotsOnly) {
+        const result = await ingestion.rollUpSnapshots();
+        return c.json({ ok: true, snapshots: result });
+      }
+      const result = await ingestion.reconcile({ force });
+      return c.json({ ok: true, ...result });
+    } catch (err) {
+      return c.json({ ok: false, code: "reconcile_error", error: err instanceof Error ? err.message : String(err) }, 500);
     }
   });
 
