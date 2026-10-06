@@ -72,5 +72,33 @@ export function fleetCommand(depsOverride?: StatusDeps): Command {
       }
     });
 
+  command
+    .command("stats")
+    .description("Show fleet store row counts and last ingestion timestamps")
+    .action(async () => {
+      const client = await getClient();
+      if (!client) return;
+      const response = await client.get<{
+        ok: boolean;
+        session_digests?: { count: number; last_ingested_at: string | null };
+        review_runs?: { count: number; last_ingested_at: string | null };
+        review_findings?: { count: number };
+        daily_token_snapshots?: { count: number; last_snapshot_at: string | null };
+        error?: string;
+      }>("/api/fleet/stats");
+      if (response.status >= 400) {
+        console.error(`Error: ${response.data.error ?? "Unknown error"}`);
+        process.exitCode = 1;
+        return;
+      }
+      const d = response.data;
+      console.log("Fleet Store Stats");
+      console.log("─────────────────────────────────────────────────");
+      console.log(`session_digests        ${d.session_digests?.count ?? 0} rows   last: ${d.session_digests?.last_ingested_at ?? "—"}`);
+      console.log(`review_runs            ${d.review_runs?.count ?? 0} rows   last: ${d.review_runs?.last_ingested_at ?? "—"}`);
+      console.log(`review_findings        ${d.review_findings?.count ?? 0} rows`);
+      console.log(`daily_token_snapshots  ${d.daily_token_snapshots?.count ?? 0} rows   last: ${d.daily_token_snapshots?.last_snapshot_at ?? "—"}`);
+    });
+
   return command;
 }

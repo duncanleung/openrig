@@ -134,5 +134,14 @@ export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
     }
   });
 
+  app.get("/stats", (c) => {
+    try {
+      const result = store().stats();
+      return c.json({ ok: true, ...result });
+    } catch (err) {
+      return c.json({ ok: false, code: "fleet_store_error", error: String(err) }, 500);
+    }
+  });
+
   return app;
 }

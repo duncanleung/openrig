@@ -90,6 +90,13 @@ export interface DailyTokenSnapshotInput {
   schemaVersion: string | null;
 }
 
+export interface FleetStoreStats {
+  session_digests: { count: number; last_ingested_at: string | null };
+  review_runs: { count: number; last_ingested_at: string | null };
+  review_findings: { count: number };
+  daily_token_snapshots: { count: number; last_snapshot_at: string | null };
+}
+
 export class FleetStore {
   private readonly db: Database;
 
@@ -98,6 +105,10 @@ export class FleetStore {
   }
 
   upsertDigest(d: SessionDigestInput): { id: number; created: boolean } {
+    const existing = this.db.prepare(
+      "SELECT id FROM session_digests WHERE native_session_id = ?",
+    ).get(d.nativeSessionId) as { id: number } | undefined;
+
     const info = this.db.prepare(`
       INSERT INTO session_digests (
         rig_name, seat_session, seat_name, node_logical_id, rig_id, node_id,
@@ -146,7 +157,7 @@ export class FleetStore {
         ingested_at = datetime('now')
     `).run(d);
 
-    return { id: Number(info.lastInsertRowid), created: info.changes === 1 };
+    return { id: Number(info.lastInsertRowid), created: !existing };
   }
 
   upsertReviewRun(run: ReviewRunInput, findings: ReviewFindingInput[]): {
@@ -155,6 +166,10 @@ export class FleetStore {
     findingsUpserted: number;
   } {
     const result = this.db.transaction(() => {
+      const existingRun = this.db.prepare(
+        "SELECT id FROM review_runs WHERE trace_id = ?",
+      ).get(run.traceId) as { id: number } | undefined;
+
       const runInfo = this.db.prepare(`
         INSERT INTO review_runs (
           trace_id, pr_number, repo, branch, ticket, head_sha,
@@ -239,7 +254,7 @@ export class FleetStore {
 
       return {
         runId: Number(runInfo.lastInsertRowid),
-        created: runInfo.changes === 1,
+        created: !existingRun,
         findingsUpserted,
       };
     })();
@@ -248,6 +263,10 @@ export class FleetStore {
   }
 
   upsertSnapshot(s: DailyTokenSnapshotInput): { id: number; created: boolean } {
+    const existing = this.db.prepare(
+      "SELECT id FROM daily_token_snapshots WHERE day = ? AND seat_session = ?",
+    ).get(s.day, s.seatSession) as { id: number } | undefined;
+
     const info = this.db.prepare(`
       INSERT INTO daily_token_snapshots (
         day, seat_session, rig_name, seat_name, model,
@@ -271,7 +290,35 @@ export class FleetStore {
         snapshot_at = datetime('now')
     `).run(s);
 
-    return { id: Number(info.lastInsertRowid), created: info.changes === 1 };
+    return { id: Number(info.lastInsertRowid), created: !existing };
+  }
+
+  stats(): FleetStoreStats {
+    const q = (table: string) => {
+      const row = this.db.prepare(
+        `SELECT COUNT(*) AS count, MAX(rowid) AS max_id FROM ${table}`,
+      ).get() as { count: number; max_id: number | null };
+      return row;
+    };
+
+    const lastIngested = (table: string, col: string) => {
+      const row = this.db.prepare(
+        `SELECT ${col} AS ts FROM ${table} ORDER BY rowid DESC LIMIT 1`,
+      ).get() as { ts: string | null } | undefined;
+      return row?.ts ?? null;
+    };
+
+    const digests = q("session_digests");
+    const runs = q("review_runs");
+    const findings = q("review_findings");
+    const snapshots = q("daily_token_snapshots");
+
+    return {
+      session_digests: { count: digests.count, last_ingested_at: lastIngested("session_digests", "ingested_at") },
+      review_runs: { count: runs.count, last_ingested_at: lastIngested("review_runs", "ingested_at") },
+      review_findings: { count: findings.count },
+      daily_token_snapshots: { count: snapshots.count, last_snapshot_at: lastIngested("daily_token_snapshots", "snapshot_at") },
+    };
   }
 
   upsertSnapshots(snapshots: DailyTokenSnapshotInput[]): { upserted: number } {
