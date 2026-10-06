@@ -73,6 +73,45 @@ export function fleetCommand(depsOverride?: StatusDeps): Command {
     });
 
   command
+    .command("reconcile")
+    .description("Trigger fleet store reconciliation (discovers + ingests transcripts, reviews, and snapshots)")
+    .option("--digests", "Reconcile session digests only")
+    .option("--reviews", "Reconcile review runs only")
+    .option("--snapshots", "Roll up token snapshots only")
+    .option("--force", "Re-ingest even if source hash is unchanged")
+    .action(async (opts: { digests?: boolean; reviews?: boolean; snapshots?: boolean; force?: boolean }) => {
+      const client = await getClient();
+      if (!client) return;
+      const body: Record<string, boolean> = {};
+      if (opts.digests) body.digests = true;
+      if (opts.reviews) body.reviews = true;
+      if (opts.snapshots) body.snapshots = true;
+      if (opts.force) body.force = true;
+      const response = await client.post<Record<string, unknown>>("/api/fleet/reconcile", body, { headers: terminalAuthHeaders() });
+      if (response.status >= 400) {
+        console.error(`Error: ${String((response.data as Record<string, unknown>).error ?? "Unknown error")}`);
+        process.exitCode = 1;
+        return;
+      }
+      const d = response.data;
+      if (d.digests) {
+        const dg = d.digests as Record<string, unknown>;
+        console.log(`Digests:   ${dg.ingested} ingested, ${dg.skipped} skipped, ${(dg.errors as unknown[]).length} errors`);
+      }
+      if (d.reviews) {
+        const rv = d.reviews as Record<string, unknown>;
+        console.log(`Reviews:   ${rv.ingested} ingested, ${rv.skipped} skipped, ${(rv.errors as unknown[]).length} errors`);
+      }
+      if (d.snapshots) {
+        const sn = d.snapshots as Record<string, unknown>;
+        console.log(`Snapshots: ${sn.snapshotsUpserted} upserted (${sn.daysRolledUp} days)`);
+      }
+      if (typeof d.durationMs === "number") {
+        console.log(`Duration:  ${d.durationMs}ms`);
+      }
+    });
+
+  command
     .command("stats")
     .description("Show fleet store row counts and last ingestion timestamps")
     .action(async () => {
