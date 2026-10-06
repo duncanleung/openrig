@@ -121,7 +121,7 @@ pods:
               applies_on: [fresh_start]
           actions:
             - type: send_text
-              value: "Load the implementation-pair skill and begin."
+              value: "Read your guidance and begin."
               phase: after_ready
               idempotent: true
       - id: qa
@@ -236,6 +236,11 @@ Every other seat launches at the floor:
 - Codex `-s workspace-write`, or `-p <profile>` when the member sets
   `codex_config_profile`, in which case the profile governs its own sandbox;
 - Pi `--no-approve` by default.
+
+Seats of the rig named `kernel` are the exception. With no member or rig policy, no
+per-seat choice and (for Codex) no named profile, Claude launches in `acceptEdits` with a
+per-launch `--settings` allow list for its file tools and operational commands, and Codex
+launches with `-s danger-full-access -a never`.
 
 **Config-surface policies are recorded, not applied at launch.** The seat still starts at
 the floor. The `allow`, `ask` and `deny` rules take effect once they are translated into the
@@ -678,12 +683,13 @@ These are the built-in specs shipped with OpenRig. Read them as worked examples.
 
 | Spec | Location | Pods | Members | Services |
 |------|----------|------|---------|----------|
-| `product-team` | `packages/daemon/specs/rigs/preview/product-team/rig.yaml` | orch1, dev1, rev1 | 7 (lead, peer, impl, qa, design, r1, r2) | no |
-| `implementation-pair` | `packages/daemon/specs/rigs/launch/implementation-pair/rig.yaml` | dev | 2 (impl, qa) | no |
-| `adversarial-review` | `packages/daemon/specs/rigs/focused/adversarial-review/rig.yaml` | orch, review | 3 (lead, r1, r2) | no |
-| `research-team` | `packages/daemon/specs/rigs/focused/research-team/rig.yaml` | orch, research | 3 (lead, analyst, synthesizer) | no |
+| `starter` | `packages/daemon/specs/rigs/launch/starter/rig.yaml` | dev | 2 (build, review) | no |
+| `factory` | `packages/daemon/specs/rigs/launch/factory/rig.yaml` | orch, dev, review | 7 (lead, advisor, build, qa, design, r1, r2) | no |
+| `code-review` | `packages/daemon/specs/rigs/focused/code-review/rig.yaml` | orch, review | 3 (lead, r1, r2) | no |
+| `research` | `packages/daemon/specs/rigs/focused/research/rig.yaml` | orch, research | 3 (lead, analyst, synthesizer) | no |
+| `pm` | `packages/daemon/specs/rigs/focused/pm/rig.yaml` | pm, dev | 3 (lead, researcher, build) | no |
 | `secrets-manager` | `packages/daemon/specs/rigs/launch/secrets-manager/rig.yaml` | vault | 1 (specialist) | yes (Vault) |
 
-Also shipped, in the same tree: `focused/pm-team`, `launch/conveyor`, `launch/demo`, `launch/factory-rsi`,
-`launch/first-project`, `launch/first-project-claude`, `launch/first-project-mixed` and `launch/kernel`. List them with
-`rig specs ls --kind rig`.
+Also shipped, in the same tree: `launch/kernel`, OpenRig's own team, which starts automatically. `first-project` is
+starter's old name and still resolves to it. `workshop`, the four-agent middle team, is a rig bundle rather than a
+built-in. List the built-ins with `rig specs ls --kind rig`.

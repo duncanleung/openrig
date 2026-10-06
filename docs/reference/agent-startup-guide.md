@@ -217,20 +217,24 @@ applies to the next launch. A recognized prompt (the attention codes above) ends
 `attention_required`. A timeout ends startup as `failed` ("Readiness timeout after Ns — harness did not become
 interactive"), and the post-launch files aren't sent.
 
-**Claude submission check.** For every startup message to a Claude seat, OpenRig confirms the prompt was submitted. If
-the text is still sitting in the input, it presses Enter once more; if it's still there, it warns "Startup prompt still
-staged in <session>; press Enter in that pane." The seat still ends `ready`. After each send, readiness is checked
-again, so a prompt that appears at that point gives `attention_required`.
+**Claude submission check.** For each startup message to a Claude seat, OpenRig makes a bounded check that the prompt
+was submitted. When the capture can't tell, it records the submission as unverified and carries on. When it sees the
+same prompt still sitting in the input, it presses Enter once more; if it's still there, it warns "Startup prompt still
+staged in <session>; press Enter in that pane." The seat can still end `ready` with its submission `unverified` or
+`staged`, so `ready` doesn't prove the prompt was submitted. After all files and actions are delivered, readiness is
+checked once more, so a prompt that appears by then gives `attention_required`.
 
 **Startup proof.** A `startup_proof` action selects `authenticated` or `none` (the default is none; the last applicable
 one wins, and it needs `idempotent: true`). With `authenticated`, a fresh launch of an agent seat includes a challenge,
-and the seat answers it with `rig startup-proof submit --challenge-id <id> --answer <answer>`. `rig ps --nodes` shows
-the result in the ORIENTED column: `verified`, `missing`, `rejected` or `n-a`. A missing proof doesn't block startup.
+and the seat answers it with `rig startup-proof submit --challenge-id <id> --answer <answer>`. `rig ps --nodes --full`
+shows the result in the ORIENTED column: `verified`, `missing`, `rejected` or `n-a`. A missing proof doesn't block startup.
 
 **After a failure.** Delivery, launch and action failures, and readiness timeouts, give `failed`. Every 30 seconds the
 context monitor marks a `failed` or `attention_required` seat `ready` once its pane reads ready, unless fresh context
 is still pending for `rig seat continue`. A seat that timed out can therefore read `ready` without having received its
-post-launch files; relaunch it with `rig seat launch <seat> --fresh` if it needs them.
+post-launch files. If it needs them, first look at what that occupant has done; then
+`rig seat launch <seat> --fresh --reason <text>` starts a blank conversation for the seat. If the occupant is still
+live, the command refuses with `session_live` unless you also pass `--stop`, which replaces that occupant deliberately.
 
 ### The `applies_on` Field
 
@@ -287,7 +291,7 @@ run after the harness is ready: `after_files` (the default) after the post-launc
 | `send_text` delivery after ready | **Supported** | Reliable. Requires harness to be ready. |
 | Hooks | **Through plugins** | Declare a plugin under `resources.plugins[]`; `resources.hooks` is refused. |
 | Runtime resource projection | **Supported for recognized fragments** | `claude_settings_fragment`, `claude_mcp_fragment`, and `codex_config_fragment` are applied to provider config. Unknown types are copied to runtime extension directories. |
-| Permission configuration | **Native settings plus managed launch flags** | OpenRig launches Claude with `acceptEdits` and Codex with `workspace-write` unless an explicit supported selection changes them. It does not add a global Claude `Bash(rig:*)` allowance. Use [the first-user permission guide](getting-started.md#opt-in-permissive-operation) for opt-in and custom choices. |
+| Permission configuration | **Native settings plus managed launch flags** | OpenRig launches Claude with `acceptEdits` and Codex with `workspace-write` unless an explicit supported selection changes them; the `kernel` rig's seats get a wider operational default ([rig spec, "At launch"](rig-spec.md)). It does not add a global Claude `Bash(rig:*)` allowance. Use [the first-user permission guide](getting-started.md#opt-in-permissive-operation) for opt-in and custom choices. |
 | MCP installation | **Supported for Claude fragments** | A selected `claude_mcp_fragment` is merged into the project's `.mcp.json`. Claude asks to approve new servers found there; that prompt stops startup as `mcp_gate` until someone answers it and runs `rig seat continue`. Otherwise use `/mcp` or `claude mcp add`, or describe the servers in startup files for the agent to configure. |
 | System dependency installation | **Not deterministic** | Describe in startup files; agent handles via shell commands. |
 | Recurring tasks / wake timers | **Runtime-dependent** | Claude Code supports recurring tasks via the `/loop` command. Codex does not have a confirmed equivalent. Orchestrators should include `/loop` instructions in startup for Claude Code agents. |

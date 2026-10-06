@@ -9,14 +9,14 @@ applies-when: |
   agent-image capture/fork/protection, or Claude guided-compaction behavior.
 siblings: [packaging-bootstrap-bundles.md, agent-spec-and-startup.md]
 prerequisite-reads: [../README.md, agent-spec-and-startup.md]
-last-verified-against-source: a350c59b5a5fb37ee4a21b1026b595068b603df1
+last-verified-against-source: 82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d
 last-updated: 2026-10-05
 ---
 
 # Content libraries and compaction
 
 This module describes source at main commit
-`a350c59b5a5fb37ee4a21b1026b595068b603df1`. Source paths below are repository-relative.
+`82eb4bed0fbf4ce7df038090b43211a0b8a1aa1d`. Source paths below are repository-relative.
 Context packs, plugins and agent images have filesystem-backed content and daemon-side
 discovery. Their consumers can read database identity, mutate files, deliver messages or
 launch sessions; the whole layer is not a read-only catalog.
@@ -102,8 +102,10 @@ without the daemon; [workspace-primitive.md](workspace-primitive.md) covers proj
 resolution.
 
 On a profile read, the route adds each piece's `sha256` and provenance, with a warning when a
-piece's bytes come from outside the granted folder. When rig and seat are given, it adds the
-seat's `LEARNED.md` as an implicit atom.
+piece's bytes come from outside the granted folder. Rig and seat selectors grant the seat's
+folder as a source root and supply a default `seat:LEARNED.md` atom to named profiles whose
+phases request seat context. An ordinary situation profile includes that file only when the
+pack authors a seat atom; the selectors alone don't add it.
 
 ### System World, seat recaps and skill loadouts
 
@@ -124,8 +126,18 @@ catalog at `skills.root` (`catalog.yaml`, schema `openrig.skill-catalog/v1`) and
 topology and project selections. It projects skills into `<cwd>/.claude/skills` or
 `<cwd>/.agents/skills` and tracks what it owns in
 `<cwd>/.openrig/skill-loadouts/<runtime>.json`. Each projection reports `current`, `missing`,
-`shadowed`, `stale` or `conflicting`. `rig skill loadout|audit` reads and reconciles it, and
-launch applies it per seat.
+`shadowed`, `stale` or `conflicting`. `rig skill loadout --runtime <runtime>` inspects the
+composed projection and reconciles it only with `--apply`; `rig skill audit` is a separate
+read-only provenance and freshness audit. Launch applies the selected loadout per seat.
+
+For a Claude Code or Codex seat, the profile resolver also adds each selected plugin's skills to
+that loadout (`packages/daemon/src/domain/profile-resolver.ts:287–308`, with
+`resolvePluginSkills()` at `skill-catalog.ts:368`). Neither runtime reads skills from the plugin
+folder projected into the working directory. The skills are projected under their plain names,
+and a skill the profile already selects keeps its source. A kept plugin copy (an edited or
+user-owned one) gives a `plugin_skill_kept` warning, and an unreadable one gives
+`plugin_skill_skipped`. If plugin skills can't be projected at all, the seat starts without them
+and gets a `plugin_skills_not_projected` warning (`rigspec-instantiator.ts:2044`).
 
 ## Agent images and forks
 
@@ -270,7 +282,8 @@ PreCompact hook writes. A per-seat `compaction/post-compact-extra/<session>.md` 
 over the global extra file, and an extra file that declares a different seat is refused.
 
 `rig compact <session>` (`packages/cli/src/commands/compact.ts`) runs the same sequence
-manually through `/api/compaction/trigger`, `cancel` and `state`, behind the bearer token.
+manually through `/api/compaction/trigger`, `cancel` and `state`, which use the terminal
+bearer-token middleware; it passes every request through when no token is configured.
 `--skip-map` skips the map requirement once, `--cancel` ends the preparation, and `--state`
 shows the attempt, its expected map and its deadline. A manual attempt has 120 seconds for
 preparation and the idle wait.
