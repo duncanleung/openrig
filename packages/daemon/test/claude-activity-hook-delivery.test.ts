@@ -27,9 +27,11 @@ import type { RigSpec, RigSpecPod, RigSpecPodMember } from "../src/domain/types.
 import { resolveAgentRef, type ResolvedAgentSpec } from "../src/domain/agent-resolver.js";
 
 const CWD = "/project";
+const HOME = "/home/test";
 const RELAY_SRC = "/assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs";
 const MANIFEST_SRC = "/assets/plugins/openrig-core/hooks/claude.json";
-const RELAY_DEST = "/project/.openrig/hooks/scripts/activity-relay.cjs";
+// Relay deploys to ~/.openrig/ (global), not <cwd>/.openrig/ (project-local).
+const RELAY_DEST = `${HOME}/.openrig/hooks/scripts/activity-relay.cjs`;
 const SETTINGS = "/project/.claude/settings.local.json";
 // The concrete, absolute, shell-quoted leg-B firing shape — never ${CLAUDE_PLUGIN_ROOT}.
 const OWNED_CMD = `node ${shellQuote(RELAY_DEST)}`;
@@ -143,7 +145,7 @@ describe("Claude activity-hook delivery — shipped relay asset executable mode 
 });
 
 describe("Claude activity-hook delivery — ENABLE (entry present, source + manifest readable)", () => {
-  it("copies the relay to <cwd>/.openrig/hooks/scripts/ at mode 0755", async () => {
+  it("copies the relay to ~/.openrig/hooks/scripts/ at mode 0755", async () => {
     const fs = enableFs();
     await makeAdapter(fs).project(plan([activityEntry()]), binding());
     expect(fs._store[RELAY_DEST]).toBe("// relay");
@@ -293,13 +295,12 @@ describe("Claude activity-hook delivery — ownership round-trips shellQuote (ap
   it("cwd with an apostrophe (O'Brien): enable x2 keeps exactly one owned entry/event, disable strips all", async () => {
     const cwd = "/project/O'Brien";
     const settingsPath = `${cwd}/.claude/settings.local.json`;
-    const ownedCmd = `node ${shellQuote(`${cwd}/.openrig/hooks/scripts/activity-relay.cjs`)}`;
     const fs = enableFs();
     const adapter = makeAdapter(fs);
     await adapter.project(plan([activityEntry()]), binding(cwd));
     await adapter.project(plan([activityEntry()]), binding(cwd)); // idempotent re-enable
     const enabled = JSON.parse(fs._store[settingsPath]!);
-    expect(allCommands(enabled).filter((c) => c === ownedCmd).length, "no unbounded accumulation").toBe(EVENTS.length);
+    expect(allCommands(enabled).filter((c) => c === OWNED_CMD).length, "no unbounded accumulation").toBe(EVENTS.length);
     await adapter.project(plan([]), binding(cwd)); // disable
     const disabled = fs._store[settingsPath] ? JSON.parse(fs._store[settingsPath]!) : {};
     expect(allCommands(disabled).filter((c) => c.includes(OWNED_MARKER)), "no dangling owned hook").toEqual([]);
@@ -401,9 +402,7 @@ describe("Claude activity-hook delivery — global-covers-relay dedup", () => {
 
 describe("Claude activity-hook delivery — cwd=home guard (RIG-3)", () => {
   const HOME_CWD = "/home/test";
-  const HOME_RELAY_DEST = "/home/test/.openrig/hooks/scripts/activity-relay.cjs";
   const HOME_SETTINGS = "/home/test/.claude/settings.local.json";
-  const HOME_OWNED_CMD = `node ${shellQuote(HOME_RELAY_DEST)}`;
 
   it("cwd=home with global hooks covering all events: dedup applies (no project-level hooks)", async () => {
     const fs = enableFs({ [GLOBAL_SETTINGS]: globalHooksAllEvents() });
@@ -419,7 +418,7 @@ describe("Claude activity-hook delivery — cwd=home guard (RIG-3)", () => {
     const settings = JSON.parse(fs._store[HOME_SETTINGS] ?? "{}");
     for (const ev of EVENTS) {
       const cmds = (settings.hooks?.[ev] ?? []).flatMap((g: any) => (g.hooks ?? []).map((h: any) => h.command));
-      expect(cmds, `project-level entry for ${ev}`).toContain(HOME_OWNED_CMD);
+      expect(cmds, `project-level entry for ${ev}`).toContain(OWNED_CMD);
     }
   });
 
@@ -473,5 +472,47 @@ describe("Claude activity-hook — REAL SHIPPED-spec resolver -> planner -> adap
       const cmds = (readSettings(fs).hooks?.[ev] ?? []).flatMap((g: any) => (g.hooks ?? []).map((h: any) => h.command));
       expect(cmds).toContain(OWNED_CMD);
     }
+  });
+});
+
+describe("Claude activity-hook delivery — atomic relay delivery", () => {
+  function enableFsWithRename(extra?: Store): ReturnType<typeof mockFs> & { _renamed: Array<[string, string]> } {
+    const base = enableFs(extra);
+    const renamed: Array<[string, string]> = [];
+    return Object.assign(base, {
+      rename: (oldPath: string, newPath: string) => {
+        renamed.push([oldPath, newPath]);
+        base._store[newPath] = base._store[oldPath] ?? "";
+        if (oldPath in base._modes) base._modes[newPath] = base._modes[oldPath]!;
+        delete base._store[oldPath];
+        delete base._modes[oldPath];
+      },
+      _renamed: renamed,
+    });
+  }
+
+  it("delivers relay via temp+rename when rename is available", async () => {
+    const fs = enableFsWithRename();
+    await makeAdapter(fs).project(plan([activityEntry()]), binding());
+    expect(fs._store[RELAY_DEST]).toBe("// relay");
+    expect(fs._modes[RELAY_DEST]! & 0o777).toBe(0o755);
+    expect(fs._renamed.length).toBe(1);
+    expect(fs._renamed[0]![1]).toBe(RELAY_DEST);
+    expect(fs._renamed[0]![0]).toMatch(/\.tmp$/);
+  });
+
+  it("skips copy when dest content already matches src", async () => {
+    const fs = enableFsWithRename({ [RELAY_DEST]: "// relay" });
+    fs._modes[RELAY_DEST] = 0o755;
+    await makeAdapter(fs).project(plan([activityEntry()]), binding());
+    expect(fs._renamed.length).toBe(0);
+  });
+
+  it("falls back to non-atomic copy when rename throws", async () => {
+    const fs = enableFsWithRename();
+    fs.rename = () => { throw new Error("rename failed"); };
+    await makeAdapter(fs).project(plan([activityEntry()]), binding());
+    expect(fs._store[RELAY_DEST]).toBe("// relay");
+    expect(fs._modes[RELAY_DEST]! & 0o777).toBe(0o755);
   });
 });

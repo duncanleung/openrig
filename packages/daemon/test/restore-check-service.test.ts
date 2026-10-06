@@ -987,6 +987,32 @@ describe("RestoreCheckService", () => {
     expect(hook?.evidence).toContain("UserPromptSubmit");
   });
 
+  it("checks relay at homedir path when homedir differs from cwd", () => {
+    const cwd = path.join(os.tmpdir(), "restore-check-project");
+    const home = path.join(os.tmpdir(), "restore-check-home");
+    const settingsPath = path.join(cwd, ".claude", "settings.local.json");
+    const relayPath = path.join(home, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+    const events = ["SessionStart", "UserPromptSubmit"];
+    const settings = JSON.stringify({ hooks: Object.fromEntries(events.map((event) => [event, [{ hooks: [
+      { type: "command", command: `node '${relayPath}'` },
+    ] }]])) });
+    const service = new RestoreCheckService(mockDeps({
+      homedir: home,
+      getNodeInventory: () => [claudeNode({ cwd })],
+      getStartupContext: () => startupContextProbe({ projectionEntries: [{
+        absolutePath: "/source/openrig-core", effectiveId: "shared:openrig-core",
+        category: "runtime_resource", resourceType: "claude_activity_hooks",
+      }] }),
+      getClaudeActivityHookEvents: () => events,
+      exists: (candidate) => candidate === settingsPath || candidate === relayPath || candidate.endsWith("host-infra.json"),
+      readFile: (candidate) => candidate === settingsPath ? settings : VALID_HOST_INFRA_DECLARATION,
+    }));
+
+    const hook = service.check({}).checks.find((entry) => entry.check === "seat.dev-impl@test-rig.hooks");
+    expect(hook?.status).toBe("green");
+    expect(hook?.evidence).toContain(relayPath);
+  });
+
   it("treats deliberately unselected Claude activity hooks as not applicable", () => {
     const hook = new RestoreCheckService(mockDeps()).check({}).checks.find((entry) => entry.check === "seat.dev-impl@test-rig.hooks");
     expect(hook?.status).toBe("green");

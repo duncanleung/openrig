@@ -217,6 +217,8 @@ export interface RestoreCheckDeps {
   probeQueueStore?: () => QueueStoreProbeResult;
   /** Relay-backed Claude hook events derived from the shipped hook manifest. */
   getClaudeActivityHookEvents?: () => string[];
+  /** Home directory for relay path resolution (relay deploys to ~/.openrig/). */
+  homedir?: string;
 }
 
 interface RigRollupInput {
@@ -1050,7 +1052,8 @@ export class RestoreCheckService {
         };
       }
       const settingsPath = join(node.cwd, ".claude", "settings.local.json");
-      const relayPath = join(node.cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+      const relayBase = this.deps.homedir ?? node.cwd;
+      const relayPath = join(relayBase, ".openrig", "hooks", "scripts", "activity-relay.cjs");
       const events = this.deps.getClaudeActivityHookEvents?.() ?? [];
       if (events.length === 0) {
         return {
