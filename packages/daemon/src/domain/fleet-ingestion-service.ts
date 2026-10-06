@@ -264,8 +264,11 @@ function adaptFinding(
   };
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 /** Find a single transcript file by its native session UUID. */
 function findTranscriptBySessionId(homedir: string, nativeSessionId: string): string | null {
+  if (!UUID_RE.test(nativeSessionId)) return null;
   const projectsDir = join(homedir, ".claude", "projects");
   if (!existsSync(projectsDir)) return null;
   const target = `${nativeSessionId}.jsonl`;
@@ -340,6 +343,7 @@ export class FleetIngestionService {
   private readonly reducerPath: string;
   private readonly eventBus?: FleetIngestionServiceDeps["eventBus"];
   private eventUnsubscribe?: () => void;
+  private reviewTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(deps: FleetIngestionServiceDeps) {
     this.db = deps.db;
@@ -514,7 +518,9 @@ export class FleetIngestionService {
 
       return { ingested: true, nativeSessionId };
     } catch (err) {
-      return { ingested: false, nativeSessionId: null, error: err instanceof Error ? err.message : String(err) };
+      const rawMsg = err instanceof Error ? err.message : String(err);
+      const safeMsg = rawMsg.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, "<redacted>");
+      return { ingested: false, nativeSessionId: null, error: safeMsg };
     }
   }
 
@@ -585,7 +591,6 @@ export class FleetIngestionService {
     if (this.eventUnsubscribe) return this.eventUnsubscribe;
 
     const DEBOUNCE_MS = 2_000;
-    let reviewTimer: ReturnType<typeof setTimeout> | null = null;
 
     this.eventUnsubscribe = this.eventBus.subscribe((event) => {
       if (event.type !== "session.stopped" || !event.nodeId) return;
@@ -593,7 +598,7 @@ export class FleetIngestionService {
       const nodeId = event.nodeId;
       this.ingestSessionByNodeId(nodeId).then((r) => {
         if (r.ingested) {
-          console.log(`[fleet-ingestion] lifecycle: ingested session for node ${nodeId} (${r.nativeSessionId})`);
+          console.log(`[fleet-ingestion] lifecycle: ingested session for node ${nodeId}`);
         } else if (r.error !== "no native session ID for node") {
           console.log(`[fleet-ingestion] lifecycle: skip node ${nodeId} — ${r.error}`);
         }
@@ -601,9 +606,9 @@ export class FleetIngestionService {
         console.error(`[fleet-ingestion] lifecycle ingest error for node ${nodeId}:`, err);
       });
 
-      if (reviewTimer) clearTimeout(reviewTimer);
-      reviewTimer = setTimeout(() => {
-        reviewTimer = null;
+      if (this.reviewTimer) clearTimeout(this.reviewTimer);
+      this.reviewTimer = setTimeout(() => {
+        this.reviewTimer = null;
         this.ingestRecentReviews().catch((err: unknown) => {
           console.error("[fleet-ingestion] lifecycle review ingest error:", err);
         });
@@ -615,6 +620,10 @@ export class FleetIngestionService {
 
   /** Unsubscribe from lifecycle events. */
   unsubscribeLifecycleEvents(): void {
+    if (this.reviewTimer) {
+      clearTimeout(this.reviewTimer);
+      this.reviewTimer = null;
+    }
     if (this.eventUnsubscribe) {
       this.eventUnsubscribe();
       this.eventUnsubscribe = undefined;
