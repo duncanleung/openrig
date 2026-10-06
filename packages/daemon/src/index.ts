@@ -369,7 +369,9 @@ export async function startServer(port?: number) {
           fleetStore: new FleetStore(deps.rigRepo.db),
           homedir: process.env.HOME ?? os.homedir(),
           reducerPath: path.join(path.dirname(new URL(import.meta.url).pathname), "../assets/plugins/openrig-core/skills/retro/scripts/reduce-transcript.mjs"),
+          eventBus: deps.eventBus,
         });
+        deps.fleetIngestion.subscribeLifecycleEvents();
         deps.fleetIngestion.rollUpSnapshots({ days: 15 }).catch((err: unknown) => {
           console.error(`[fleet-ingestion] boot rollup error: ${err instanceof Error ? err.message : String(err)}`);
         });
@@ -411,6 +413,7 @@ export async function startServer(port?: number) {
         if (retentionTimer) clearInterval(retentionTimer);
         if (stuckSweepTimer) clearInterval(stuckSweepTimer);
         if (fleetIngestionTimer) clearInterval(fleetIngestionTimer);
+        deps.fleetIngestion?.unsubscribeLifecycleEvents();
       }],
       ["proof-source-watch", () => deps.proofSourceWatch?.close()],
       ["health-diagnosis", () => deps.healthDiagnosis?.stop()],
