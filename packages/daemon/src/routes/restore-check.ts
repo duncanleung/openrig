@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import type Database from "better-sqlite3";
 import { Hono } from "hono";
@@ -211,6 +212,7 @@ export function createRestoreCheckService(
       try { return existsSync(path); } catch { return false; }
     },
     readFile: (path: string) => readFileSync(path, "utf-8"),
+    homedir: homedir(),
   };
   return new RestoreCheckService(serviceDeps);
 }

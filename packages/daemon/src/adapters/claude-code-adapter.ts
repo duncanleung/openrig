@@ -893,7 +893,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    * to the desired `enabled` state, driven ONCE from the always-run `project()` seam.
    *
    * ENABLE (only when the relay SOURCE is readable): deliver `activity-relay.cjs` →
-   * `<cwd>/.openrig/hooks/scripts/` (mode preserved, 0755 from the source asset) and upsert
+   * `~/.openrig/hooks/scripts/` (mode preserved, 0755 from the source asset) and upsert
    * the owned command for each relay event DERIVED from the canonical claude.json manifest
    * (compaction hooks excluded). If the source is missing, deliver NOTHING (no dangling
    * commands) and report `sourceMissing` so the caller can surface a warning + not claim
