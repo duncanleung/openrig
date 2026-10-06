@@ -905,7 +905,12 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    * untouched. Not `mergeJsonFragment` (additive union-by-key can't strip on disable).
    */
   private reconcileClaudeActivityHooks(cwd: string, enabled: boolean): ActivityHookOutcome {
-    const relayDest = nodePath.join(cwd, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
+    // Deploy the relay to ~/.openrig/ (global) instead of <cwd>/.openrig/ (project-local).
+    // A project-local path is removed by git clean, deleting the relay while the hook
+    // command in settings.local.json still references it — silent hook failure.
+    const relayBase = home ?? cwd;
+    const relayDest = nodePath.join(relayBase, ".openrig", "hooks", "scripts", "activity-relay.cjs");
     const ownedCmd = `node ${shellQuote(relayDest)}`;
     const settingsPath = nodePath.join(cwd, ".claude", "settings.local.json");
 
