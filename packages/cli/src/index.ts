@@ -55,6 +55,7 @@ import { authCommand } from "./commands/auth.js";
 import { providerCommand } from "./commands/provider.js";
 import { usageCommand } from "./commands/usage.js";
 import { telemetryCommand } from "./commands/telemetry.js";
+import { fleetCommand } from "./commands/fleet.js";
 import { healthCommand, type HealthDeps } from "./commands/health.js";
 import { doctorCommand } from "./commands/doctor.js";
 import { expandCommand } from "./commands/expand.js";
@@ -237,6 +238,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(providerCommand());
   program.addCommand(usageCommand());
   program.addCommand(telemetryCommand(depsOverride?.telemetryDeps));
+  program.addCommand(fleetCommand());
   program.addCommand(healthCommand(depsOverride?.healthDeps));
   program.addCommand(doctorCommand());
   program.addCommand(expandCommand(depsOverride?.expandDeps));

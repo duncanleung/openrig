@@ -114,6 +114,7 @@ import { progressRoutes } from "./routes/progress.js";
 import { scopeAuditRoutes } from "./routes/scope-audit.js";
 import { scopesRoutes } from "./routes/scopes.js";
 import { telemetryRoutes } from "./routes/telemetry.js";
+import { fleetStoreRoutes } from "./routes/fleet-store.js";
 import { proofRoutes } from "./routes/proof.js";
 import { scopeApproveRoutes } from "./routes/scope-approve.js";
 import { registerTerminalAuthOnly, registerTerminalWs } from "./routes/terminal-ws.js";
@@ -823,6 +824,7 @@ export function createApp(deps: AppDeps): Hono {
   // 51-08 A3 — usage series + top-N burn over usage_samples (one projection, CLI+HTTP).
   app.route("/api/telemetry", telemetryRoutes({ db: () => deps.rigRepo.db,
     source: { hostId: getSelfHostId(), bootEpoch: deps.daemonBootEpoch ?? null } }));
+  app.route("/api/fleet", fleetStoreRoutes({ db: () => deps.rigRepo.db }));
   // OPR.0.4.4.19 FR-9 — scope approve: frontmatter stamp + audit row.
   app.route("/api/scope/approve", scopeApproveRoutes());
   app.route("/api/proof", proofRoutes());
