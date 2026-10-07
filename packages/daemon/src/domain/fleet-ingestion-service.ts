@@ -186,9 +186,9 @@ function adaptDigest(
     handoffEvents: str(reducerOutput.handoffEvents),
     claudeMdLoaded: str(reducerOutput.claudeMdLoaded),
     errors: str(reducerOutput.errors),
-    irreversibleActions: "[]",
-    compactionBoundaries: "[]",
-    compactionLosses: "[]",
+    irreversibleActions: str(reducerOutput.irreversibleActions),
+    compactionBoundaries: str(reducerOutput.compactionBoundaries),
+    compactionLosses: str(reducerOutput.compactionLosses),
     sourceHash: hash,
     parserVersion: PARSER_VERSION,
   };
