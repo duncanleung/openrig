@@ -149,7 +149,7 @@ export function fleetCommand(depsOverride?: StatusDeps): Command {
         const rig = (r.rig_name as string) ?? "—";
         const seat = (r.seat_name as string) ?? "—";
         const turns = `${r.conversation_turns}/${r.total_turns} turns`;
-        const bytes = r.transcript_bytes ? `${Math.round((r.transcript_bytes as number) / 1024)}KB` : "—";
+        const bytes = r.transcript_bytes != null ? `${Math.round((r.transcript_bytes as number) / 1024)}KB` : "—";
         const ts = (r.ingested_at as string) ?? "";
         console.log(`  ${rig.padEnd(20)} ${seat.padEnd(25)} ${turns.padEnd(14)} ${bytes.padEnd(8)} ${ts}`);
       }
@@ -200,7 +200,7 @@ export function fleetCommand(depsOverride?: StatusDeps): Command {
         const branch = (r.branch as string) ?? "—";
         const findings = `MF:${r.must_fix} S:${r.suggestion} D:${r.dismissed}`;
         const rig = (r.rig_name as string) ?? "—";
-        const dur = r.duration_seconds ? `${r.duration_seconds}s` : "—";
+        const dur = r.duration_seconds != null ? `${r.duration_seconds}s` : "—";
         const ts = (r.completed_at as string) ?? "";
         console.log(`  ${pr.padEnd(8)} ${branch.padEnd(30)} ${findings.padEnd(20)} ${rig.padEnd(15)} ${dur.padEnd(8)} ${ts}`);
       }
