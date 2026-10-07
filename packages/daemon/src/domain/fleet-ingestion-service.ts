@@ -429,7 +429,7 @@ export class FleetIngestionService {
         const metricsRaw = JSON.parse(readFileSync(metricsPath, "utf-8")) as Record<string, unknown>;
         const run = adaptReviewRun(metricsRaw, logDir, hash);
 
-        const findings: ReviewFindingInput[] = [];
+        let findings: ReviewFindingInput[] | null = null;
         const reportPath = join(logDir, "report.json");
         if (existsSync(reportPath)) {
           try {
@@ -437,13 +437,17 @@ export class FleetIngestionService {
             const arr = Array.isArray(reportRaw) ? reportRaw
               : Array.isArray((reportRaw as Record<string, unknown>)?.findings)
                 ? (reportRaw as Record<string, unknown>).findings as unknown[]
-                : [];
-            for (const f of arr) {
-              if (f && typeof f === "object") {
-                findings.push(adaptFinding(run.traceId, f as Record<string, unknown>));
+                : null;
+            if (arr !== null) {
+              const parsed: ReviewFindingInput[] = [];
+              for (const f of arr) {
+                if (f && typeof f === "object") {
+                  parsed.push(adaptFinding(run.traceId, f as Record<string, unknown>));
+                }
               }
+              findings = parsed;
             }
-          } catch { /* report.json optional */ }
+          } catch { /* report.json absent or unparseable — null preserves existing findings */ }
         }
 
         this.fleetStore.upsertReviewRun(run, findings);
@@ -558,7 +562,7 @@ export class FleetIngestionService {
         const metricsRaw = JSON.parse(readFileSync(metricsPath, "utf-8")) as Record<string, unknown>;
         const run = adaptReviewRun(metricsRaw, logDir, hash);
 
-        const findings: ReviewFindingInput[] = [];
+        let findings: ReviewFindingInput[] | null = null;
         const reportPath = join(logDir, "report.json");
         if (existsSync(reportPath)) {
           try {
@@ -566,13 +570,17 @@ export class FleetIngestionService {
             const arr = Array.isArray(reportRaw) ? reportRaw
               : Array.isArray((reportRaw as Record<string, unknown>)?.findings)
                 ? (reportRaw as Record<string, unknown>).findings as unknown[]
-                : [];
-            for (const f of arr) {
-              if (f && typeof f === "object") {
-                findings.push(adaptFinding(run.traceId, f as Record<string, unknown>));
+                : null;
+            if (arr !== null) {
+              const parsed: ReviewFindingInput[] = [];
+              for (const f of arr) {
+                if (f && typeof f === "object") {
+                  parsed.push(adaptFinding(run.traceId, f as Record<string, unknown>));
+                }
               }
+              findings = parsed;
             }
-          } catch { /* report.json optional */ }
+          } catch { /* report.json absent or unparseable — null preserves existing findings */ }
         }
 
         this.fleetStore.upsertReviewRun(run, findings);

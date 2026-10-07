@@ -234,6 +234,16 @@ describe("097+098 review_runs + review_findings — transactional upsert", () =>
     expect(result.created).toBe(true);
     expect(result.findingsDeleted).toBe(0);
   });
+
+  it("null findings preserves existing findings (parse-error safety)", () => {
+    store.upsertReviewRun(run(), [finding(), finding({ findingId: "f-002" })]);
+    expect(findingCount()).toBe(2);
+
+    const result = store.upsertReviewRun(run({ mustFix: 1 }), null);
+    expect(result.findingsUpserted).toBe(0);
+    expect(result.findingsDeleted).toBe(0);
+    expect(findingCount()).toBe(2);
+  });
 });
 
 describe("099 daily_token_snapshots — upsert idempotence", () => {
