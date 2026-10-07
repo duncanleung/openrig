@@ -16,6 +16,27 @@ function freshDb(): Database {
   db.pragma("foreign_keys = OFF");
   // Usage samples schema (minimal subset matching migration 062)
   db.exec(`
+    CREATE TABLE rigs (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    )
+  `);
+  db.exec(`
+    CREATE TABLE nodes (
+      id TEXT PRIMARY KEY,
+      rig_id TEXT NOT NULL REFERENCES rigs(id) ON DELETE CASCADE,
+      logical_id TEXT NOT NULL,
+      role TEXT,
+      runtime TEXT,
+      model TEXT,
+      cwd TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(rig_id, logical_id)
+    )
+  `);
+  db.exec(`
     CREATE TABLE usage_samples (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       lane TEXT NOT NULL,
@@ -151,6 +172,25 @@ describe("FleetIngestionService — rollUpSnapshots", () => {
     expect(result.snapshotsUpserted).toBe(0);
     const row = db.prepare("SELECT samples FROM daily_token_snapshots WHERE seat_session = 'seat-d@rig'").get() as { samples: number };
     expect(row.samples).toBe(10);
+  });
+
+  it("resolves model, rigName, and seatName from nodes/rigs", async () => {
+    const today = new Date().toISOString().slice(0, 10);
+    db.prepare(`INSERT INTO rigs (id, name) VALUES ('rig-1', 'my-rig')`).run();
+    db.prepare(`INSERT INTO nodes (id, rig_id, logical_id, model) VALUES ('node-1', 'rig-1', 'dev-impl', 'claude-sonnet-4-20250514')`).run();
+    db.prepare(`
+      INSERT INTO usage_samples (lane, seat_session, node_id, captured_at, total_input_tokens, total_output_tokens)
+      VALUES ('context', 'seat-model@rig', 'node-1', ?, 100, 50),
+             ('context', 'seat-model@rig', 'node-1', ?, 200, 80)
+    `).run(`${today}T00:00:00Z`, `${today}T01:00:00Z`);
+
+    const svc = makeService(db, tmpDir);
+    await svc.rollUpSnapshots({ days: 2 });
+
+    const row = db.prepare("SELECT * FROM daily_token_snapshots WHERE seat_session = 'seat-model@rig'").get() as Record<string, unknown>;
+    expect(row.model).toBe("claude-sonnet-4-20250514");
+    expect(row.rig_name).toBe("my-rig");
+    expect(row.seat_name).toBe("dev-impl");
   });
 
   it("ignores non-context lane samples", async () => {
