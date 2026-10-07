@@ -148,6 +148,15 @@ function normalizeFinding(f: Record<string, unknown>, runTraceId: string): Revie
   };
 }
 
+function parseIntParam(raw: string | undefined, opts?: { min?: number }): number | undefined | "invalid" {
+  if (raw === undefined || raw === "") return undefined;
+  if (!/^-?\d+$/.test(raw)) return "invalid";
+  const n = Number(raw);
+  if (!Number.isInteger(n)) return "invalid";
+  if (opts?.min !== undefined && n < opts.min) return "invalid";
+  return n;
+}
+
 function normalizeSnapshot(body: Record<string, unknown>): DailyTokenSnapshotInput | string {
   const day = strRequired(body.day);
   if (!day) return "day is required.";
@@ -299,16 +308,21 @@ export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
   app.get("/digests", (c) => {
     try {
       const q = c.req.query();
+      const limit = parseIntParam(q.limit, { min: 1 });
+      const offset = parseIntParam(q.offset, { min: 0 });
+      if (limit === "invalid") return c.json({ ok: false, code: "invalid_field", error: "limit must be a positive integer." }, 400);
+      if (offset === "invalid") return c.json({ ok: false, code: "invalid_field", error: "offset must be a non-negative integer." }, 400);
       const result = store().listDigests({
         rig: q.rig || undefined,
         seat: q.seat || undefined,
         since: q.since || undefined,
         until: q.until || undefined,
-        limit: q.limit ? parseInt(q.limit, 10) : undefined,
-        offset: q.offset ? parseInt(q.offset, 10) : undefined,
+        limit,
+        offset,
       });
       return c.json({ ok: true, ...result });
-    } catch {
+    } catch (err) {
+      console.error("[fleet-store] GET /digests error:", err instanceof Error ? err.message : String(err));
       return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
     }
   });
@@ -316,19 +330,26 @@ export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
   app.get("/reviews", (c) => {
     try {
       const q = c.req.query();
+      const limit = parseIntParam(q.limit, { min: 1 });
+      const offset = parseIntParam(q.offset, { min: 0 });
+      const pr = parseIntParam(q.pr, { min: 1 });
+      if (limit === "invalid") return c.json({ ok: false, code: "invalid_field", error: "limit must be a positive integer." }, 400);
+      if (offset === "invalid") return c.json({ ok: false, code: "invalid_field", error: "offset must be a non-negative integer." }, 400);
+      if (pr === "invalid") return c.json({ ok: false, code: "invalid_field", error: "pr must be a positive integer." }, 400);
       const result = store().listReviews({
         rig: q.rig || undefined,
         seat: q.seat || undefined,
         repo: q.repo || undefined,
         branch: q.branch || undefined,
-        pr: q.pr ? parseInt(q.pr, 10) : undefined,
+        pr,
         since: q.since || undefined,
         until: q.until || undefined,
-        limit: q.limit ? parseInt(q.limit, 10) : undefined,
-        offset: q.offset ? parseInt(q.offset, 10) : undefined,
+        limit,
+        offset,
       });
       return c.json({ ok: true, ...result });
-    } catch {
+    } catch (err) {
+      console.error("[fleet-store] GET /reviews error:", err instanceof Error ? err.message : String(err));
       return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
     }
   });
@@ -338,7 +359,8 @@ export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
       const traceId = c.req.param("traceId");
       const findings = store().getReviewFindings(traceId);
       return c.json({ ok: true, findings });
-    } catch {
+    } catch (err) {
+      console.error("[fleet-store] GET /reviews/:traceId/findings error:", err instanceof Error ? err.message : String(err));
       return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
     }
   });
@@ -346,16 +368,21 @@ export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
   app.get("/snapshots", (c) => {
     try {
       const q = c.req.query();
+      const limit = parseIntParam(q.limit, { min: 1 });
+      const offset = parseIntParam(q.offset, { min: 0 });
+      if (limit === "invalid") return c.json({ ok: false, code: "invalid_field", error: "limit must be a positive integer." }, 400);
+      if (offset === "invalid") return c.json({ ok: false, code: "invalid_field", error: "offset must be a non-negative integer." }, 400);
       const result = store().listSnapshots({
         rig: q.rig || undefined,
         seat: q.seat || undefined,
         since: q.since || undefined,
         until: q.until || undefined,
-        limit: q.limit ? parseInt(q.limit, 10) : undefined,
-        offset: q.offset ? parseInt(q.offset, 10) : undefined,
+        limit,
+        offset,
       });
       return c.json({ ok: true, ...result });
-    } catch {
+    } catch (err) {
+      console.error("[fleet-store] GET /snapshots error:", err instanceof Error ? err.message : String(err));
       return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
     }
   });

@@ -529,3 +529,44 @@ describe("listSnapshots — query with filters", () => {
     expect(result.total).toBe(3);
   });
 });
+
+describe("pagination input validation", () => {
+  let store: FleetStore;
+  beforeEach(() => {
+    const db = freshDb();
+    store = new FleetStore(db);
+    for (let i = 0; i < 5; i++) {
+      store.upsertDigest(digest({ nativeSessionId: `sess-${i}` }));
+    }
+  });
+
+  it("clamps negative limit to 1", () => {
+    const result = store.listDigests({ limit: -1 });
+    expect(result.rows).toHaveLength(1);
+  });
+
+  it("clamps NaN limit to default 50", () => {
+    const result = store.listDigests({ limit: NaN });
+    expect(result.rows).toHaveLength(5);
+  });
+
+  it("clamps negative offset to 0", () => {
+    const result = store.listDigests({ offset: -5 });
+    expect(result.rows).toHaveLength(5);
+  });
+
+  it("clamps NaN offset to 0", () => {
+    const result = store.listDigests({ offset: NaN });
+    expect(result.rows).toHaveLength(5);
+  });
+
+  it("until date-only value includes same-day rows", () => {
+    const db = freshDb();
+    const s = new FleetStore(db);
+    s.upsertSnapshot(snapshot({ day: "2026-10-05", seatSession: "s1" }));
+    s.upsertSnapshot(snapshot({ day: "2026-10-06", seatSession: "s2" }));
+    s.upsertSnapshot(snapshot({ day: "2026-10-07", seatSession: "s3" }));
+    const result = s.listSnapshots({ until: "2026-10-06" });
+    expect(result.total).toBe(2);
+  });
+});

@@ -169,6 +169,21 @@ export interface SnapshotRow {
   snapshot_at: string;
 }
 
+function clampLimit(raw: number | undefined): number {
+  if (raw === undefined || !Number.isFinite(raw)) return 50;
+  return Math.min(Math.max(1, Math.floor(raw)), 200);
+}
+
+function clampOffset(raw: number | undefined): number {
+  if (raw === undefined || !Number.isFinite(raw)) return 0;
+  return Math.max(0, Math.floor(raw));
+}
+
+function normalizeUntilDate(value: string): string {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value + "T23:59:59.999Z";
+  return value;
+}
+
 export class FleetStore {
   private readonly db: Database;
 
@@ -421,8 +436,8 @@ export class FleetStore {
   listDigests(filter: ListFilter = {}): { rows: SessionDigestRow[]; total: number } {
     const { where, params } = this.buildWhere(filter, "rig_name", "seat_name", "ingested_at");
     const total = (this.db.prepare(`SELECT COUNT(*) AS c FROM session_digests${where}`).get(...params) as { c: number }).c;
-    const limit = Math.min(filter.limit ?? 50, 200);
-    const offset = filter.offset ?? 0;
+    const limit = clampLimit(filter.limit);
+    const offset = clampOffset(filter.offset);
     const rows = this.db.prepare(`
       SELECT id, rig_name, seat_session, seat_name, native_session_id,
              total_turns, conversation_turns, transcript_bytes, ingested_at
@@ -443,12 +458,12 @@ export class FleetStore {
     if (filter.branch) { clauses.push("branch = ?"); params.push(filter.branch); }
     if (filter.pr !== undefined) { clauses.push("pr_number = ?"); params.push(filter.pr); }
     if (filter.since) { clauses.push("completed_at >= ?"); params.push(filter.since); }
-    if (filter.until) { clauses.push("completed_at <= ?"); params.push(filter.until); }
+    if (filter.until) { clauses.push("completed_at <= ?"); params.push(normalizeUntilDate(filter.until)); }
 
     const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
     const total = (this.db.prepare(`SELECT COUNT(*) AS c FROM review_runs${where}`).get(...params) as { c: number }).c;
-    const limit = Math.min(filter.limit ?? 50, 200);
-    const offset = filter.offset ?? 0;
+    const limit = clampLimit(filter.limit);
+    const offset = clampOffset(filter.offset);
     const rows = this.db.prepare(`
       SELECT id, trace_id, pr_number, repo, branch, head_sha, mode,
              must_fix, suggestion, dismissed,
@@ -473,8 +488,8 @@ export class FleetStore {
   listSnapshots(filter: ListFilter = {}): { rows: SnapshotRow[]; total: number } {
     const { where, params } = this.buildWhere(filter, "rig_name", "seat_name", "day");
     const total = (this.db.prepare(`SELECT COUNT(*) AS c FROM daily_token_snapshots${where}`).get(...params) as { c: number }).c;
-    const limit = Math.min(filter.limit ?? 50, 200);
-    const offset = filter.offset ?? 0;
+    const limit = clampLimit(filter.limit);
+    const offset = clampOffset(filter.offset);
     const rows = this.db.prepare(`
       SELECT id, day, seat_session, rig_name, seat_name, model,
              input_tokens_delta, output_tokens_delta, total_tokens_delta,
@@ -497,7 +512,7 @@ export class FleetStore {
     if (filter.rig) { clauses.push(`${rigCol} = ?`); params.push(filter.rig); }
     if (filter.seat) { clauses.push(`${seatCol} = ?`); params.push(filter.seat); }
     if (filter.since) { clauses.push(`${dateCol} >= ?`); params.push(filter.since); }
-    if (filter.until) { clauses.push(`${dateCol} <= ?`); params.push(filter.until); }
+    if (filter.until) { clauses.push(`${dateCol} <= ?`); params.push(normalizeUntilDate(filter.until)); }
     const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
     return { where, params };
   }

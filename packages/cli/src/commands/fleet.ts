@@ -278,9 +278,9 @@ export function fleetCommand(depsOverride?: StatusDeps): Command {
         const rig = (r.rig_name as string) ?? "—";
         const seat = (r.seat_name as string) ?? "—";
         const model = (r.model as string) ?? "—";
-        const input = r.input_tokens_delta ? `${Math.round((r.input_tokens_delta as number) / 1000)}K in` : "—";
-        const output = r.output_tokens_delta ? `${Math.round((r.output_tokens_delta as number) / 1000)}K out` : "—";
-        const samples = r.samples ? `${r.samples} samples` : "";
+        const input = r.input_tokens_delta != null ? `${Math.round((r.input_tokens_delta as number) / 1000)}K in` : "—";
+        const output = r.output_tokens_delta != null ? `${Math.round((r.output_tokens_delta as number) / 1000)}K out` : "—";
+        const samples = r.samples != null ? `${r.samples} samples` : "";
         console.log(`  ${day}  ${rig.padEnd(20)} ${seat.padEnd(20)} ${model.padEnd(20)} ${input.padEnd(10)} ${output.padEnd(10)} ${samples}`);
       }
     });
