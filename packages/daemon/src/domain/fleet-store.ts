@@ -97,6 +97,78 @@ export interface FleetStoreStats {
   daily_token_snapshots: { count: number; last_snapshot_at: string | null };
 }
 
+export interface ListFilter {
+  rig?: string;
+  seat?: string;
+  since?: string;
+  until?: string;
+  limit?: number;
+  offset?: number;
+}
+
+export interface ReviewListFilter extends ListFilter {
+  repo?: string;
+  branch?: string;
+  pr?: number;
+}
+
+export interface SessionDigestRow {
+  id: number;
+  rig_name: string | null;
+  seat_session: string;
+  seat_name: string | null;
+  native_session_id: string;
+  total_turns: number;
+  conversation_turns: number;
+  transcript_bytes: number | null;
+  ingested_at: string;
+}
+
+export interface ReviewRunRow {
+  id: number;
+  trace_id: string;
+  pr_number: number | null;
+  repo: string | null;
+  branch: string | null;
+  head_sha: string | null;
+  mode: string | null;
+  must_fix: number;
+  suggestion: number;
+  dismissed: number;
+  rig_name: string | null;
+  seat_name: string | null;
+  completed_at: string | null;
+  duration_seconds: number | null;
+}
+
+export interface ReviewFindingRow {
+  id: number;
+  run_trace_id: string;
+  finding_id: string;
+  file: string | null;
+  lines: string | null;
+  category: string | null;
+  hunter_key: string | null;
+  stack: string | null;
+  score: number | null;
+  verdict: string | null;
+  description_prefix: string | null;
+}
+
+export interface SnapshotRow {
+  id: number;
+  day: string;
+  seat_session: string;
+  rig_name: string | null;
+  seat_name: string | null;
+  model: string | null;
+  input_tokens_delta: number | null;
+  output_tokens_delta: number | null;
+  total_tokens_delta: number | null;
+  samples: number | null;
+  snapshot_at: string;
+}
+
 export class FleetStore {
   private readonly db: Database;
 
@@ -344,5 +416,89 @@ export class FleetStore {
       }
     })();
     return { upserted };
+  }
+
+  listDigests(filter: ListFilter = {}): { rows: SessionDigestRow[]; total: number } {
+    const { where, params } = this.buildWhere(filter, "rig_name", "seat_name", "ingested_at");
+    const total = (this.db.prepare(`SELECT COUNT(*) AS c FROM session_digests${where}`).get(...params) as { c: number }).c;
+    const limit = Math.min(filter.limit ?? 50, 200);
+    const offset = filter.offset ?? 0;
+    const rows = this.db.prepare(`
+      SELECT id, rig_name, seat_session, seat_name, native_session_id,
+             total_turns, conversation_turns, transcript_bytes, ingested_at
+      FROM session_digests${where}
+      ORDER BY ingested_at DESC
+      LIMIT ? OFFSET ?
+    `).all(...params, limit, offset) as SessionDigestRow[];
+    return { rows, total };
+  }
+
+  listReviews(filter: ReviewListFilter = {}): { rows: ReviewRunRow[]; total: number } {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+
+    if (filter.rig) { clauses.push("rig_name = ?"); params.push(filter.rig); }
+    if (filter.seat) { clauses.push("seat_name = ?"); params.push(filter.seat); }
+    if (filter.repo) { clauses.push("repo = ?"); params.push(filter.repo); }
+    if (filter.branch) { clauses.push("branch = ?"); params.push(filter.branch); }
+    if (filter.pr !== undefined) { clauses.push("pr_number = ?"); params.push(filter.pr); }
+    if (filter.since) { clauses.push("completed_at >= ?"); params.push(filter.since); }
+    if (filter.until) { clauses.push("completed_at <= ?"); params.push(filter.until); }
+
+    const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
+    const total = (this.db.prepare(`SELECT COUNT(*) AS c FROM review_runs${where}`).get(...params) as { c: number }).c;
+    const limit = Math.min(filter.limit ?? 50, 200);
+    const offset = filter.offset ?? 0;
+    const rows = this.db.prepare(`
+      SELECT id, trace_id, pr_number, repo, branch, head_sha, mode,
+             must_fix, suggestion, dismissed,
+             rig_name, seat_name, completed_at, duration_seconds
+      FROM review_runs${where}
+      ORDER BY completed_at DESC
+      LIMIT ? OFFSET ?
+    `).all(...params, limit, offset) as ReviewRunRow[];
+    return { rows, total };
+  }
+
+  getReviewFindings(traceId: string): ReviewFindingRow[] {
+    return this.db.prepare(`
+      SELECT id, run_trace_id, finding_id, file, lines, category,
+             hunter_key, stack, score, verdict, description_prefix
+      FROM review_findings
+      WHERE run_trace_id = ?
+      ORDER BY score DESC
+    `).all(traceId) as ReviewFindingRow[];
+  }
+
+  listSnapshots(filter: ListFilter = {}): { rows: SnapshotRow[]; total: number } {
+    const { where, params } = this.buildWhere(filter, "rig_name", "seat_name", "day");
+    const total = (this.db.prepare(`SELECT COUNT(*) AS c FROM daily_token_snapshots${where}`).get(...params) as { c: number }).c;
+    const limit = Math.min(filter.limit ?? 50, 200);
+    const offset = filter.offset ?? 0;
+    const rows = this.db.prepare(`
+      SELECT id, day, seat_session, rig_name, seat_name, model,
+             input_tokens_delta, output_tokens_delta, total_tokens_delta,
+             samples, snapshot_at
+      FROM daily_token_snapshots${where}
+      ORDER BY day DESC, rig_name ASC
+      LIMIT ? OFFSET ?
+    `).all(...params, limit, offset) as SnapshotRow[];
+    return { rows, total };
+  }
+
+  private buildWhere(
+    filter: ListFilter,
+    rigCol: string,
+    seatCol: string,
+    dateCol: string,
+  ): { where: string; params: unknown[] } {
+    const clauses: string[] = [];
+    const params: unknown[] = [];
+    if (filter.rig) { clauses.push(`${rigCol} = ?`); params.push(filter.rig); }
+    if (filter.seat) { clauses.push(`${seatCol} = ?`); params.push(filter.seat); }
+    if (filter.since) { clauses.push(`${dateCol} >= ?`); params.push(filter.since); }
+    if (filter.until) { clauses.push(`${dateCol} <= ?`); params.push(filter.until); }
+    const where = clauses.length > 0 ? ` WHERE ${clauses.join(" AND ")}` : "";
+    return { where, params };
   }
 }

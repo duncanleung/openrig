@@ -112,6 +112,180 @@ export function fleetCommand(depsOverride?: StatusDeps): Command {
     });
 
   command
+    .command("digests")
+    .description("List session digests")
+    .option("--rig <name>", "Filter by rig name")
+    .option("--seat <name>", "Filter by seat name")
+    .option("--since <date>", "Filter digests ingested on or after this date (ISO 8601)")
+    .option("--until <date>", "Filter digests ingested on or before this date (ISO 8601)")
+    .option("--limit <n>", "Maximum rows to return (default 50, max 200)", "50")
+    .option("--offset <n>", "Offset for pagination", "0")
+    .option("--json", "Output as JSON")
+    .action(async (opts: { rig?: string; seat?: string; since?: string; until?: string; limit: string; offset: string; json?: boolean }) => {
+      const client = await getClient();
+      if (!client) return;
+      const params = new URLSearchParams();
+      if (opts.rig) params.set("rig", opts.rig);
+      if (opts.seat) params.set("seat", opts.seat);
+      if (opts.since) params.set("since", opts.since);
+      if (opts.until) params.set("until", opts.until);
+      params.set("limit", opts.limit);
+      params.set("offset", opts.offset);
+      const qs = params.toString();
+      const response = await client.get<{ ok: boolean; rows?: unknown[]; total?: number; error?: string }>(`/api/fleet/digests?${qs}`);
+      if (response.status >= 400) {
+        console.error(`Error: ${response.data.error ?? "Unknown error"}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) {
+        console.log(JSON.stringify(response.data, null, 2));
+        return;
+      }
+      const rows = response.data.rows ?? [];
+      console.log(`Session Digests (${rows.length} of ${response.data.total ?? 0})`);
+      console.log("─".repeat(100));
+      for (const r of rows as Array<Record<string, unknown>>) {
+        const rig = (r.rig_name as string) ?? "—";
+        const seat = (r.seat_name as string) ?? "—";
+        const turns = `${r.conversation_turns}/${r.total_turns} turns`;
+        const bytes = r.transcript_bytes ? `${Math.round((r.transcript_bytes as number) / 1024)}KB` : "—";
+        const ts = (r.ingested_at as string) ?? "";
+        console.log(`  ${rig.padEnd(20)} ${seat.padEnd(25)} ${turns.padEnd(14)} ${bytes.padEnd(8)} ${ts}`);
+      }
+    });
+
+  command
+    .command("reviews")
+    .description("List code review runs")
+    .option("--rig <name>", "Filter by rig name")
+    .option("--seat <name>", "Filter by seat name")
+    .option("--repo <repo>", "Filter by repository")
+    .option("--branch <branch>", "Filter by branch name")
+    .option("--pr <n>", "Filter by PR number")
+    .option("--since <date>", "Filter reviews completed on or after this date (ISO 8601)")
+    .option("--until <date>", "Filter reviews completed on or before this date (ISO 8601)")
+    .option("--limit <n>", "Maximum rows to return (default 50, max 200)", "50")
+    .option("--offset <n>", "Offset for pagination", "0")
+    .option("--json", "Output as JSON")
+    .action(async (opts: { rig?: string; seat?: string; repo?: string; branch?: string; pr?: string; since?: string; until?: string; limit: string; offset: string; json?: boolean }) => {
+      const client = await getClient();
+      if (!client) return;
+      const params = new URLSearchParams();
+      if (opts.rig) params.set("rig", opts.rig);
+      if (opts.seat) params.set("seat", opts.seat);
+      if (opts.repo) params.set("repo", opts.repo);
+      if (opts.branch) params.set("branch", opts.branch);
+      if (opts.pr) params.set("pr", opts.pr);
+      if (opts.since) params.set("since", opts.since);
+      if (opts.until) params.set("until", opts.until);
+      params.set("limit", opts.limit);
+      params.set("offset", opts.offset);
+      const qs = params.toString();
+      const response = await client.get<{ ok: boolean; rows?: unknown[]; total?: number; error?: string }>(`/api/fleet/reviews?${qs}`);
+      if (response.status >= 400) {
+        console.error(`Error: ${response.data.error ?? "Unknown error"}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) {
+        console.log(JSON.stringify(response.data, null, 2));
+        return;
+      }
+      const rows = response.data.rows ?? [];
+      console.log(`Review Runs (${rows.length} of ${response.data.total ?? 0})`);
+      console.log("─".repeat(110));
+      for (const r of rows as Array<Record<string, unknown>>) {
+        const pr = r.pr_number ? `PR#${r.pr_number}` : "—";
+        const branch = (r.branch as string) ?? "—";
+        const findings = `MF:${r.must_fix} S:${r.suggestion} D:${r.dismissed}`;
+        const rig = (r.rig_name as string) ?? "—";
+        const dur = r.duration_seconds ? `${r.duration_seconds}s` : "—";
+        const ts = (r.completed_at as string) ?? "";
+        console.log(`  ${pr.padEnd(8)} ${branch.padEnd(30)} ${findings.padEnd(20)} ${rig.padEnd(15)} ${dur.padEnd(8)} ${ts}`);
+      }
+    });
+
+  command
+    .command("findings")
+    .description("List findings for a specific review run")
+    .argument("<traceId>", "Review run trace ID")
+    .option("--json", "Output as JSON")
+    .action(async (traceId: string, opts: { json?: boolean }) => {
+      const client = await getClient();
+      if (!client) return;
+      const response = await client.get<{ ok: boolean; findings?: unknown[]; error?: string }>(`/api/fleet/reviews/${encodeURIComponent(traceId)}/findings`);
+      if (response.status >= 400) {
+        console.error(`Error: ${response.data.error ?? "Unknown error"}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) {
+        console.log(JSON.stringify(response.data, null, 2));
+        return;
+      }
+      const findings = response.data.findings ?? [];
+      console.log(`Findings for ${traceId} (${findings.length} total)`);
+      console.log("─".repeat(100));
+      for (const f of findings as Array<Record<string, unknown>>) {
+        const file = (f.file as string) ?? "—";
+        const lines = (f.lines as string) ?? "";
+        const cat = (f.category as string) ?? "—";
+        const verdict = (f.verdict as string) ?? "—";
+        const score = f.score !== null ? `${f.score}` : "—";
+        const desc = (f.description_prefix as string) ?? "";
+        const loc = lines ? `${file}:${lines}` : file;
+        console.log(`  [${verdict.padEnd(7)}] ${score.padEnd(4)} ${cat.padEnd(18)} ${loc.padEnd(35)} ${desc.substring(0, 50)}`);
+      }
+    });
+
+  command
+    .command("snapshots")
+    .description("List daily token snapshots")
+    .option("--rig <name>", "Filter by rig name")
+    .option("--seat <name>", "Filter by seat name")
+    .option("--since <date>", "Filter snapshots on or after this date (YYYY-MM-DD)")
+    .option("--until <date>", "Filter snapshots on or before this date (YYYY-MM-DD)")
+    .option("--limit <n>", "Maximum rows to return (default 50, max 200)", "50")
+    .option("--offset <n>", "Offset for pagination", "0")
+    .option("--json", "Output as JSON")
+    .action(async (opts: { rig?: string; seat?: string; since?: string; until?: string; limit: string; offset: string; json?: boolean }) => {
+      const client = await getClient();
+      if (!client) return;
+      const params = new URLSearchParams();
+      if (opts.rig) params.set("rig", opts.rig);
+      if (opts.seat) params.set("seat", opts.seat);
+      if (opts.since) params.set("since", opts.since);
+      if (opts.until) params.set("until", opts.until);
+      params.set("limit", opts.limit);
+      params.set("offset", opts.offset);
+      const qs = params.toString();
+      const response = await client.get<{ ok: boolean; rows?: unknown[]; total?: number; error?: string }>(`/api/fleet/snapshots?${qs}`);
+      if (response.status >= 400) {
+        console.error(`Error: ${response.data.error ?? "Unknown error"}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) {
+        console.log(JSON.stringify(response.data, null, 2));
+        return;
+      }
+      const rows = response.data.rows ?? [];
+      console.log(`Daily Token Snapshots (${rows.length} of ${response.data.total ?? 0})`);
+      console.log("─".repeat(100));
+      for (const r of rows as Array<Record<string, unknown>>) {
+        const day = (r.day as string) ?? "—";
+        const rig = (r.rig_name as string) ?? "—";
+        const seat = (r.seat_name as string) ?? "—";
+        const model = (r.model as string) ?? "—";
+        const input = r.input_tokens_delta ? `${Math.round((r.input_tokens_delta as number) / 1000)}K in` : "—";
+        const output = r.output_tokens_delta ? `${Math.round((r.output_tokens_delta as number) / 1000)}K out` : "—";
+        const samples = r.samples ? `${r.samples} samples` : "";
+        console.log(`  ${day}  ${rig.padEnd(20)} ${seat.padEnd(20)} ${model.padEnd(20)} ${input.padEnd(10)} ${output.padEnd(10)} ${samples}`);
+      }
+    });
+
+  command
     .command("stats")
     .description("Show fleet store row counts and last ingestion timestamps")
     .action(async () => {

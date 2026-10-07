@@ -296,6 +296,70 @@ export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
 
   app.route("/", writeApp);
 
+  app.get("/digests", (c) => {
+    try {
+      const q = c.req.query();
+      const result = store().listDigests({
+        rig: q.rig || undefined,
+        seat: q.seat || undefined,
+        since: q.since || undefined,
+        until: q.until || undefined,
+        limit: q.limit ? parseInt(q.limit, 10) : undefined,
+        offset: q.offset ? parseInt(q.offset, 10) : undefined,
+      });
+      return c.json({ ok: true, ...result });
+    } catch {
+      return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
+    }
+  });
+
+  app.get("/reviews", (c) => {
+    try {
+      const q = c.req.query();
+      const result = store().listReviews({
+        rig: q.rig || undefined,
+        seat: q.seat || undefined,
+        repo: q.repo || undefined,
+        branch: q.branch || undefined,
+        pr: q.pr ? parseInt(q.pr, 10) : undefined,
+        since: q.since || undefined,
+        until: q.until || undefined,
+        limit: q.limit ? parseInt(q.limit, 10) : undefined,
+        offset: q.offset ? parseInt(q.offset, 10) : undefined,
+      });
+      return c.json({ ok: true, ...result });
+    } catch {
+      return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
+    }
+  });
+
+  app.get("/reviews/:traceId/findings", (c) => {
+    try {
+      const traceId = c.req.param("traceId");
+      const findings = store().getReviewFindings(traceId);
+      return c.json({ ok: true, findings });
+    } catch {
+      return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
+    }
+  });
+
+  app.get("/snapshots", (c) => {
+    try {
+      const q = c.req.query();
+      const result = store().listSnapshots({
+        rig: q.rig || undefined,
+        seat: q.seat || undefined,
+        since: q.since || undefined,
+        until: q.until || undefined,
+        limit: q.limit ? parseInt(q.limit, 10) : undefined,
+        offset: q.offset ? parseInt(q.offset, 10) : undefined,
+      });
+      return c.json({ ok: true, ...result });
+    } catch {
+      return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
+    }
+  });
+
   app.get("/stats", (c) => {
     try {
       const result = store().stats();
