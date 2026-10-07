@@ -10,6 +10,136 @@ It's the open-source system behind my AI civilization experiments.
 
 **Guide:** [Getting started](docs/reference/getting-started.md) · **Stuck?** [Help](docs/reference/help.md) · **Questions:** [Q&A](https://github.com/mvschwarz/openrig/discussions/92) · **Updates and demos:** [@_feralmachine on X](https://x.com/_feralmachine)
 
+## Fork additions
+
+This is a fork of [mvschwarz/openrig](https://github.com/mvschwarz/openrig) with four areas added on top of the stock daemon: **Fleet Analytics** (ingestion + query layer for session and review data), **Runtime Fallback** (automatic model swap on provider limits), **Onboarding Trim** (55% reduction of managed block weight), and **Skills & Governance** (retro, wiki, ADRs). Everything below this section is from upstream. The additions are in `packages/daemon` and `packages/cli`.
+
+### Fleet Analytics
+
+Stock OpenRig manages rigs, seats, queues, and terminals. It does not observe what agents did during their sessions or how much they cost. Fleet Analytics adds an ingestion pipeline and query layer that turns session transcripts and review logs into structured, queryable data.
+
+**Four analytics tables** (SQLite, inside the daemon's existing database):
+
+| Table | Stores | Source |
+|-------|--------|--------|
+| `session_digests` | Per-session summary: turns, tool calls, errors, compaction boundaries, irreversible actions | `reduce-transcript.mjs` parses each `.jsonl` transcript |
+| `review_runs` | Per-review summary: PR, mode, model mix, must-fix/suggestion/dismissed counts, cross-stack agreement | `metrics.json` from `~/.claude/logs/code-review/` |
+| `review_findings` | Individual findings per review: file, lines, category, severity, verdict | `report.json` from the same log directories |
+| `daily_token_snapshots` | Per-seat per-model per-day token usage rollup | Aggregated from `usage_samples` (existing daemon table) |
+
+**Ingestion** runs automatically inside the daemon:
+
+- `FleetIngestionService` reconciles on a configurable interval (default 5 min).
+- It discovers `.jsonl` transcripts under `~/.claude/projects/`, runs `reduce-transcript.mjs` on each (max 3 concurrent), and upserts the digest.
+- It scans `~/.claude/logs/code-review/*/metrics.json` for review runs and their findings.
+- It rolls up token usage from the daemon's existing `usage_samples` table into daily snapshots.
+- A source hash (first 4KB + file size + mtime) prevents re-processing unchanged files.
+- Lifecycle hooks trigger immediate ingestion when a session closes.
+- An overlap guard prevents concurrent reconciliation runs.
+
+**Query layer** — HTTP and CLI:
+
+```bash
+# HTTP endpoints (all support ?rig=, ?seat=, ?since=, ?until=, ?limit=, ?offset=)
+GET /fleet/digests
+GET /fleet/reviews
+GET /fleet/reviews/:traceId/findings
+GET /fleet/snapshots
+GET /fleet/stats
+
+# CLI commands (same filters via flags, plus --json)
+rig fleet digests --rig my-rig --since 2026-10-01
+rig fleet reviews --limit 10 --json
+rig fleet findings <traceId>
+rig fleet snapshots --seat dev-impl --since 2026-10-05
+rig fleet stats
+```
+
+**Questions Fleet Analytics answers:**
+- Which seats had the most errors this week?
+- What is the must-fix rate across all reviews?
+- How many tokens did the research pod use yesterday?
+- Which sessions had compaction losses or irreversible actions?
+
+**Fork-only files:**
+
+| File | Purpose |
+|------|---------|
+| `packages/daemon/src/domain/fleet-store.ts` | Schema, upsert writers, query methods for 4 analytics tables |
+| `packages/daemon/src/domain/fleet-ingestion-service.ts` | Auto-ingestion: transcript parsing, review scanning, token rollup |
+| `packages/daemon/src/routes/fleet-store.ts` | HTTP POST (ingestion) + GET (query) endpoints |
+| `packages/cli/src/commands/fleet.ts` | `rig fleet` subcommands |
+| `packages/daemon/src/db/migrations/096–099` | DDL for the 4 analytics tables |
+
+### Runtime Fallback (RIG-43)
+
+When a provider hits a usage limit (e.g., Anthropic rate limits on Opus), a seat stops working. The operator must manually swap the model.
+
+`RuntimeFallbackService` automates this:
+
+1. A seat detects a provider usage-limit event.
+2. The daemon swaps it to a configured fallback runtime/model (e.g., Opus → Sonnet, or Opus → Claude on a different provider).
+3. The swap has a configurable expiry. When it passes, the daemon swaps back to the original runtime.
+4. The swap uses the existing `SeatHandoverService` for session migration.
+
+Guards prevent race conditions: in-flight dedup, DB-level TOCTOU checks, and a sweeping guard that prevents lost wakeups during concurrent swap-back triggers.
+
+**Fork-only files:**
+
+| File | Purpose |
+|------|---------|
+| `packages/daemon/src/domain/runtime-fallback-service.ts` | Forward/reverse swap logic, expiry scheduling, event-bus integration |
+| `packages/daemon/src/db/migrations/090–091` | `fallback_runtime`, `fallback_model`, `fallback_state`, `fallback_expires_at` columns on node table |
+
+### Onboarding Trim
+
+Stock OpenRig injects ~13.6KB of managed onboarding content into every project's `CLAUDE.md`. Across a 16-project fleet, that is ~218KB of system-prompt weight.
+
+This fork trims the 5 managed blocks by 55% (13.6KB → 6.2KB) while preserving all behaviorally tested content — the selection probe, operator-contact wording, skill references, and recovery directives. The trim was validated against the daemon's `default-onboarding-pack.test.ts` contract tests.
+
+| Block | Before | After | Saved |
+|-------|--------|-------|-------|
+| `CULTURE-default.md` | 1,296B | 479B | 817B |
+| `openrig-start.md` | 2,479B | 1,346B | 1,133B |
+| `openrig-project-guidance.md` | 2,611B | 1,105B | 1,506B |
+| `openrig-onboarding-01.md` | 3,272B | 1,821B | 1,451B |
+| `openrig-onboarding-02.md` | 3,940B | 1,418B | 2,522B |
+
+### Skills & Governance
+
+Fork-added skills exist in two locations based on who uses them:
+
+**Daemon-delivered skills** (in `packages/daemon/assets/plugins/openrig-core/skills/`, available to all rig seats):
+
+| Skill | Purpose |
+|-------|---------|
+| `/wiki-update` | Create or update wiki pages in `wiki/` for cross-session knowledge that ADRs and CLAUDE.md do not capture |
+| `/queue-handoff` | Transfer durable work to another seat via the queue system |
+| `/pr-review-lifecycle` | End-to-end PR review orchestration |
+| `/session-compaction-and-restore` | Compaction checkpoint and restore workflow |
+
+**Operator skills** (in `~/.claude/skills/`, invoked manually by the operator):
+
+| Skill | Purpose |
+|-------|---------|
+| `/retro` | Session retrospective — analyzes a transcript digest across 8 categories (navigation waste, coding standards, safety guardrails, etc.) and produces prioritized environment improvements |
+
+**Wiki system** — 7 pages in `wiki/` provide cross-session memory: conventions, corrections, failed approaches, and operational context that survive seat replacement. Wiki content is treated as untrusted data (evidence, not authority).
+
+**ADRs** — 5 architectural decision records in `docs/decisions/`:
+
+| ADR | Decision |
+|-----|----------|
+| 0001 | Migrate custom orchestration skills to OpenRig-native plugin skills |
+| 0002 | PR review lifecycle as a standalone skill |
+| 0003 | Fork-specific validation gate in orchestrator role |
+| 0004 | Native plan validation skill |
+| 0005 | Separate universal guidance file for project features |
+
+**Reference docs** — `docs/reference/writing-for-agents.md` provides a framework for writing effective agent instructions (no-ops, sediment, negation traps).
+
+---
+
 ## See it running
 
 ![The OpenRig TUI: the build rig as a graph, then as a table of seats with runtime, model, context and state, then one seat in detail (real recording, 10 seconds)](assets/readme/openrig-agents-working.gif)
