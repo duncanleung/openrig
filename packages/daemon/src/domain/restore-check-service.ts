@@ -1,3 +1,4 @@
+import { claudeActivityRelayPath } from "./claude-activity-hooks.js";
 import { existsSync, accessSync, constants } from "node:fs";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { getCompatibleOpenRigPath } from "../openrig-compat.js";
@@ -215,6 +216,8 @@ export interface RestoreCheckDeps {
   substrateRoot?: string;
   /** Read-only probe of the daemon SQLite queue store. */
   probeQueueStore?: () => QueueStoreProbeResult;
+  /** Configured OpenRig instance root, matching the Claude adapter stateDir. */
+  stateDir?: string;
   /** Relay-backed Claude hook events derived from the shipped hook manifest. */
   getClaudeActivityHookEvents?: () => string[];
   /** Home directory for relay path resolution (relay deploys to ~/.openrig/). */
@@ -1030,8 +1033,8 @@ export class RestoreCheckService {
     }
 
     // Current Claude activity hooks are selected as a runtime resource and
-    // delivered by ClaudeCodeAdapter into the seat CWD. Do not require the
-    // retired internal control-plane shell hooks on public installs.
+    // delivered by ClaudeCodeAdapter: settings in the seat CWD, relay in instance state.
+    // Do not require the retired internal control-plane shell hooks on public installs.
     const startup = node.nodeId ? this.deps.getStartupContext(node.nodeId) : null;
     if (startup?.status === "ok" && !startup.projectionEntries.some((entry) => (
       entry.category === "runtime_resource" && entry.resourceType === "claude_activity_hooks"
@@ -1052,8 +1055,8 @@ export class RestoreCheckService {
         };
       }
       const settingsPath = join(node.cwd, ".claude", "settings.local.json");
-      const relayBase = this.deps.homedir ?? node.cwd;
-      const relayPath = join(relayBase, ".openrig", "hooks", "scripts", "activity-relay.cjs");
+      const relayPath = claudeActivityRelayPath(this.deps.stateDir);
+
       const events = this.deps.getClaudeActivityHookEvents?.() ?? [];
       if (events.length === 0) {
         return {

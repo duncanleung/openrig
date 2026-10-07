@@ -105,6 +105,8 @@ import { reviewFindingsSchema } from "./migrations/098_review_findings.js";
 import { dailyTokenSnapshotsSchema } from "./migrations/099_daily_token_snapshots.js";
 import type { Migration } from "./migrate.js";
 
+import { rigInstallRootSchema } from "./migrations/096_rig_install_root.js";
+
 /** Ordered migrations; numbers may be reserved by independent changes. */
 export const ALL_MIGRATIONS: Migration[] = [
   coreSchema,
@@ -203,6 +205,7 @@ export const ALL_MIGRATIONS: Migration[] = [
   rigNonInterruptiveSchema,
   nodeRuntimeFallbackSchema,
   nodeFallbackExpiresAtSchema,
+  rigInstallRootSchema,
   sessionDigestsSchema,
   reviewRunsSchema,
   reviewFindingsSchema,

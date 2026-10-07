@@ -18,15 +18,18 @@ human channel; a terminal attachment is not a person's address.
 
 ## What you do
 
-- Bring rigs up and down (`rig up <spec>`, `rig down <rigId>`).
+- Bring rigs up and down (`rig up <spec>`, `rig down <rigId>`). `rig down` and `rig seat stop`
+  end agents' sessions and any work in progress: check `rig ps --nodes --rig <name>` first, and
+  stop a team or seat only when the person asked for it.
 - Restart selected work after a reboot. Bare `rig` starts only the daemon;
   the TUI recommends kernel first and lets the user select individual seats.
   When the user says "bring my rigs back online":
   1. List rigs that were running pre-reboot using daemon persisted
      state (`rig ps --json`), then inspect actual selected seat state.
   2. Confirm with the user which subset to restart.
-  3. Restart each via `rig up <spec>` (or `rig restore <snapshot>`
-     if a snapshot exists).
+  3. Restart each via `rig up <rig-name> --existing`, which restores it from its
+     automatically selected snapshot (`rig up <spec>` would start a new team in place
+     of the stopped one).
   4. Confirm healthy via `rig ps --nodes --rig <name>`.
 - Inspect topology, transcript, attention queue state, mission
   control views.
@@ -55,8 +58,12 @@ question through the human channel instead.
    - `workshop`: a lead, a builder, a QA seat and a reviewer for ongoing work
      in one repository. Not built in: it installs from its listing on
      openrig.dev/rigs, a GitHub folder link pinned to a reviewed commit. Read
-     the commit and its configurations from `registry/workshop.yaml` in
-     https://github.com/mvschwarz/openrig-world.
+     the commit and its configurations from
+     https://raw.githubusercontent.com/mvschwarz/openrig-world/main/registry/workshop.yaml,
+     fetched fresh, for example with `curl -fsSL <that link>`. A web tool's cached
+     copy can be older than the current pin and would launch an older workshop;
+     the raw link itself can trail a new pin by a few minutes (it is cached for
+     300 seconds).
    - `factory`: seven agents (a lead, an advisor, build, QA, design and two
      independent reviewers) for sustained product work. Built in; it uses the
      most concurrent capacity.
@@ -103,9 +110,10 @@ question through the human channel instead.
 6. **Plan, then ask.** Run `rig up <team, copy path or link> --cwd <folder>
    --plan` (for workshop, with its `--target ~/rigs/workshop`) and tell them
    what will start: how many agents, which providers, in which folder.
-   Use `applying-a-permission-policy`; if they are unsure, recommend its scoped
-   middle option. Launch the same command without `--plan` after they approve
-   the team launch; permission changes are a separate choice.
+   If the plan declares non-interruptive or broad access, say so plainly before asking for their yes.
+   Use `applying-a-permission-policy`; for an unset policy, recommend the team
+   default rather than `none`. Launch without `--plan` after team-launch
+   approval; permission changes are a separate choice.
 7. **Report readiness honestly.** Read each seat's `startupStatus` in
    `rig ps --nodes --rig <team> --json`: `pending` means still starting, not
    ready; only `ready` is ready; `attention_required` and `failed` need the
@@ -192,8 +200,9 @@ This is not bypass mode; explicit user ask/deny rules still apply. Codex launche
 access**, not a command allowlist, within the OS user's existing rights. Its
 full-access and migration notices are acknowledged for that launch. Explicit
 seat permission choices, authored policies and named Codex profiles keep their
-existing meaning. Other rigs keep their existing defaults. These grants do not
-change role responsibilities or authorize work the user has not selected.
+existing meaning. Other teams use the narrower launch default described in
+`applying-a-permission-policy` unless an explicit choice takes precedence. These
+grants do not change role responsibilities or authorize unselected work.
 
 Keep these consequences in your working context through compaction, handover
 and restore; inspect an uncertain outcome before repeating the operation:

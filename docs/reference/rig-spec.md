@@ -174,7 +174,8 @@ edges:
 | `name` | string | yes | — | Rig name. Used in session naming (`{pod}-{member}@{name}`), snapshot identification, and spec library lookup. |
 | `summary` | string | no | — | Human-readable description. Shown in the spec library, review surfaces and `rig specs preview` (in `rig specs show` only with `--json`). |
 | `culture_file` | string | no | — | Relative path to a rig-wide culture/constitution file. Must be a safe relative path (no `..`, no absolute). |
-| `permission_policy` | string | no | — | Permission policy attached to the rig. Either a built-in (`builtin:locked`, `builtin:standard`, `builtin:open`, `builtin:yolo`, `builtin:auto`) or a safe relative path to a custom policy file (resolved from this spec's directory; no `..`, no absolute, no empty segments, each segment `[A-Za-z0-9][A-Za-z0-9._-]*`), or `none`, a recorded choice of the floor. Absent leaves the default floor. A bare built-in name such as `yolo` is refused ("use 'builtin:yolo'"), and so is an explicit `null`. A custom file that is missing, unreadable or invalid isn't a validation error: it resolves to the floor, and preflight warns. A member may set its own `permission_policy` (not on a terminal member), which takes precedence over the rig-level one; there is no pod level. See "Attaching a permission policy" below. |
+| `non_interruptive` | boolean | no | — | Pod-aware rig launch-warning default. With full-bypass Claude/Codex seats, true accepts or hides supported harness warnings using launch flags. Explicit CLI choices override this field; this field overrides the machine default. It does not grant permissions, change native settings files, or bypass login. |
+| `permission_policy` | string | no | — | Permission policy attached to the rig. Either a built-in (`builtin:locked`, `builtin:standard`, `builtin:open`, `builtin:yolo`, `builtin:auto`) or a safe relative path to a custom policy file (resolved from this spec's directory; no `..`, no absolute, no empty segments, each segment `[A-Za-z0-9][A-Za-z0-9._-]*`), or `none`, a recorded choice of the floor. Absent uses the default floor with the scoped team launch allowances described below. A bare built-in name such as `yolo` is refused ("use 'builtin:yolo'"), and so is an explicit `null`. A custom file that is missing, unreadable or invalid isn't a validation error: it resolves to the floor, and preflight warns. A member may set its own `permission_policy` (not on a terminal member), which takes precedence over the rig-level one; there is no pod level. See "Attaching a permission policy" below. |
 | `managed_blocks` | map | no | `CLAUDE.md` | File that receives OpenRig's managed instruction blocks for Claude Code members. Only the `claude-code` key is accepted, with `CLAUDE.md` or `CLAUDE.local.md`. Codex, Pi and OMP members use `AGENTS.md`. See "Choosing the Claude instruction file" below. |
 | `workspace` | object | no | — | The rig's workspace: `workspace_root` (required), `repos[]` of `{name, path, kind}` with `kind` one of `user`, `project`, `knowledge`, `lab` or `delivery` and unique names, an optional `default_repo` naming one of them, and an optional `knowledge_root`. Relative repo paths resolve against `workspace_root`. |
 | `docs` | Doc[] | no | — | Documentation files that should travel with the rig. Included in rig bundles. Each entry has a `path` field (safe relative path). The engine does not consume these — they are for humans and agents setting up the environment before launch. |
@@ -211,6 +212,41 @@ An explicit `rig seat set-permissions` choice overrides member/rig policy for
 future managed launches of that stable seat; it does not rewrite this spec or
 its inherited policy provenance. `inherit` removes that override. See
 [per-seat permission mode](getting-started.md#per-seat-permission-mode).
+
+### Team launch defaults
+
+A non-kernel Claude or Codex seat with no authored permission policy, explicit
+seat permission selection, or named Codex profile receives the team launch
+default. An explicit policy, including `none` or `builtin:locked`, keeps its
+existing meaning. The default is derived again for fresh launch, resume, fork
+and handover; it is not saved as a user choice. Kernel, Pi and terminal behavior
+is unchanged.
+
+Claude keeps `acceptEdits` and receives inline session settings allowing ordinary
+`rig` commands, project reads and common project test commands (for example,
+`npm test`, `pnpm test`, `pytest`, `go test` and `cargo test`). Lifecycle commands
+such as `rig up`, `rig down`, `rig restore`, `rig bundle install` and seat stop or
+handover are listed as **ask** rules. Native deny and ask rules take precedence
+over allow rules. These are native command-matching rules, not filesystem
+containment: a project's test command can execute code. Flags before the verb
+(for example, `rig --host vps up`) or wrapper commands may not match the lifecycle
+prefixes. OpenRig does not write these settings into a personal or project
+permission file.
+
+Codex keeps `workspace-write` with its existing approval policy and receives the
+configured OpenRig workspace root plus its pod's shared state directory as
+additional writable directories. The team workspace preparer creates missing
+directory ancestors and excludes the home directory and its ancestors from its
+prepared scopes. Unavailable optional directories are warned about and omitted
+from that list without blocking launch. When no prepared scopes remain, the
+runtime adapter retains its existing pod-state `--add-dir` fallback, which this
+step does not prepare. This does not modify Codex permission files or enable
+non-interruptive mode.
+
+**Codex lifecycle commands do not gain a new approval rule.** With Codex's
+existing `on-request` policy, non-escalated sandboxed commands, including
+`rig up` and `rig down`, can run without asking. This default addresses writable
+workspace access; it does not promise a lifecycle confirmation prompt.
 
 ### Built-in permission policies
 
@@ -352,7 +388,7 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 
 - **State:** Each seat uses `$OPENRIG_HOME/state/pi/<session>/agent` as its Pi agent directory, with `sessions/` beside it, instead of your default `~/.pi/agent`. The runner sets `PI_CODING_AGENT_DIR` to that directory. `<session>` is the seat's session name, unchanged; for a pod member it is `{podId}-{memberId}@{rigName}`. `$OPENRIG_HOME` defaults to `~/.openrig`. OpenRig creates these directories at launch and does not copy anything from `~/.pi/agent`.
 - **Custom models:** Pi reads `models.json` from its agent directory, so a seat reads `$OPENRIG_HOME/state/pi/<session>/agent/models.json`, not `~/.pi/agent/models.json`. Custom provider and model definitions for a seat go in that file. A seat that uses only providers Pi already includes does not need one. OpenRig does not create or write `models.json`.
-- **Credentials:** The Pi process receives only `PATH`, `HOME`, `USER`, `LOGNAME`, `TERM`, `LANG`, `LC_ALL`, `SHELL`, `TMPDIR`, a fixed set of OpenRig seat and instance variables, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, and at most one provider key. That key is `OPENROUTER_API_KEY`, `ZAI_API_KEY` or `KIMI_API_KEY`, passed only when it is set in the seat's environment and the seat's `model` is written as `openrouter/<id>`, `zai/<id>` or `kimi-coding/<id>`. Naming that variable in `recovery.provider_auth_env_allowlist` (empty by default) makes the daemon add it, when set in the daemon's environment, to the seat's launch environment. No other variable reaches Pi, including other providers' keys and a custom provider's own key variable.
+- **Credentials:** The Pi process receives only `PATH`, `HOME`, `USER`, `LOGNAME`, `TERM`, `LANG`, `LC_ALL`, `SHELL`, `TMPDIR`, a fixed set of OpenRig seat and instance variables, `PI_CODING_AGENT_DIR`, `PI_CODING_AGENT_SESSION_DIR`, and at most one provider key. That key is `OPENROUTER_API_KEY`, `ZAI_API_KEY`, `KIMI_API_KEY` or `MINIMAX_API_KEY`, passed only when it is set in the seat's environment and the seat's `model` is written as `openrouter/<id>`, `zai/<id>`, `kimi-coding/<id>` or `minimax/<id>`. Naming that variable in `recovery.provider_auth_env_allowlist` (empty by default) makes the daemon add it, when set in the daemon's environment, to the seat's launch environment. No other variable reaches Pi, including other providers' keys and a custom provider's own key variable.
 
 ### Oh My Pi (`runtime: omp`)
 
