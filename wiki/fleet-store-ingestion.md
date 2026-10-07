@@ -56,10 +56,11 @@ migrations 096–099.
 6. **Source hash for idempotence.** `sourceHash()` (first 4KB + size + mtime)
    lets the service skip unchanged files on subsequent runs.
 
-7. **Review findings: additive only (v1).** Current implementation upserts
-   findings but does not delete removed ones. Follow-up: add `DELETE FROM
-   review_findings WHERE run_trace_id = ? AND finding_id NOT IN (...)` inside
-   the transaction.
+7. **Review findings: full reconciliation.** `upsertReviewRun` accepts
+   `findings: ReviewFindingInput[] | null`. An array deletes stale rows
+   via `NOT IN (...)`; `null` preserves existing findings (parse-error
+   safety). Both callers build into a local array and assign only after
+   the loop completes.
 
 ## Files
 
@@ -80,6 +81,7 @@ migrations 096–099.
   (10-min window). Event bus subscription wired at boot, unsubscribed at shutdown.
 - ~~**Review findings full reconciliation**~~ — shipped. `upsertReviewRun` now
   DELETEs stale findings inside the transaction after upserting the current batch.
-- **Overlap guard** — boolean in-flight guard on the scheduler. Review dismissed
-  as non-blocking (idempotent upserts prevent corruption), but cheap hardening.
-- **Configurable interval** — currently hardcoded 5 min.
+- ~~**Overlap guard**~~ — shipped. `reconciling` flag on the service skips
+  concurrent `reconcile()` calls and returns `skippedOverlap: true`.
+- ~~**Configurable interval**~~ — shipped. `OPENRIG_FLEET_RECONCILE_INTERVAL_MS`
+  env var overrides the default 5-min scheduler interval.

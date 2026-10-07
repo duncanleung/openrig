@@ -24,6 +24,7 @@ export interface ReconcileResult {
   reviews: { discovered: number; ingested: number; skipped: number; errors: string[] };
   snapshots: { daysRolledUp: number; snapshotsUpserted: number };
   durationMs: number;
+  skippedOverlap?: boolean;
 }
 
 export interface DigestReconcileResult {
@@ -344,6 +345,7 @@ export class FleetIngestionService {
   private readonly eventBus?: FleetIngestionServiceDeps["eventBus"];
   private eventUnsubscribe?: () => void;
   private reviewTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconciling = false;
 
   constructor(deps: FleetIngestionServiceDeps) {
     this.db = deps.db;
@@ -354,25 +356,39 @@ export class FleetIngestionService {
   }
 
   async reconcile(opts?: { force?: boolean }): Promise<ReconcileResult> {
+    if (this.reconciling) {
+      return {
+        digests: { discovered: 0, ingested: 0, skipped: 0, errors: [] },
+        reviews: { discovered: 0, ingested: 0, skipped: 0, errors: [] },
+        snapshots: { daysRolledUp: 0, snapshotsUpserted: 0 },
+        durationMs: 0,
+        skippedOverlap: true,
+      };
+    }
+    this.reconciling = true;
     const t0 = Date.now();
-    const [digests, reviews, snapshots] = await Promise.all([
-      this.reconcileDigests(opts),
-      this.reconcileReviews(opts),
-      this.rollUpSnapshots(),
-    ]);
-    const result: ReconcileResult = {
-      digests,
-      reviews,
-      snapshots,
-      durationMs: Date.now() - t0,
-    };
-    console.log(
-      `[fleet-ingestion] reconcile done in ${result.durationMs}ms — ` +
-      `digests: ${digests.ingested} ingested, ${digests.skipped} skipped, ${digests.errors.length} errors; ` +
-      `reviews: ${reviews.ingested} ingested, ${reviews.skipped} skipped, ${reviews.errors.length} errors; ` +
-      `snapshots: ${snapshots.snapshotsUpserted} upserted`,
-    );
-    return result;
+    try {
+      const [digests, reviews, snapshots] = await Promise.all([
+        this.reconcileDigests(opts),
+        this.reconcileReviews(opts),
+        this.rollUpSnapshots(),
+      ]);
+      const result: ReconcileResult = {
+        digests,
+        reviews,
+        snapshots,
+        durationMs: Date.now() - t0,
+      };
+      console.log(
+        `[fleet-ingestion] reconcile done in ${result.durationMs}ms — ` +
+        `digests: ${digests.ingested} ingested, ${digests.skipped} skipped, ${digests.errors.length} errors; ` +
+        `reviews: ${reviews.ingested} ingested, ${reviews.skipped} skipped, ${reviews.errors.length} errors; ` +
+        `snapshots: ${snapshots.snapshotsUpserted} upserted`,
+      );
+      return result;
+    } finally {
+      this.reconciling = false;
+    }
   }
 
   async reconcileDigests(opts?: { force?: boolean }): Promise<DigestReconcileResult> {

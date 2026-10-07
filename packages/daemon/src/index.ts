@@ -378,7 +378,10 @@ export async function startServer(port?: number) {
         // OPR.0.4.6.FS-1 W2 — boot sweep + daily retention tick (bounded,
         // yields between batches; a sweep failure is logged, never fatal).
         retentionTimer = startQueueRetentionScheduler({ ...deps, fleetIngestion: deps.fleetIngestion });
-        fleetIngestionTimer = startFleetIngestionScheduler(deps.fleetIngestion);
+        const fleetReconcileIntervalMs = process.env.OPENRIG_FLEET_RECONCILE_INTERVAL_MS
+          ? parseInt(process.env.OPENRIG_FLEET_RECONCILE_INTERVAL_MS, 10) || 5 * 60 * 1000
+          : 5 * 60 * 1000;
+        fleetIngestionTimer = startFleetIngestionScheduler(deps.fleetIngestion, fleetReconcileIntervalMs);
         // S02 — the standing stuck sweep: nobody has to remember to run the verbs.
         stuckSweepTimer = startStuckSweepScheduler(deps);
         // S01 — wake-or-escalate on batons: a failed baton wake retries on schedule,

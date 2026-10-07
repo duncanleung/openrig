@@ -527,3 +527,32 @@ describe("FleetIngestionService — lifecycle events", () => {
     expect(oldRow).toBeUndefined();
   });
 });
+
+describe("overlap guard — concurrent reconcile calls", () => {
+  it("second concurrent reconcile returns skippedOverlap without running", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "fleet-overlap-"));
+    const db = freshDb();
+    const svc = makeService(db, tmpDir);
+
+    const first = svc.reconcile();
+    const second = svc.reconcile();
+
+    const [r1, r2] = await Promise.all([first, second]);
+
+    expect(r2.skippedOverlap).toBe(true);
+    expect(r2.durationMs).toBe(0);
+    expect(r1.skippedOverlap).toBeUndefined();
+  });
+
+  it("reconcile runs normally after a prior one completes", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "fleet-overlap-"));
+    const db = freshDb();
+    const svc = makeService(db, tmpDir);
+
+    const r1 = await svc.reconcile();
+    expect(r1.skippedOverlap).toBeUndefined();
+
+    const r2 = await svc.reconcile();
+    expect(r2.skippedOverlap).toBeUndefined();
+  });
+});
