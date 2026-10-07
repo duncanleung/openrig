@@ -202,6 +202,48 @@ describe("097+098 review_runs + review_findings — transactional upsert", () =>
     db.prepare("DELETE FROM review_runs WHERE trace_id = 'trace-001'").run();
     expect(findingCount()).toBe(0);
   });
+
+  it("re-ingestion with fewer findings deletes stale ones", () => {
+    store.upsertReviewRun(run(), [
+      finding(),
+      finding({ findingId: "f-002" }),
+      finding({ findingId: "f-003" }),
+    ]);
+    expect(findingCount()).toBe(3);
+
+    const result = store.upsertReviewRun(run(), [finding()]);
+    expect(result.findingsUpserted).toBe(1);
+    expect(result.findingsDeleted).toBe(2);
+    expect(findingCount()).toBe(1);
+    const remaining = db.prepare("SELECT finding_id FROM review_findings").all() as { finding_id: string }[];
+    expect(remaining.map((r) => r.finding_id)).toEqual(["f-001"]);
+  });
+
+  it("re-ingestion with empty findings deletes all existing findings", () => {
+    store.upsertReviewRun(run(), [finding(), finding({ findingId: "f-002" })]);
+    expect(findingCount()).toBe(2);
+
+    const result = store.upsertReviewRun(run(), []);
+    expect(result.findingsUpserted).toBe(0);
+    expect(result.findingsDeleted).toBe(2);
+    expect(findingCount()).toBe(0);
+  });
+
+  it("first insertion with findings reports zero deletions", () => {
+    const result = store.upsertReviewRun(run(), [finding()]);
+    expect(result.created).toBe(true);
+    expect(result.findingsDeleted).toBe(0);
+  });
+
+  it("null findings preserves existing findings (parse-error safety)", () => {
+    store.upsertReviewRun(run(), [finding(), finding({ findingId: "f-002" })]);
+    expect(findingCount()).toBe(2);
+
+    const result = store.upsertReviewRun(run({ mustFix: 1 }), null);
+    expect(result.findingsUpserted).toBe(0);
+    expect(result.findingsDeleted).toBe(0);
+    expect(findingCount()).toBe(2);
+  });
 });
 
 describe("099 daily_token_snapshots — upsert idempotence", () => {

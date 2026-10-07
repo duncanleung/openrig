@@ -160,10 +160,11 @@ export class FleetStore {
     return { id: existing?.id ?? Number(info.lastInsertRowid), created: !existing };
   }
 
-  upsertReviewRun(run: ReviewRunInput, findings: ReviewFindingInput[]): {
+  upsertReviewRun(run: ReviewRunInput, findings: ReviewFindingInput[] | null): {
     runId: number;
     created: boolean;
     findingsUpserted: number;
+    findingsDeleted: number;
   } {
     const result = this.db.transaction(() => {
       const existingRun = this.db.prepare(
@@ -224,38 +225,57 @@ export class FleetStore {
       `).run(run);
 
       let findingsUpserted = 0;
-      const findingStmt = this.db.prepare(`
-        INSERT INTO review_findings (
-          run_trace_id, finding_id, file, lines, category,
-          hunter_key, stack, score, verdict,
-          has_fix_spec, description_prefix, description_hash
-        ) VALUES (
-          @runTraceId, @findingId, @file, @lines, @category,
-          @hunterKey, @stack, @score, @verdict,
-          @hasFixSpec, @descriptionPrefix, @descriptionHash
-        )
-        ON CONFLICT(run_trace_id, finding_id) DO UPDATE SET
-          file = excluded.file,
-          lines = excluded.lines,
-          category = excluded.category,
-          hunter_key = excluded.hunter_key,
-          stack = excluded.stack,
-          score = excluded.score,
-          verdict = excluded.verdict,
-          has_fix_spec = excluded.has_fix_spec,
-          description_prefix = excluded.description_prefix,
-          description_hash = excluded.description_hash
-      `);
+      let findingsDeleted = 0;
 
-      for (const f of findings) {
-        findingStmt.run(f);
-        findingsUpserted++;
+      if (findings !== null) {
+        const findingStmt = this.db.prepare(`
+          INSERT INTO review_findings (
+            run_trace_id, finding_id, file, lines, category,
+            hunter_key, stack, score, verdict,
+            has_fix_spec, description_prefix, description_hash
+          ) VALUES (
+            @runTraceId, @findingId, @file, @lines, @category,
+            @hunterKey, @stack, @score, @verdict,
+            @hasFixSpec, @descriptionPrefix, @descriptionHash
+          )
+          ON CONFLICT(run_trace_id, finding_id) DO UPDATE SET
+            file = excluded.file,
+            lines = excluded.lines,
+            category = excluded.category,
+            hunter_key = excluded.hunter_key,
+            stack = excluded.stack,
+            score = excluded.score,
+            verdict = excluded.verdict,
+            has_fix_spec = excluded.has_fix_spec,
+            description_prefix = excluded.description_prefix,
+            description_hash = excluded.description_hash
+        `);
+
+        for (const f of findings) {
+          findingStmt.run(f);
+          findingsUpserted++;
+        }
+
+        if (findings.length > 0) {
+          const placeholders = findings.map(() => "?").join(", ");
+          const ids = findings.map((f) => f.findingId);
+          const del = this.db.prepare(
+            `DELETE FROM review_findings WHERE run_trace_id = ? AND finding_id NOT IN (${placeholders})`,
+          ).run(run.traceId, ...ids);
+          findingsDeleted = del.changes;
+        } else if (existingRun) {
+          const del = this.db.prepare(
+            "DELETE FROM review_findings WHERE run_trace_id = ?",
+          ).run(run.traceId);
+          findingsDeleted = del.changes;
+        }
       }
 
       return {
         runId: existingRun?.id ?? Number(runInfo.lastInsertRowid),
         created: !existingRun,
         findingsUpserted,
+        findingsDeleted,
       };
     })();
 
