@@ -336,6 +336,9 @@ export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
         return c.json({ ok: true, snapshots: result });
       }
       const result = await ingestion.reconcile({ force });
+      if (result.skippedOverlap) {
+        return c.json({ ok: false, code: "reconcile_in_progress", error: "A reconciliation is already running", ...result }, 409);
+      }
       return c.json({ ok: true, ...result });
     } catch (err) {
       return c.json({ ok: false, code: "reconcile_error", error: err instanceof Error ? err.message : String(err) }, 500);

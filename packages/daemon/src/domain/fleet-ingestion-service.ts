@@ -24,6 +24,7 @@ export interface ReconcileResult {
   reviews: { discovered: number; ingested: number; skipped: number; errors: string[] };
   snapshots: { daysRolledUp: number; snapshotsUpserted: number };
   durationMs: number;
+  skippedOverlap?: boolean;
 }
 
 export interface DigestReconcileResult {
@@ -344,6 +345,7 @@ export class FleetIngestionService {
   private readonly eventBus?: FleetIngestionServiceDeps["eventBus"];
   private eventUnsubscribe?: () => void;
   private reviewTimer: ReturnType<typeof setTimeout> | null = null;
+  private activeReconcile: Promise<ReconcileResult> | null = null;
 
   constructor(deps: FleetIngestionServiceDeps) {
     this.db = deps.db;
@@ -354,6 +356,28 @@ export class FleetIngestionService {
   }
 
   async reconcile(opts?: { force?: boolean }): Promise<ReconcileResult> {
+    if (this.activeReconcile) {
+      if (opts?.force) {
+        await this.activeReconcile.catch(() => {});
+      } else {
+        console.log("[fleet-ingestion] reconcile skipped — already in progress");
+        return {
+          digests: { discovered: 0, ingested: 0, skipped: 0, errors: [] },
+          reviews: { discovered: 0, ingested: 0, skipped: 0, errors: [] },
+          snapshots: { daysRolledUp: 0, snapshotsUpserted: 0 },
+          durationMs: 0,
+          skippedOverlap: true,
+        };
+      }
+    }
+    const p = this.runReconcile(opts);
+    this.activeReconcile = p;
+    return p.finally(() => {
+      if (this.activeReconcile === p) this.activeReconcile = null;
+    });
+  }
+
+  private async runReconcile(opts?: { force?: boolean }): Promise<ReconcileResult> {
     const t0 = Date.now();
     const [digests, reviews, snapshots] = await Promise.all([
       this.reconcileDigests(opts),
@@ -693,9 +717,27 @@ export class FleetIngestionService {
   }
 }
 
+export const FLEET_RECONCILE_DEFAULT_MS = 5 * 60 * 1000;
+const FLEET_RECONCILE_MIN_MS = 60_000;
+const FLEET_RECONCILE_MAX_MS = 86_400_000;
+
+export function resolveFleetReconcileIntervalMs(raw: string | undefined): number {
+  if (raw === undefined || raw === "") return FLEET_RECONCILE_DEFAULT_MS;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || !Number.isSafeInteger(n) || n < FLEET_RECONCILE_MIN_MS) {
+    console.warn(`[fleet-ingestion] invalid OPENRIG_FLEET_RECONCILE_INTERVAL_MS="${raw}" — using default ${FLEET_RECONCILE_DEFAULT_MS}ms`);
+    return FLEET_RECONCILE_DEFAULT_MS;
+  }
+  if (n > FLEET_RECONCILE_MAX_MS) {
+    console.warn(`[fleet-ingestion] OPENRIG_FLEET_RECONCILE_INTERVAL_MS=${raw} exceeds maximum — clamping to ${FLEET_RECONCILE_MAX_MS}ms`);
+    return FLEET_RECONCILE_MAX_MS;
+  }
+  return n;
+}
+
 export function startFleetIngestionScheduler(
   ingestion: FleetIngestionService,
-  intervalMs = 5 * 60 * 1000,
+  intervalMs = FLEET_RECONCILE_DEFAULT_MS,
 ): ReturnType<typeof setInterval> {
   const runOnce = (): void => {
     ingestion.reconcile().catch((err: unknown) => {
