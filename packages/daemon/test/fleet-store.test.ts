@@ -398,3 +398,175 @@ describe("fleet store stats — row counts and last timestamps", () => {
     expect(s.daily_token_snapshots.last_snapshot_at).not.toBeNull();
   });
 });
+
+describe("listDigests — query with filters", () => {
+  let store: FleetStore;
+  beforeEach(() => {
+    const db = freshDb();
+    store = new FleetStore(db);
+    store.upsertDigest(digest({ nativeSessionId: "sess-001", rigName: "rig-a", seatName: "dev-impl" }));
+    store.upsertDigest(digest({ nativeSessionId: "sess-002", rigName: "rig-a", seatName: "orch-lead" }));
+    store.upsertDigest(digest({ nativeSessionId: "sess-003", rigName: "rig-b", seatName: "dev-impl" }));
+  });
+
+  it("returns all digests when no filter is set", () => {
+    const result = store.listDigests();
+    expect(result.total).toBe(3);
+    expect(result.rows).toHaveLength(3);
+  });
+
+  it("filters by rig name", () => {
+    const result = store.listDigests({ rig: "rig-a" });
+    expect(result.total).toBe(2);
+    expect(result.rows.every((r) => r.rig_name === "rig-a")).toBe(true);
+  });
+
+  it("filters by seat name", () => {
+    const result = store.listDigests({ seat: "dev-impl" });
+    expect(result.total).toBe(2);
+    expect(result.rows.every((r) => r.seat_name === "dev-impl")).toBe(true);
+  });
+
+  it("respects limit and offset", () => {
+    const page1 = store.listDigests({ limit: 2, offset: 0 });
+    expect(page1.rows).toHaveLength(2);
+    expect(page1.total).toBe(3);
+    const page2 = store.listDigests({ limit: 2, offset: 2 });
+    expect(page2.rows).toHaveLength(1);
+  });
+
+  it("clamps limit to 200", () => {
+    const result = store.listDigests({ limit: 999 });
+    expect(result.rows).toHaveLength(3);
+  });
+});
+
+describe("listReviews — query with filters", () => {
+  let store: FleetStore;
+  beforeEach(() => {
+    const db = freshDb();
+    store = new FleetStore(db);
+    store.upsertReviewRun(run({ traceId: "t-1", prNumber: 10, repo: "owner/repo-a", branch: "feat-a", rigName: "rig-a" }), []);
+    store.upsertReviewRun(run({ traceId: "t-2", prNumber: 11, repo: "owner/repo-a", branch: "feat-b", rigName: "rig-a" }), []);
+    store.upsertReviewRun(run({ traceId: "t-3", prNumber: 5, repo: "owner/repo-b", branch: "feat-c", rigName: "rig-b" }), []);
+  });
+
+  it("returns all reviews unfiltered", () => {
+    const result = store.listReviews();
+    expect(result.total).toBe(3);
+  });
+
+  it("filters by PR number", () => {
+    const result = store.listReviews({ pr: 11 });
+    expect(result.total).toBe(1);
+    expect(result.rows[0]!.trace_id).toBe("t-2");
+  });
+
+  it("filters by repo", () => {
+    const result = store.listReviews({ repo: "owner/repo-a" });
+    expect(result.total).toBe(2);
+  });
+
+  it("filters by rig", () => {
+    const result = store.listReviews({ rig: "rig-b" });
+    expect(result.total).toBe(1);
+    expect(result.rows[0]!.trace_id).toBe("t-3");
+  });
+});
+
+describe("getReviewFindings — returns findings for a trace", () => {
+  let store: FleetStore;
+  beforeEach(() => {
+    const db = freshDb();
+    store = new FleetStore(db);
+    store.upsertReviewRun(run({ traceId: "t-1" }), [
+      finding({ runTraceId: "t-1", findingId: "f-1", score: 80, verdict: "MUST_FIX" }),
+      finding({ runTraceId: "t-1", findingId: "f-2", score: 40, verdict: "SUGGESTION" }),
+    ]);
+  });
+
+  it("returns findings ordered by score descending", () => {
+    const findings = store.getReviewFindings("t-1");
+    expect(findings).toHaveLength(2);
+    expect(findings[0]!.finding_id).toBe("f-1");
+    expect(findings[1]!.finding_id).toBe("f-2");
+  });
+
+  it("returns empty array for unknown trace", () => {
+    expect(store.getReviewFindings("nonexistent")).toHaveLength(0);
+  });
+});
+
+describe("listSnapshots — query with filters", () => {
+  let store: FleetStore;
+  beforeEach(() => {
+    const db = freshDb();
+    store = new FleetStore(db);
+    store.upsertSnapshot(snapshot({ day: "2026-10-05", seatSession: "s1", rigName: "rig-a" }));
+    store.upsertSnapshot(snapshot({ day: "2026-10-06", seatSession: "s2", rigName: "rig-a" }));
+    store.upsertSnapshot(snapshot({ day: "2026-10-07", seatSession: "s3", rigName: "rig-b" }));
+  });
+
+  it("returns all snapshots unfiltered", () => {
+    const result = store.listSnapshots();
+    expect(result.total).toBe(3);
+  });
+
+  it("filters by rig name", () => {
+    const result = store.listSnapshots({ rig: "rig-a" });
+    expect(result.total).toBe(2);
+  });
+
+  it("filters by date range", () => {
+    const result = store.listSnapshots({ since: "2026-10-06" });
+    expect(result.total).toBe(2);
+    expect(result.rows.every((r) => r.day >= "2026-10-06")).toBe(true);
+  });
+
+  it("respects limit", () => {
+    const result = store.listSnapshots({ limit: 1 });
+    expect(result.rows).toHaveLength(1);
+    expect(result.total).toBe(3);
+  });
+});
+
+describe("pagination input validation", () => {
+  let store: FleetStore;
+  beforeEach(() => {
+    const db = freshDb();
+    store = new FleetStore(db);
+    for (let i = 0; i < 5; i++) {
+      store.upsertDigest(digest({ nativeSessionId: `sess-${i}` }));
+    }
+  });
+
+  it("clamps negative limit to 1", () => {
+    const result = store.listDigests({ limit: -1 });
+    expect(result.rows).toHaveLength(1);
+  });
+
+  it("clamps NaN limit to default 50", () => {
+    const result = store.listDigests({ limit: NaN });
+    expect(result.rows).toHaveLength(5);
+  });
+
+  it("clamps negative offset to 0", () => {
+    const result = store.listDigests({ offset: -5 });
+    expect(result.rows).toHaveLength(5);
+  });
+
+  it("clamps NaN offset to 0", () => {
+    const result = store.listDigests({ offset: NaN });
+    expect(result.rows).toHaveLength(5);
+  });
+
+  it("until date-only value includes same-day rows", () => {
+    const db = freshDb();
+    const s = new FleetStore(db);
+    s.upsertSnapshot(snapshot({ day: "2026-10-05", seatSession: "s1" }));
+    s.upsertSnapshot(snapshot({ day: "2026-10-06", seatSession: "s2" }));
+    s.upsertSnapshot(snapshot({ day: "2026-10-07", seatSession: "s3" }));
+    const result = s.listSnapshots({ until: "2026-10-06" });
+    expect(result.total).toBe(2);
+  });
+});
