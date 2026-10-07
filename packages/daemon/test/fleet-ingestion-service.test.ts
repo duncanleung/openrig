@@ -5,7 +5,7 @@ import { reviewRunsSchema } from "../src/db/migrations/097_review_runs.js";
 import { reviewFindingsSchema } from "../src/db/migrations/098_review_findings.js";
 import { dailyTokenSnapshotsSchema } from "../src/db/migrations/099_daily_token_snapshots.js";
 import { FleetStore } from "../src/domain/fleet-store.js";
-import { FleetIngestionService } from "../src/domain/fleet-ingestion-service.js";
+import { FleetIngestionService, resolveFleetReconcileIntervalMs } from "../src/domain/fleet-ingestion-service.js";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -554,5 +554,80 @@ describe("overlap guard — concurrent reconcile calls", () => {
 
     const r2 = await svc.reconcile();
     expect(r2.skippedOverlap).toBeUndefined();
+  });
+
+  it("force reconcile waits for active run then runs its own", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "fleet-overlap-"));
+    const db = freshDb();
+    const svc = makeService(db, tmpDir);
+
+    const first = svc.reconcile();
+    const forced = svc.reconcile({ force: true });
+
+    const [r1, r2] = await Promise.all([first, forced]);
+
+    expect(r1.skippedOverlap).toBeUndefined();
+    expect(r2.skippedOverlap).toBeUndefined();
+    expect(r1).not.toBe(r2);
+  });
+
+  it("non-force call after a forced run completes works normally", async () => {
+    const tmpDir = mkdtempSync(join(tmpdir(), "fleet-overlap-"));
+    const db = freshDb();
+    const svc = makeService(db, tmpDir);
+
+    await svc.reconcile({ force: true });
+    const r = await svc.reconcile();
+    expect(r.skippedOverlap).toBeUndefined();
+  });
+});
+
+describe("resolveFleetReconcileIntervalMs — env var validation", () => {
+  it("returns default for undefined", () => {
+    expect(resolveFleetReconcileIntervalMs(undefined)).toBe(5 * 60 * 1000);
+  });
+
+  it("returns default for empty string", () => {
+    expect(resolveFleetReconcileIntervalMs("")).toBe(5 * 60 * 1000);
+  });
+
+  it("returns default for non-numeric input", () => {
+    expect(resolveFleetReconcileIntervalMs("abc")).toBe(5 * 60 * 1000);
+  });
+
+  it("returns default for negative values", () => {
+    expect(resolveFleetReconcileIntervalMs("-1")).toBe(5 * 60 * 1000);
+  });
+
+  it("returns default for zero", () => {
+    expect(resolveFleetReconcileIntervalMs("0")).toBe(5 * 60 * 1000);
+  });
+
+  it("returns default for values below minimum (60s)", () => {
+    expect(resolveFleetReconcileIntervalMs("1000")).toBe(5 * 60 * 1000);
+  });
+
+  it("accepts valid values at the minimum", () => {
+    expect(resolveFleetReconcileIntervalMs("60000")).toBe(60000);
+  });
+
+  it("accepts valid values in range", () => {
+    expect(resolveFleetReconcileIntervalMs("300000")).toBe(300000);
+  });
+
+  it("clamps values above maximum (24h) to the maximum", () => {
+    expect(resolveFleetReconcileIntervalMs("86400001")).toBe(86_400_000);
+  });
+
+  it("clamps overflow values that exceed Node timer limit", () => {
+    expect(resolveFleetReconcileIntervalMs("2147483648")).toBe(86_400_000);
+  });
+
+  it("returns default for trailing-junk strings like '300000ms'", () => {
+    expect(resolveFleetReconcileIntervalMs("300000ms")).toBe(5 * 60 * 1000);
+  });
+
+  it("returns default for floating point values", () => {
+    expect(resolveFleetReconcileIntervalMs("1500.7")).toBe(5 * 60 * 1000);
   });
 });

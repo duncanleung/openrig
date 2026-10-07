@@ -9,7 +9,7 @@ import { resolveDaemonDbPath } from "./daemon-db-path.js";
 import { createDaemon } from "./startup.js";
 import { resolveBindPlan } from "./domain/bind-plan.js";
 import { runQueueRetentionSweep, RETENTION_DEFAULTS } from "./domain/queue-retention.js";
-import { FleetIngestionService, startFleetIngestionScheduler } from "./domain/fleet-ingestion-service.js";
+import { FleetIngestionService, startFleetIngestionScheduler, resolveFleetReconcileIntervalMs } from "./domain/fleet-ingestion-service.js";
 import { FleetStore } from "./domain/fleet-store.js";
 import {
   createStuckSweepStatus,
@@ -378,10 +378,10 @@ export async function startServer(port?: number) {
         // OPR.0.4.6.FS-1 W2 — boot sweep + daily retention tick (bounded,
         // yields between batches; a sweep failure is logged, never fatal).
         retentionTimer = startQueueRetentionScheduler({ ...deps, fleetIngestion: deps.fleetIngestion });
-        const fleetReconcileIntervalMs = process.env.OPENRIG_FLEET_RECONCILE_INTERVAL_MS
-          ? parseInt(process.env.OPENRIG_FLEET_RECONCILE_INTERVAL_MS, 10) || 5 * 60 * 1000
-          : 5 * 60 * 1000;
-        fleetIngestionTimer = startFleetIngestionScheduler(deps.fleetIngestion, fleetReconcileIntervalMs);
+        fleetIngestionTimer = startFleetIngestionScheduler(
+          deps.fleetIngestion,
+          resolveFleetReconcileIntervalMs(process.env.OPENRIG_FLEET_RECONCILE_INTERVAL_MS),
+        );
         // S02 — the standing stuck sweep: nobody has to remember to run the verbs.
         stuckSweepTimer = startStuckSweepScheduler(deps);
         // S01 — wake-or-escalate on batons: a failed baton wake retries on schedule,
