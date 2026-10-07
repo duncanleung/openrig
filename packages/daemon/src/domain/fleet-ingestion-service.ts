@@ -681,6 +681,18 @@ export class FleetIngestionService {
        ORDER BY captured_at ASC, id ASC
     `).all(seatSession, day) as Array<{ total_input_tokens: number | null; total_output_tokens: number | null; captured_at: string }>;
 
+    // Resolve model, rig name, and seat name from the most recent sample's node_id.
+    const identity = this.db.prepare(`
+      SELECT n.model, r.name AS rig_name, n.logical_id AS seat_name
+        FROM usage_samples us
+        JOIN nodes n ON n.id = us.node_id
+        LEFT JOIN rigs r ON r.id = n.rig_id
+       WHERE us.lane = 'context' AND us.seat_session = ?
+         AND date(us.captured_at) = ? AND us.node_id IS NOT NULL
+       ORDER BY us.captured_at DESC, us.id DESC
+       LIMIT 1
+    `).get(seatSession, day) as { model: string | null; rig_name: string | null; seat_name: string | null } | undefined;
+
     const allSamples = prevDaySample ? [prevDaySample, ...samples] : samples;
 
     let inputDelta = 0;
@@ -704,9 +716,9 @@ export class FleetIngestionService {
     return {
       day,
       seatSession,
-      rigName: null,
-      seatName: null,
-      model: null,
+      rigName: identity?.rig_name ?? null,
+      seatName: identity?.seat_name ?? null,
+      model: identity?.model ?? null,
       inputTokensDelta: inputDelta,
       outputTokensDelta: outputDelta,
       totalTokensDelta: inputDelta + outputDelta,
