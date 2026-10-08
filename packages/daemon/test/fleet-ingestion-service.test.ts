@@ -4,6 +4,7 @@ import { sessionDigestsSchema } from "../src/db/migrations/096_session_digests.j
 import { reviewRunsSchema } from "../src/db/migrations/097_review_runs.js";
 import { reviewFindingsSchema } from "../src/db/migrations/098_review_findings.js";
 import { dailyTokenSnapshotsSchema } from "../src/db/migrations/099_daily_token_snapshots.js";
+import { digestTokenUsageSchema } from "../src/db/migrations/100_digest_token_usage.js";
 import { FleetStore } from "../src/domain/fleet-store.js";
 import { FleetIngestionService, resolveFleetReconcileIntervalMs } from "../src/domain/fleet-ingestion-service.js";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
@@ -57,6 +58,7 @@ function freshDb(): Database {
   db.exec(reviewRunsSchema.sql);
   db.exec(reviewFindingsSchema.sql);
   db.exec(dailyTokenSnapshotsSchema.sql);
+  db.exec(digestTokenUsageSchema.sql);
   return db;
 }
 
@@ -204,6 +206,113 @@ describe("FleetIngestionService — rollUpSnapshots", () => {
     const result = await svc.rollUpSnapshots({ days: 2 });
 
     expect(result.snapshotsUpserted).toBe(0);
+  });
+});
+
+// ── Token usage wiring (adaptDigest) ────────────────────────────────────────
+
+describe("FleetIngestionService — token usage in adaptDigest", () => {
+  let db: Database;
+  let tmpDir: string;
+  let reducerPath: string;
+
+  beforeEach(() => {
+    db = freshDb();
+    tmpDir = mkdtempSync(join(tmpdir(), "fleet-token-"));
+    reducerPath = join(tmpDir, "reducer.mjs");
+    writeFileSync(reducerPath, `
+      const output = {
+        seat: "test-seat",
+        totalTurns: 3,
+        conversationTurns: 1,
+        toolCalls: { Read: 2, Bash: 1 },
+        repeatedReads: [],
+        reviewFindings: [],
+        handoffEvents: [],
+        claudeMdLoaded: [],
+        errors: [],
+        irreversibleActions: [],
+        compactionBoundaries: [],
+        compactionLosses: [],
+        turnTokenUsage: [
+          { turn: 1, input_tokens: 100, output_tokens: 50, cache_creation_input_tokens: 200, cache_read_input_tokens: 300 },
+          { turn: 2, input_tokens: 150, output_tokens: 80, cache_creation_input_tokens: 0, cache_read_input_tokens: 500 },
+          { turn: 3, input_tokens: 50, output_tokens: 30, cache_creation_input_tokens: 100, cache_read_input_tokens: 400 },
+        ],
+        tokenTotals: { input_tokens: 300, output_tokens: 160, cache_creation_input_tokens: 300, cache_read_input_tokens: 1200 },
+      };
+      process.stdout.write(JSON.stringify(output));
+    `);
+  });
+
+  it("stores per-turn token usage and aggregate totals from reducer output", async () => {
+    const projectsDir = join(tmpDir, ".claude", "projects", "test-project");
+    mkdirSync(projectsDir, { recursive: true });
+    const sessionId = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    writeFileSync(join(projectsDir, `${sessionId}.jsonl`), '{"type":"test"}\n');
+
+    const svc = makeService(db, tmpDir, reducerPath);
+    const result = await svc.reconcileDigests();
+
+    expect(result.ingested).toBe(1);
+
+    const row = db.prepare(
+      "SELECT token_usage, total_input_tokens, total_output_tokens, total_cache_creation_tokens, total_cache_read_tokens FROM session_digests WHERE native_session_id = ?",
+    ).get(sessionId) as Record<string, unknown>;
+
+    expect(row).toBeDefined();
+    expect(row.total_input_tokens).toBe(300);
+    expect(row.total_output_tokens).toBe(160);
+    expect(row.total_cache_creation_tokens).toBe(300);
+    expect(row.total_cache_read_tokens).toBe(1200);
+
+    const tokenUsage = JSON.parse(row.token_usage as string) as Array<Record<string, unknown>>;
+    expect(tokenUsage).toHaveLength(3);
+    expect(tokenUsage[0]).toEqual({
+      turn: 1, input_tokens: 100, output_tokens: 50,
+      cache_creation_input_tokens: 200, cache_read_input_tokens: 300,
+    });
+  });
+
+  it("defaults token fields to zero when reducer output has no tokenTotals", async () => {
+    const noTokenReducer = join(tmpDir, "reducer-no-tokens.mjs");
+    writeFileSync(noTokenReducer, `
+      const output = {
+        seat: "no-tokens",
+        totalTurns: 1,
+        conversationTurns: 0,
+        toolCalls: {},
+        repeatedReads: [],
+        reviewFindings: [],
+        handoffEvents: [],
+        claudeMdLoaded: [],
+        errors: [],
+        irreversibleActions: [],
+        compactionBoundaries: [],
+        compactionLosses: [],
+      };
+      process.stdout.write(JSON.stringify(output));
+    `);
+
+    const projectsDir = join(tmpDir, ".claude", "projects", "test-project");
+    mkdirSync(projectsDir, { recursive: true });
+    const sessionId = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
+    writeFileSync(join(projectsDir, `${sessionId}.jsonl`), '{"type":"test"}\n');
+
+    const svc = makeService(db, tmpDir, noTokenReducer);
+    const result = await svc.reconcileDigests();
+
+    expect(result.ingested).toBe(1);
+
+    const row = db.prepare(
+      "SELECT total_input_tokens, total_output_tokens, total_cache_creation_tokens, total_cache_read_tokens, token_usage FROM session_digests WHERE native_session_id = ?",
+    ).get(sessionId) as Record<string, unknown>;
+
+    expect(row.total_input_tokens).toBe(0);
+    expect(row.total_output_tokens).toBe(0);
+    expect(row.total_cache_creation_tokens).toBe(0);
+    expect(row.total_cache_read_tokens).toBe(0);
+    expect(JSON.parse(row.token_usage as string)).toEqual([]);
   });
 });
 

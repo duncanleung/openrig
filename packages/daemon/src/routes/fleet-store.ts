@@ -85,6 +85,11 @@ function normalizeDigest(body: Record<string, unknown>): SessionDigestInput | st
     irreversibleActions: strOrDefault(body.irreversibleActions, "[]"),
     compactionBoundaries: strOrDefault(body.compactionBoundaries, "[]"),
     compactionLosses: strOrDefault(body.compactionLosses, "[]"),
+    tokenUsage: strOrDefault(body.tokenUsage, "[]"),
+    totalInputTokens: typeof body.totalInputTokens === "number" ? body.totalInputTokens : 0,
+    totalOutputTokens: typeof body.totalOutputTokens === "number" ? body.totalOutputTokens : 0,
+    totalCacheCreationTokens: typeof body.totalCacheCreationTokens === "number" ? body.totalCacheCreationTokens : 0,
+    totalCacheReadTokens: typeof body.totalCacheReadTokens === "number" ? body.totalCacheReadTokens : 0,
     sourceHash: strOrNull(body.sourceHash),
     parserVersion: strOrNull(body.parserVersion),
   };

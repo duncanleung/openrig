@@ -26,6 +26,11 @@ export interface SessionDigestInput {
   irreversibleActions: string;
   compactionBoundaries: string;
   compactionLosses: string;
+  tokenUsage: string;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCacheCreationTokens: number;
+  totalCacheReadTokens: number;
   sourceHash: string | null;
   parserVersion: string | null;
 }
@@ -205,6 +210,8 @@ export class FleetStore {
         tool_calls, repeated_reads, review_findings, handoff_events,
         claude_md_loaded, errors, irreversible_actions,
         compaction_boundaries, compaction_losses,
+        token_usage, total_input_tokens, total_output_tokens,
+        total_cache_creation_tokens, total_cache_read_tokens,
         source_hash, parser_version
       ) VALUES (
         @rigName, @seatSession, @seatName, @nodeLogicalId, @rigId, @nodeId,
@@ -214,6 +221,8 @@ export class FleetStore {
         @toolCalls, @repeatedReads, @reviewFindings, @handoffEvents,
         @claudeMdLoaded, @errors, @irreversibleActions,
         @compactionBoundaries, @compactionLosses,
+        @tokenUsage, @totalInputTokens, @totalOutputTokens,
+        @totalCacheCreationTokens, @totalCacheReadTokens,
         @sourceHash, @parserVersion
       )
       ON CONFLICT(native_session_id) DO UPDATE SET
@@ -239,6 +248,11 @@ export class FleetStore {
         irreversible_actions = excluded.irreversible_actions,
         compaction_boundaries = excluded.compaction_boundaries,
         compaction_losses = excluded.compaction_losses,
+        token_usage = excluded.token_usage,
+        total_input_tokens = excluded.total_input_tokens,
+        total_output_tokens = excluded.total_output_tokens,
+        total_cache_creation_tokens = excluded.total_cache_creation_tokens,
+        total_cache_read_tokens = excluded.total_cache_read_tokens,
         source_hash = excluded.source_hash,
         parser_version = excluded.parser_version,
         ingested_at = datetime('now')
