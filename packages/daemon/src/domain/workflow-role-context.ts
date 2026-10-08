@@ -58,7 +58,9 @@ export function roleResolutionContext(
     boundRig,
     candidatesForRig: () => {
       const rig = db
-        .prepare(`SELECT id FROM rigs WHERE name = ? ORDER BY created_at LIMIT 1`)
+        .prepare(
+          `SELECT id FROM rigs WHERE name = ? AND archived_at IS NULL ORDER BY created_at DESC LIMIT 1`,
+        )
         .get(boundRig) as { id: string } | undefined;
       if (!rig) return null;
       const entries = attachTerminalActivityAndWork(getNodeInventory(db, rig.id), { db });
@@ -110,7 +112,7 @@ export function rigDeclaresRole(
     .prepare(
       `SELECT COUNT(*) as c FROM nodes n
          JOIN rigs r ON r.id = n.rig_id
-        WHERE r.name = ? AND n.role = ?`,
+        WHERE r.name = ? AND r.archived_at IS NULL AND n.role = ?`,
     )
     .get(boundRig, role) as { c: number };
   return row.c > 0;
@@ -139,7 +141,9 @@ export function rigMemberExists(
   sessionRef: string,
 ): boolean {
   const rig = db
-    .prepare(`SELECT id FROM rigs WHERE name = ? ORDER BY created_at LIMIT 1`)
+    .prepare(
+      `SELECT id FROM rigs WHERE name = ? AND archived_at IS NULL ORDER BY created_at DESC LIMIT 1`,
+    )
     .get(rigName) as { id: string } | undefined;
   if (!rig) return false;
   return getNodeInventory(db, rig.id).some(
