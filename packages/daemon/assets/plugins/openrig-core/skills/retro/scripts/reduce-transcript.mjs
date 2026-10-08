@@ -78,6 +78,7 @@ const irreversibleActions = []; // { command (truncated), kind, turn }
 // Per-turn token usage
 const turnTokenUsage = [];      // { turn, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens }
 let tokenTotals = { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
+const seenUsageIds = new Set();  // dedupe usage by message.id to avoid multi-line inflation
 
 // Compaction loss tracking
 const compactionBoundaries = [];     // turn numbers where compaction occurred
@@ -87,11 +88,12 @@ let currentSegmentIdx = 0;
 // Map tool_use_id → { name, turn } so we can correlate tool results
 const pendingToolUse = new Map();
 let lineIdx = 0;
+let skippedLines = 0;
 
 for (const line of rawLines) {
   lineIdx++;
   let obj;
-  try { obj = JSON.parse(line); } catch { continue; }
+  try { obj = JSON.parse(line); } catch { if (line.trim()) skippedLines++; continue; }
 
   // ── Seat name ──────────────────────────────────────────────────────────────
   if (obj.type === "agent-name") {
@@ -106,9 +108,11 @@ for (const line of rawLines) {
     const hasAction = content.some(c => c.type === "tool_use" || c.type === "text");
     if (hasAction) totalTurns++;
 
-    // Extract token usage from assistant message
+    // Extract token usage from assistant message (dedupe by message.id)
     const usage = obj.message?.usage;
-    if (usage && hasAction) {
+    const usageId = obj.message?.id ?? obj.requestId;
+    if (usage && hasAction && !(usageId && seenUsageIds.has(usageId))) {
+      if (usageId) seenUsageIds.add(usageId);
       const turnUsage = {
         turn: totalTurns,
         input_tokens: usage.input_tokens ?? 0,
@@ -291,6 +295,11 @@ const digest = {
   compactionLosses,
   turnTokenUsage,
   tokenTotals,
+  skippedLines,
 };
+
+if (skippedLines > 0) {
+  process.stderr.write(`warning: ${skippedLines} malformed JSONL line(s) skipped in ${jsonlPath}\n`);
+}
 
 process.stdout.write(JSON.stringify(digest, null, 2) + "\n");

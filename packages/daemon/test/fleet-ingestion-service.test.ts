@@ -316,6 +316,56 @@ describe("FleetIngestionService — token usage in adaptDigest", () => {
   });
 });
 
+// ── Token usage dedup (real reducer, multi-line JSONL) ────────────────────────
+
+describe("FleetIngestionService — token usage dedup across multi-line messages", () => {
+  let db: Database;
+  let tmpDir: string;
+
+  beforeEach(() => {
+    db = freshDb();
+    tmpDir = mkdtempSync(join(tmpdir(), "fleet-dedup-"));
+  });
+
+  it("deduplicates usage when one message.id spans text + tool_use lines", async () => {
+    const realReducer = join(__dirname, "..", "assets", "plugins", "openrig-core", "skills", "retro", "scripts", "reduce-transcript.mjs");
+    const projectsDir = join(tmpDir, ".claude", "projects", "test-project");
+    mkdirSync(projectsDir, { recursive: true });
+    const sessionId = "dedup-test-aaaa-bbbb-cccc-dddddddddddd";
+
+    // 4 JSONL lines for one API response: thinking, text, tool_use, tool_use
+    // All share message.id and carry identical usage
+    const msgId = "msg_test_dedup_001";
+    const usage = { input_tokens: 100, output_tokens: 200, cache_creation_input_tokens: 500, cache_read_input_tokens: 1000 };
+    const lines = [
+      JSON.stringify({ type: "assistant", message: { id: msgId, content: [{ type: "thinking", thinking: "hmm" }], usage } }),
+      JSON.stringify({ type: "assistant", message: { id: msgId, content: [{ type: "text", text: "hello" }], usage } }),
+      JSON.stringify({ type: "assistant", message: { id: msgId, content: [{ type: "tool_use", id: "tu_1", name: "Read", input: { file_path: "/tmp/x" } }], usage } }),
+      JSON.stringify({ type: "assistant", message: { id: msgId, content: [{ type: "tool_use", id: "tu_2", name: "Bash", input: { command: "ls" } }], usage } }),
+    ];
+    writeFileSync(join(projectsDir, `${sessionId}.jsonl`), lines.join("\n") + "\n");
+
+    const svc = makeService(db, tmpDir, realReducer);
+    const result = await svc.reconcileDigests();
+
+    expect(result.ingested).toBe(1);
+
+    const row = db.prepare(
+      "SELECT token_usage, total_input_tokens, total_output_tokens, total_cache_creation_tokens, total_cache_read_tokens FROM session_digests WHERE native_session_id = ?",
+    ).get(sessionId) as Record<string, unknown>;
+
+    expect(row).toBeDefined();
+    // Should count usage exactly once, not 3x (text + 2 tool_use pass hasAction)
+    expect(row.total_input_tokens).toBe(100);
+    expect(row.total_output_tokens).toBe(200);
+    expect(row.total_cache_creation_tokens).toBe(500);
+    expect(row.total_cache_read_tokens).toBe(1000);
+
+    const tokenUsage = JSON.parse(row.token_usage as string) as Array<Record<string, unknown>>;
+    expect(tokenUsage).toHaveLength(1);
+  });
+});
+
 // ── Digest discovery (filesystem) ───────────────────────────────────────────
 
 describe("FleetIngestionService — reconcileDigests (fs)", () => {
