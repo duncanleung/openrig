@@ -46,7 +46,7 @@ export interface SnapshotRollupResult {
   snapshotsUpserted: number;
 }
 
-const PARSER_VERSION = "reduce-transcript.mjs@1";
+const PARSER_VERSION = "reduce-transcript.mjs@2";
 const MAX_CONCURRENT_REDUCERS = 3;
 
 function sha256Hex(data: Buffer | string): string {
@@ -186,9 +186,9 @@ function adaptDigest(
     handoffEvents: str(reducerOutput.handoffEvents),
     claudeMdLoaded: str(reducerOutput.claudeMdLoaded),
     errors: str(reducerOutput.errors),
-    irreversibleActions: "[]",
-    compactionBoundaries: "[]",
-    compactionLosses: "[]",
+    irreversibleActions: str(reducerOutput.irreversibleActions),
+    compactionBoundaries: str(reducerOutput.compactionBoundaries),
+    compactionLosses: str(reducerOutput.compactionLosses),
     sourceHash: hash,
     parserVersion: PARSER_VERSION,
   };
@@ -408,9 +408,9 @@ export class FleetIngestionService {
         const hash = sourceHash(filePath);
         if (!opts?.force && hash !== null) {
           const existing = this.db.prepare(
-            "SELECT source_hash FROM session_digests WHERE native_session_id = ?",
-          ).get(sessionIdFromPath(filePath)) as { source_hash: string | null } | undefined;
-          if (existing?.source_hash === hash) {
+            "SELECT source_hash, parser_version FROM session_digests WHERE native_session_id = ?",
+          ).get(sessionIdFromPath(filePath)) as { source_hash: string | null; parser_version: string | null } | undefined;
+          if (existing?.source_hash === hash && existing?.parser_version === PARSER_VERSION) {
             result.skipped++;
             return;
           }
