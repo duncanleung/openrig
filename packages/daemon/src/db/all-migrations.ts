@@ -103,6 +103,7 @@ import { sessionDigestsSchema } from "./migrations/096_session_digests.js";
 import { reviewRunsSchema } from "./migrations/097_review_runs.js";
 import { reviewFindingsSchema } from "./migrations/098_review_findings.js";
 import { dailyTokenSnapshotsSchema } from "./migrations/099_daily_token_snapshots.js";
+import { digestTokenUsageSchema } from "./migrations/100_digest_token_usage.js";
 import type { Migration } from "./migrate.js";
 
 import { rigInstallRootSchema } from "./migrations/096_rig_install_root.js";
@@ -210,4 +211,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   reviewRunsSchema,
   reviewFindingsSchema,
   dailyTokenSnapshotsSchema,
+  digestTokenUsageSchema,
 ];

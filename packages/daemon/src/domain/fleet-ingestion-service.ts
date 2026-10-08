@@ -46,7 +46,7 @@ export interface SnapshotRollupResult {
   snapshotsUpserted: number;
 }
 
-const PARSER_VERSION = "reduce-transcript.mjs@2";
+const PARSER_VERSION = "reduce-transcript.mjs@3";
 const MAX_CONCURRENT_REDUCERS = 3;
 
 function sha256Hex(data: Buffer | string): string {
@@ -159,6 +159,14 @@ function adaptDigest(
     return JSON.stringify(v ?? []);
   };
 
+  const numField = (obj: unknown, key: string): number => {
+    if (obj && typeof obj === "object") {
+      const v = (obj as Record<string, unknown>)[key];
+      if (typeof v === "number") return v;
+    }
+    return 0;
+  };
+
   const st = (() => {
     try { return statSync(filePath); } catch { return null; }
   })();
@@ -189,6 +197,11 @@ function adaptDigest(
     irreversibleActions: str(reducerOutput.irreversibleActions),
     compactionBoundaries: str(reducerOutput.compactionBoundaries),
     compactionLosses: str(reducerOutput.compactionLosses),
+    tokenUsage: str(reducerOutput.turnTokenUsage),
+    totalInputTokens: numField(reducerOutput.tokenTotals, "input_tokens"),
+    totalOutputTokens: numField(reducerOutput.tokenTotals, "output_tokens"),
+    totalCacheCreationTokens: numField(reducerOutput.tokenTotals, "cache_creation_input_tokens"),
+    totalCacheReadTokens: numField(reducerOutput.tokenTotals, "cache_read_input_tokens"),
     sourceHash: hash,
     parserVersion: PARSER_VERSION,
   };
