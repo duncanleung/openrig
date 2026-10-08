@@ -592,4 +592,21 @@ describe("FAC-3 C2: FR-5 member-exists instantiate advisory", () => {
     expect(rigDeclaresRole(db, "role-relaunch", "reviewer")).toBe(true);
     expect(rigDeclaresRole(db, "role-relaunch", "coder")).toBe(false);
   });
+
+  // ---------- RIG-65: registration gate skips archived rigs ----------
+
+  it("registration gate treats archived-only rig names as unregistered", async () => {
+    const archivedRig = rigRepo.createRig("torn-down");
+    seedSeat(archivedRig.id, "torn-down", "dev", "worker1", { role: "builder" });
+    rigRepo.archiveRig(archivedRig.id);
+
+    await expect(
+      runtime.instantiate({
+        specPath: writeSpec("archived-target.yaml", TYPO_SPEC),
+        rootObjective: "t",
+        createdBySession: "orch@torn-down",
+        targetRig: "torn-down",
+      }),
+    ).rejects.toThrow("is not a registered rig");
+  });
 });
