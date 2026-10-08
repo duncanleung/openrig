@@ -19,7 +19,7 @@ import { QueueRepository, QueueRepositoryError } from "../src/domain/queue-repos
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { PodRepository } from "../src/domain/pod-repository.js";
-import { rigMemberExists } from "../src/domain/workflow-role-context.js";
+import { rigMemberExists, roleResolutionContext, rigDeclaresRole } from "../src/domain/workflow-role-context.js";
 
 // OPR.0.4.6.FAC3 C2 — the FR-5 member-exists instantiate ADVISORY
 // (plan v1.1 §3 C2; PRD FR-5 ACs + BR-2). The engine bit (B) of the
@@ -559,5 +559,37 @@ describe("FAC-3 C2: FR-5 member-exists instantiate advisory", () => {
     expect(body).not.toMatch(/Date\.now|new Date|setTimeout|setInterval/);
     expect(body).not.toMatch(/Math\.random/);
     expect(body).not.toMatch(/tmux|attachAgentActivity|SeatActivityService/);
+  });
+
+  // ---------- RIG-48: archived rig with reused name ----------
+
+  it("rigMemberExists resolves the active rig, not the archived one, when a name is reused", () => {
+    const archivedRig = rigRepo.createRig("relaunch-test");
+    seedSeat(archivedRig.id, "relaunch-test", "dev", "builder1", { role: "builder" });
+    rigRepo.archiveRig(archivedRig.id);
+
+    const activeRig = rigRepo.createRig("relaunch-test");
+    seedSeat(activeRig.id, "relaunch-test", "dev", "builder1", { role: "builder" });
+
+    expect(rigMemberExists(db, "relaunch-test", "dev-builder1@relaunch-test")).toBe(true);
+
+    const ctx = roleResolutionContext(db, "relaunch-test");
+    expect(ctx).toBeDefined();
+    const candidates = ctx!.candidatesForRig();
+    expect(candidates).not.toBeNull();
+    expect(candidates!.length).toBeGreaterThan(0);
+    expect(candidates![0].lifecycleState).not.toBe("recoverable");
+  });
+
+  it("rigDeclaresRole skips archived rigs with the same name", () => {
+    const archivedRig = rigRepo.createRig("role-relaunch");
+    seedSeat(archivedRig.id, "role-relaunch", "dev", "coder1", { role: "coder" });
+    rigRepo.archiveRig(archivedRig.id);
+
+    const activeRig = rigRepo.createRig("role-relaunch");
+    seedSeat(activeRig.id, "role-relaunch", "qa", "reviewer1", { role: "reviewer" });
+
+    expect(rigDeclaresRole(db, "role-relaunch", "reviewer")).toBe(true);
+    expect(rigDeclaresRole(db, "role-relaunch", "coder")).toBe(false);
   });
 });
