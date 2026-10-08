@@ -480,13 +480,21 @@ export class WorkflowRuntime {
     //   - Neither set → unbound (byte-identical today's behavior).
     //
     // name→id re-resolves fresh at each later resolution site, so a rig
-    // vanishing mid-run fails loud there (WF-5 catches it).
+    // vanishing mid-run — or one whose only records are archived — fails
+    // loud there (WF-5 catches it).
+    const hasArchivedAt = (() => {
+      try {
+        return (this.db.prepare("PRAGMA table_info(rigs)").all() as Array<{ name?: string }>)
+          .some((r) => r.name === "archived_at");
+      } catch { return false; }
+    })();
+    const archiveFilter = hasArchivedAt ? " AND archived_at IS NULL" : "";
     const registeredRigNames = (): string[] =>
-      (this.db.prepare(`SELECT DISTINCT name FROM rigs ORDER BY name`).all() as Array<{ name: string }>).map(
+      (this.db.prepare(`SELECT DISTINCT name FROM rigs WHERE 1=1${archiveFilter} ORDER BY name`).all() as Array<{ name: string }>).map(
         (r) => r.name,
       );
     const rigIsRegistered = (name: string): boolean =>
-      this.db.prepare(`SELECT id FROM rigs WHERE name = ? LIMIT 1`).get(name) !== undefined;
+      this.db.prepare(`SELECT id FROM rigs WHERE name = ?${archiveFilter} LIMIT 1`).get(name) !== undefined;
 
     const advisories: string[] = [];
     let boundRig: string | null;
