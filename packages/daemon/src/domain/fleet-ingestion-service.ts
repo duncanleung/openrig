@@ -148,6 +148,38 @@ function lookupOccupantTenure(db: Database, nativeSessionId: string): {
   }
 }
 
+/** Resolve rig_name, seat_name, and seat_session from usage_samples closest to a timestamp.
+ *  Used for review runs that have no seat_session in their metrics.json. */
+function resolveIdentityByTimestamp(
+  db: Database,
+  isoTimestamp: string,
+): { rigName: string | null; seatName: string | null; seatSession: string | null } {
+  try {
+    const row = db.prepare(`
+      SELECT us.seat_session, r.name AS rig_name, n.logical_id AS seat_name
+        FROM usage_samples us
+        JOIN nodes n ON n.id = us.node_id
+        LEFT JOIN rigs r ON r.id = n.rig_id
+       WHERE us.node_id IS NOT NULL
+         AND us.captured_at >= datetime(?, '-2 hours')
+         AND us.captured_at <= datetime(?, '+30 minutes')
+       ORDER BY abs(julianday(us.captured_at) - julianday(?))
+       LIMIT 1
+    `).get(isoTimestamp, isoTimestamp, isoTimestamp) as {
+      seat_session: string | null;
+      rig_name: string | null;
+      seat_name: string | null;
+    } | undefined;
+    return {
+      rigName: row?.rig_name ?? null,
+      seatName: row?.seat_name ?? null,
+      seatSession: row?.seat_session ?? null,
+    };
+  } catch {
+    return { rigName: null, seatName: null, seatSession: null };
+  }
+}
+
 /** Resolve rig_name and seat_name from usage_samples by seat_session (same join pattern as rollUpSnapshots). */
 function resolveIdentityBySeatSession(
   db: Database,
@@ -500,6 +532,12 @@ export class FleetIngestionService {
             if (!run.seatName && fallback.seatName) run.seatName = fallback.seatName;
           }
         }
+        // Timestamp fallback: metrics.json has no seat_session — find closest usage_samples entry.
+        if (!run.rigName && typeof metricsRaw.completed_at === "string") {
+          const ts = resolveIdentityByTimestamp(this.db, metricsRaw.completed_at);
+          if (ts.rigName) run.rigName = ts.rigName;
+          if (!run.seatName && ts.seatName) run.seatName = ts.seatName;
+        }
 
         let findings: ReviewFindingInput[] | null = null;
         const reportPath = join(logDir, "report.json");
@@ -646,6 +684,12 @@ export class FleetIngestionService {
             if (fallback.rigName) run.rigName = fallback.rigName;
             if (!run.seatName && fallback.seatName) run.seatName = fallback.seatName;
           }
+        }
+        // Timestamp fallback: metrics.json has no seat_session — find closest usage_samples entry.
+        if (!run.rigName && typeof metricsRaw.completed_at === "string") {
+          const ts = resolveIdentityByTimestamp(this.db, metricsRaw.completed_at);
+          if (ts.rigName) run.rigName = ts.rigName;
+          if (!run.seatName && ts.seatName) run.seatName = ts.seatName;
         }
 
         let findings: ReviewFindingInput[] | null = null;
