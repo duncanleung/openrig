@@ -20,6 +20,7 @@ import {
   type ClosureReason,
 } from "./hot-potato-enforcer.js";
 import { isHumanSeatSession, validateHumanPark, validateHumanRoute } from "./human-route-enforcer.js";
+import type { ValidationGateResult } from "./validation-gate-enforcer.js";
 import {
   QueueWakeRepository,
   USAGE_LIMIT_BLOCKER_TAG,
@@ -303,6 +304,12 @@ export interface QueueCreateInput {
   /** P21 §4 era-stamp: the route passes `transport:v1` (sourceSession derived from the transport
    *  header chokepoint). Threaded onto the 'created' transition; absence = claimed-era. */
   identityProvenance?: string | null;
+  /**
+   * RIG-77 — set ONLY by the workflow domain's projection writes (same pattern
+   * as viaWorkflowVerb on QueueUpdateInput). Exempts the item from the
+   * validation-gate check (M3 workflow exemption).
+   */
+  viaWorkflowProjection?: boolean;
 }
 
 export interface QueueUpdateInput {
@@ -704,6 +711,11 @@ export class QueueRepository {
   private readonly workflowFrontierPredicate:
     | ((qitemId: string) => { instanceId: string; workflowName: string } | null)
     | undefined;
+  /** RIG-77 — injected by startup (never imported): the validation-gate
+   *  admission predicate. Absent = gate disabled (tests, bootstrap). */
+  private readonly validationGatePredicate:
+    | ((input: { destinationSession: string; tags: string[] | null; viaWorkflowProjection?: boolean }) => ValidationGateResult)
+    | undefined;
 
   constructor(
     db: Database.Database,
@@ -738,6 +750,12 @@ export class QueueRepository {
        */
       resolveOccupantGeneration?: (sessionName: string) => string | null;
       loadHumanRegistry?: () => LoadResult;
+      /**
+       * RIG-77 — the validation-gate admission predicate. Injected by startup
+       * (queue is the lower primitive; startup wires the domain modules). When
+       * absent the gate never fires.
+       */
+      validationGatePredicate?: (input: { destinationSession: string; tags: string[] | null; viaWorkflowProjection?: boolean }) => ValidationGateResult;
     }
   ) {
     this.db = db;
@@ -748,6 +766,7 @@ export class QueueRepository {
     this.destinationAdvisory = opts?.destinationAdvisory ?? (() => null);
     this.transport = opts?.transport;
     this.workflowFrontierPredicate = opts?.workflowFrontierPredicate;
+    this.validationGatePredicate = opts?.validationGatePredicate;
     this.resolveOccupantGeneration = opts?.resolveOccupantGeneration;
     this.loadHumanRegistryFn = opts?.loadHumanRegistry ?? (() => loadHumanRegistry());
     this.hasTargetRepoColumn = detectQueueColumn(db, "target_repo");
@@ -1548,6 +1567,16 @@ export class QueueRepository {
         missingFields: humanRoute.missingFields,
       });
     }
+    if (this.validationGatePredicate) {
+      const gateResult = this.validationGatePredicate({
+        destinationSession: input.destinationSession,
+        tags: input.tags ?? null,
+        viaWorkflowProjection: input.viaWorkflowProjection,
+      });
+      if (!gateResult.ok) {
+        throw new QueueRepositoryError(gateResult.code, gateResult.message, gateResult.meta);
+      }
+    }
     if (input.humanIntent != null && input.humanIntent !== "decision" && input.humanIntent !== "update") {
       throw new QueueRepositoryError("invalid_human_notification", "humanIntent must be decision or update; omission retains legacy decision behavior.");
     }
@@ -1683,7 +1712,14 @@ export class QueueRepository {
     const body = input.body ?? source.body;
     const priority = input.priority ?? source.priority;
     const tier = input.tier ?? source.tier;
-    const tags = input.tags ? JSON.stringify(input.tags) : (source.tags ? JSON.stringify(source.tags) : null);
+    // M2 (RIG-77): strip work:mechanical from inherited tags — bypass is explicit,
+    // not silently propagated through handoff chains.
+    const rawTags: string[] | null = input.tags
+      ? input.tags
+      : source.tags
+        ? source.tags.filter((t) => t !== "work:mechanical")
+        : null;
+    const tags = rawTags ? JSON.stringify(rawTags) : null;
     const chain = JSON.stringify([...(source.chainOfRecord ?? []), source.qitemId]);
     const targetRepo = input.targetRepo === undefined ? source.targetRepo : input.targetRepo;
 
@@ -1700,6 +1736,15 @@ export class QueueRepository {
       throw new QueueRepositoryError(humanRoute.code, humanRoute.message, {
         missingFields: humanRoute.missingFields,
       });
+    }
+    if (this.validationGatePredicate) {
+      const gateResult = this.validationGatePredicate({
+        destinationSession: input.toSession,
+        tags: rawTags,
+      });
+      if (!gateResult.ok) {
+        throw new QueueRepositoryError(gateResult.code, gateResult.message, gateResult.meta);
+      }
     }
 
     const events: Array<{ name: string; payload: import("./types.js").RigEvent }> = [];
@@ -1860,7 +1905,13 @@ export class QueueRepository {
     const body = input.body ?? source.body;
     const priority = input.priority ?? source.priority;
     const tier = input.tier ?? source.tier;
-    const tags = input.tags ? JSON.stringify(input.tags) : (source.tags ? JSON.stringify(source.tags) : null);
+    // M2 (RIG-77): strip work:mechanical from inherited tags.
+    const rawTagsHAC: string[] | null = input.tags
+      ? input.tags
+      : source.tags
+        ? source.tags.filter((t) => t !== "work:mechanical")
+        : null;
+    const tags = rawTagsHAC ? JSON.stringify(rawTagsHAC) : null;
     const chain = JSON.stringify([...(source.chainOfRecord ?? []), source.qitemId]);
     const targetRepo = input.targetRepo === undefined ? source.targetRepo : input.targetRepo;
 
@@ -1875,6 +1926,15 @@ export class QueueRepository {
       throw new QueueRepositoryError(humanRoute.code, humanRoute.message, {
         missingFields: humanRoute.missingFields,
       });
+    }
+    if (this.validationGatePredicate) {
+      const gateResult = this.validationGatePredicate({
+        destinationSession: input.toSession,
+        tags: rawTagsHAC,
+      });
+      if (!gateResult.ok) {
+        throw new QueueRepositoryError(gateResult.code, gateResult.message, gateResult.meta);
+      }
     }
 
     const events: Array<{ name: string; payload: import("./types.js").RigEvent }> = [];

@@ -1239,6 +1239,18 @@ export interface WorkspaceSpec {
   knowledgeRoot?: string;
 }
 
+/** RIG-77 — validation_gate YAML block in rigspec. */
+export interface ValidationGateConfigSpec {
+  /** "off" | "warn" | "enforce" — defaults to "warn" when the block is present. */
+  mode: "off" | "warn" | "enforce";
+  /** Glob-style session patterns accepted as validators (e.g. ["advisor@*"]). */
+  validators: string[];
+  /** Logical-id patterns that trigger the gate (e.g. ["dev.impl"]). */
+  impl_seats: string[];
+  /** ISO date; when set and today >= this, warn auto-promotes to enforce. */
+  warn_until?: string;
+}
+
 export interface RigSpec {
   /** Authored launch-warning choice; an explicit launch option takes precedence. */
   nonInterruptive?: boolean;
@@ -1256,6 +1268,8 @@ export interface RigSpec {
   services?: RigServicesSpec;
   /** PL-007 Workspace Primitive — optional typed workspace declaration. */
   workspace?: WorkspaceSpec;
+  /** RIG-77 — optional validation-gate policy for impl-seat dispatch. */
+  validationGate?: ValidationGateConfigSpec;
   pods: RigSpecPod[];
   edges: RigSpecCrossPodEdge[];
 }

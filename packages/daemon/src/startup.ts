@@ -100,6 +100,7 @@ import { configureSyncSiteRecorder } from "./domain/sync-site-wrap.js";
 import { RequestPhaseObserver } from "./domain/request-phase-observer.js";
 import { QueueRepository, isBlockerLive } from "./domain/queue-repository.js";
 import { createWorkflowFrontierPredicate } from "./domain/workflow-frontier-guard.js";
+import { createValidationGatePredicate } from "./domain/validation-gate-enforcer.js";
 import { InboxHandler } from "./domain/inbox-handler.js";
 import { OutboxHandler } from "./domain/outbox-handler.js";
 import { ProjectClassifier } from "./domain/project-classifier.js";
@@ -432,6 +433,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // INJECTED here (arch layering pin: the queue never imports the
     // workflow domain; startup wires them — the validateRig precedent).
     workflowFrontierPredicate: createWorkflowFrontierPredicate(db),
+    // RIG-77 — validation-gate admission guard (injected; same layering pin
+    // as workflowFrontierPredicate — queue never imports gate domain).
+    validationGatePredicate: createValidationGatePredicate(db),
     // GHOST-STAGE (h): resolve the source seat's atom-B generation for the handoff-nudge Sent: line
     // (same injected-predicate layering — the queue never imports the session domain).
     resolveOccupantGeneration: (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName),
