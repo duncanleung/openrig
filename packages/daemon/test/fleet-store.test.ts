@@ -570,3 +570,50 @@ describe("pagination input validation", () => {
     expect(result.total).toBe(2);
   });
 });
+
+describe("FleetStore.checkReviewExists", () => {
+  let db: Database;
+  let store: FleetStore;
+
+  beforeEach(() => {
+    db = freshDb();
+    store = new FleetStore(db);
+    store.upsertReviewRun(
+      run({ repo: "duncanleung/openrig", branch: "feat/fleet-store", headSha: "f698f89b" }),
+      [],
+    );
+  });
+
+  it("returns exists=true when repo + branch + sha all match", () => {
+    const result = store.checkReviewExists("duncanleung/openrig", "feat/fleet-store", "f698f89b");
+    expect(result.exists).toBe(true);
+    expect(result.traceId).toBe("trace-001");
+    expect(result.completedAt).toBeTruthy();
+  });
+
+  it("returns exists=false when sha does not match", () => {
+    const result = store.checkReviewExists("duncanleung/openrig", "feat/fleet-store", "deadbeef");
+    expect(result.exists).toBe(false);
+    expect(result.traceId).toBeNull();
+  });
+
+  it("returns exists=false when branch does not match", () => {
+    const result = store.checkReviewExists("duncanleung/openrig", "feat/other", "f698f89b");
+    expect(result.exists).toBe(false);
+  });
+
+  it("returns exists=false when repo does not match", () => {
+    const result = store.checkReviewExists("other-owner/openrig", "feat/fleet-store", "f698f89b");
+    expect(result.exists).toBe(false);
+  });
+
+  it("returns the most recent row when multiple reviews share the same sha", () => {
+    store.upsertReviewRun(
+      run({ traceId: "trace-002", repo: "duncanleung/openrig", branch: "feat/fleet-store", headSha: "f698f89b", completedAt: "2026-10-06T10:00:00Z", sourceHash: "ghi789" }),
+      [],
+    );
+    const result = store.checkReviewExists("duncanleung/openrig", "feat/fleet-store", "f698f89b");
+    expect(result.exists).toBe(true);
+    expect(result.traceId).toBe("trace-002");
+  });
+});

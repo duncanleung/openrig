@@ -399,6 +399,20 @@ export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
     }
   });
 
+  app.get("/reviews/check", (c) => {
+    try {
+      const q = c.req.query();
+      if (!q.repo || !q.branch || !q.sha) {
+        return c.json({ ok: false, code: "invalid_field", error: "repo, branch, and sha query parameters are required." }, 400);
+      }
+      const result = store().checkReviewExists(q.repo, q.branch, q.sha);
+      return c.json({ ok: true, ...result });
+    } catch (err) {
+      console.error("[fleet-store] GET /reviews/check error:", err instanceof Error ? err.message : String(err));
+      return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
+    }
+  });
+
   app.get("/reviews/:traceId/findings", (c) => {
     try {
       const traceId = c.req.param("traceId");

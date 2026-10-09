@@ -286,6 +286,35 @@ export function fleetCommand(depsOverride?: StatusDeps): Command {
     });
 
   command
+    .command("review-check")
+    .description("Check whether a review already exists for a repo + branch + HEAD SHA combination")
+    .argument("<repo>", "Repository name (e.g. duncanleung/openrig)")
+    .argument("<branch>", "Branch name")
+    .argument("<sha>", "HEAD commit SHA")
+    .option("--json", "Output as JSON")
+    .action(async (repo: string, branch: string, sha: string, opts: { json?: boolean }) => {
+      const client = await getClient();
+      if (!client) return;
+      const params = new URLSearchParams({ repo, branch, sha });
+      const response = await client.get<{ ok: boolean; exists?: boolean; traceId?: string | null; completedAt?: string | null; error?: string }>(`/api/fleet/reviews/check?${params}`);
+      if (response.status >= 400) {
+        console.error(`Error: ${response.data.error ?? "Unknown error"}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) {
+        console.log(JSON.stringify(response.data, null, 2));
+        return;
+      }
+      const d = response.data;
+      if (d.exists) {
+        console.log(`reviewed  trace=${d.traceId ?? "—"}  completed=${d.completedAt ?? "—"}`);
+      } else {
+        console.log("not-reviewed");
+      }
+    });
+
+  command
     .command("stats")
     .description("Show fleet store row counts and last ingestion timestamps")
     .action(async () => {

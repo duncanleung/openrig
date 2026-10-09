@@ -499,6 +499,24 @@ export class FleetStore {
     `).all(traceId) as ReviewFindingRow[];
   }
 
+  checkReviewExists(repo: string, branch: string, headSha: string): {
+    exists: boolean;
+    traceId: string | null;
+    completedAt: string | null;
+  } {
+    const row = this.db.prepare(`
+      SELECT trace_id, completed_at
+        FROM review_runs
+       WHERE repo = ? AND branch = ? AND head_sha = ?
+       ORDER BY completed_at DESC LIMIT 1
+    `).get(repo, branch, headSha) as { trace_id: string; completed_at: string | null } | undefined;
+    return {
+      exists: row !== undefined,
+      traceId: row?.trace_id ?? null,
+      completedAt: row?.completed_at ?? null,
+    };
+  }
+
   listSnapshots(filter: ListFilter = {}): { rows: SnapshotRow[]; total: number } {
     const { where, params } = this.buildWhere(filter, "rig_name", "seat_name", "day");
     const total = (this.db.prepare(`SELECT COUNT(*) AS c FROM daily_token_snapshots${where}`).get(...params) as { c: number }).c;
