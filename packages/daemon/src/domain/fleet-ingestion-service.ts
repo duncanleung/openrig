@@ -148,6 +148,27 @@ function lookupOccupantTenure(db: Database, nativeSessionId: string): {
   }
 }
 
+/** Resolve rig_name and seat_name from usage_samples by seat_session (same join pattern as rollUpSnapshots). */
+function resolveIdentityBySeatSession(
+  db: Database,
+  seatSession: string,
+): { rigName: string | null; seatName: string | null } {
+  try {
+    const row = db.prepare(`
+      SELECT r.name AS rig_name, n.logical_id AS seat_name
+        FROM usage_samples us
+        JOIN nodes n ON n.id = us.node_id
+        LEFT JOIN rigs r ON r.id = n.rig_id
+       WHERE us.seat_session = ? AND us.node_id IS NOT NULL
+       ORDER BY us.captured_at DESC, us.id DESC
+       LIMIT 1
+    `).get(seatSession) as { rig_name: string | null; seat_name: string | null } | undefined;
+    return { rigName: row?.rig_name ?? null, seatName: row?.seat_name ?? null };
+  } catch {
+    return { rigName: null, seatName: null };
+  }
+}
+
 function adaptDigest(
   reducerOutput: Record<string, unknown>,
   filePath: string,
@@ -432,6 +453,11 @@ export class FleetIngestionService {
         const reducerOutput = await runReducer(this.reducerPath, filePath);
         const identity = lookupOccupantTenure(this.db, sessionIdFromPath(filePath));
         const input = adaptDigest(reducerOutput, filePath, identity, hash);
+        if (!input.rigName && input.seatSession) {
+          const fallback = resolveIdentityBySeatSession(this.db, input.seatSession);
+          if (fallback.rigName) input.rigName = fallback.rigName;
+          if (!input.seatName && fallback.seatName) input.seatName = fallback.seatName;
+        }
         this.fleetStore.upsertDigest(input);
         result.ingested++;
       } catch (err) {
@@ -465,6 +491,15 @@ export class FleetIngestionService {
 
         const metricsRaw = JSON.parse(readFileSync(metricsPath, "utf-8")) as Record<string, unknown>;
         const run = adaptReviewRun(metricsRaw, logDir, hash);
+        if (!run.rigName) {
+          const ss = typeof metricsRaw.seat_session === "string" ? metricsRaw.seat_session
+            : typeof metricsRaw.seatSession === "string" ? metricsRaw.seatSession : null;
+          if (ss) {
+            const fallback = resolveIdentityBySeatSession(this.db, ss);
+            if (fallback.rigName) run.rigName = fallback.rigName;
+            if (!run.seatName && fallback.seatName) run.seatName = fallback.seatName;
+          }
+        }
 
         let findings: ReviewFindingInput[] | null = null;
         const reportPath = join(logDir, "report.json");
@@ -555,6 +590,11 @@ export class FleetIngestionService {
       const reducerOutput = await runReducer(this.reducerPath, transcriptPath);
       const identity = lookupOccupantTenure(this.db, nativeSessionId);
       const input = adaptDigest(reducerOutput, transcriptPath, identity, hash);
+      if (!input.rigName && input.seatSession) {
+        const fallback = resolveIdentityBySeatSession(this.db, input.seatSession);
+        if (fallback.rigName) input.rigName = fallback.rigName;
+        if (!input.seatName && fallback.seatName) input.seatName = fallback.seatName;
+      }
       this.fleetStore.upsertDigest(input);
 
       return { ingested: true, nativeSessionId };
@@ -598,6 +638,15 @@ export class FleetIngestionService {
 
         const metricsRaw = JSON.parse(readFileSync(metricsPath, "utf-8")) as Record<string, unknown>;
         const run = adaptReviewRun(metricsRaw, logDir, hash);
+        if (!run.rigName) {
+          const ss = typeof metricsRaw.seat_session === "string" ? metricsRaw.seat_session
+            : typeof metricsRaw.seatSession === "string" ? metricsRaw.seatSession : null;
+          if (ss) {
+            const fallback = resolveIdentityBySeatSession(this.db, ss);
+            if (fallback.rigName) run.rigName = fallback.rigName;
+            if (!run.seatName && fallback.seatName) run.seatName = fallback.seatName;
+          }
+        }
 
         let findings: ReviewFindingInput[] | null = null;
         const reportPath = join(logDir, "report.json");
