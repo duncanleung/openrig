@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import { randomBytes } from "node:crypto";
-import { Command } from "commander";
+import { Command, InvalidArgumentError } from "commander";
 import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, DaemonResponseError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
@@ -198,13 +198,16 @@ async function printQueueItemResult(
 // IMPL-SPEC §2.3-2.4.
 const SHOW_BODY_PREVIEW_MAX_CODEPOINTS = 512;
 
+// Commander option parser. InvalidArgumentError (like positiveIntArg/enumArg) is what Commander
+// renders as its usual "option ... argument ... is invalid" error; a plain Error would escape parse.
+const WAKE_DURATION_FORMAT = "must be a positive integer with an optional s, m or h suffix (for example 90s, 15m, 168h)";
 function wakeDurationSeconds(value: string): number {
   const match = /^(\d+)(s|m|h)?$/i.exec(value.trim());
-  if (!match) throw new Error("wake duration must be a positive integer with optional s, m, or h suffix");
+  if (!match) throw new InvalidArgumentError(`${WAKE_DURATION_FORMAT}; got '${value}'`);
   const amount = Number.parseInt(match[1]!, 10);
   const factor = match[2]?.toLowerCase() === "h" ? 3600 : match[2]?.toLowerCase() === "m" ? 60 : 1;
   const seconds = amount * factor;
-  if (!Number.isSafeInteger(seconds) || seconds <= 0) throw new Error("wake duration must be positive");
+  if (!Number.isSafeInteger(seconds) || seconds <= 0) throw new InvalidArgumentError(`${WAKE_DURATION_FORMAT}; got '${value}'`);
   return seconds;
 }
 
@@ -1049,8 +1052,9 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .description("Show the caller's queue position from the daemon's perspective")
     .option("--session <session>", "Caller's session name (defaults to OPENRIG_SESSION_NAME)")
     .option("--recent-limit <n>", "How many recent active qitems to include", "25")
+    .option("--work-candidates", "Also list labelled work candidates (tags, handoff ancestry, held and next work) for the refocus packet")
     .option("--json", "JSON output for agents")
-    .action(async (opts: { session?: string; recentLimit: string; json?: boolean }) => {
+    .action(async (opts: { session?: string; recentLimit: string; workCandidates?: boolean; json?: boolean }) => {
       const session = resolveCurrentSession(opts.session, "session");
       if (!session) return;
       const deps = getDeps();
@@ -1058,6 +1062,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         session,
         recentLimit: opts.recentLimit,
       });
+      if (opts.workCandidates) params.set("candidates", "1");
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>(`/api/queue/whoami?${params.toString()}`);
         printResult(opts.json ?? false, res.data, res.status);

@@ -21,7 +21,35 @@ export interface NativeProcessRow {
 export type NativeRuntime = "claude-code" | "codex";
 
 function tokens(command: string): string[] {
-  return command.match(/"[^"]*"|'[^']*'|\S+/g)?.map((token) => token.replace(/^['"]|['"]$/g, "")) ?? [];
+  // ps flattens argv: inline settings JSON retains its string delimiters.
+  // A quote inside a name or filename is literal, not a shell span delimiter.
+  const result: string[] = [];
+  let start = 0;
+  let quote: string | null = null;
+  const append = (end: number) => {
+    if (start === end) return;
+    const token = command.slice(start, end);
+    result.push(token[0] === '"' && token.at(-1) === '"'
+      ? token.slice(1, -1) : token);
+  };
+  for (let index = 0; index < command.length; index += 1) {
+    const char = command[index]!;
+    if (quote !== null) {
+      if (quote === '"' && char === "\\") { index += 1; continue; }
+      if (char === quote) quote = null;
+    } else if (char === '"' && (command.startsWith('"{', start) || command[start] === "{"
+      || command.startsWith("'{", start) || command.startsWith("--settings={", start)
+      || command.startsWith('--settings="', start))) {
+      quote = char;
+    } else if (/\s/.test(char)) {
+      append(index);
+      start = index + 1;
+    }
+  }
+  // Keep an unfinished structured value opaque too. Re-splitting it could
+  // promote text inside settings into apparent top-level identity options.
+  append(command.length);
+  return result;
 }
 
 function executableName(token: string): string {
@@ -41,22 +69,45 @@ function claudeExecutable(token: string, selectedExecutable?: string): boolean {
     && /\/\.local\/share\/claude\/versions\/\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(token);
 }
 
+// Nixpkgs packages Claude as a wrapper that execs its sibling `.claude-unwrapped`
+// (wrapProgram: `.claude-wrapped`) with argv[0] inherited. Linux truncates that OS
+// name to 15 bytes, so ucomm reads `.claude-unwrapp`.
+const NIX_WRAPPED_CLAUDE_NAMES = [".claude-unwrapped", ".claude-wrapped"];
+const TASK_COMM_LENGTH = 15;
+
+function osNameIs(osName: string, name: string): boolean {
+  return osName === name || (osName.length === TASK_COMM_LENGTH && name.startsWith(osName));
+}
+
+// Only the wrapped binary inside a claude-code store output, and when a launch froze
+// its executable, only the sibling of that wrapper.
+function nixWrappedClaudeExecutable(path: string, selectedExecutable?: string): boolean {
+  const match = path.match(/^(\/nix\/store\/[0-9a-df-np-sv-z]{32}-claude-code(?:-[^/]+)?\/bin)\/\.claude-(?:un)?wrapped$/);
+  if (!match || path.split("/").some(part => part === "." || part === "..")) return false;
+  return !selectedExecutable || selectedExecutable === `${match[1]}/claude`;
+}
+
 function claudeProcess(row: NativeProcessRow, selectedExecutable?: string): boolean {
   const argv0 = tokens(row.command)[0] ?? "";
   if (!claudeExecutable(argv0, selectedExecutable)) return false;
-  if (executableName(row.executableName ?? "") === executableName(argv0)) return true;
+  const osName = row.executableName ?? "";
+  if (executableName(osName) === executableName(argv0)) return true;
   // Native Claude can retain its versioned OS name while rewriting argv[0] to
-  // claude. A version only selects candidates for an OS path read; it is not proof.
-  return needsClaudeExecutablePath(row) && !!row.executablePath
-    && claudeExecutable(row.executablePath, selectedExecutable)
-    && executableName(row.executablePath) === executableName(row.executableName ?? "");
+  // claude, and a Nix wrapper leaves its wrapped OS name. Either name only selects
+  // candidates for an OS path read; it is not proof.
+  const path = row.executablePath;
+  if (!needsClaudeExecutablePath(row) || !path) return false;
+  if (claudeExecutable(path, selectedExecutable) && executableName(path) === executableName(osName)) return true;
+  return nixWrappedClaudeExecutable(path, selectedExecutable) && osNameIs(osName, path.split("/").pop()!);
 }
 
 function needsClaudeExecutablePath(row: NativeProcessRow): boolean {
   const argv0 = tokens(row.command)[0] ?? "";
+  const osName = row.executableName ?? "";
   return claudeExecutable(argv0)
-    && executableName(row.executableName ?? "") !== executableName(argv0)
-    && /^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(row.executableName ?? "");
+    && executableName(osName) !== executableName(argv0)
+    && (/^\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(osName)
+      || NIX_WRAPPED_CLAUDE_NAMES.some(name => osNameIs(osName, name)));
 }
 
 function commandUsesExpectedToken(command: string, runtime: NativeRuntime, expectedToken: string): boolean {
@@ -115,8 +166,13 @@ function claudeSessionToken(args: string[]): string | null {
       if (!value || value.startsWith("-")) return null;
       continue;
     }
+    if (arg === "--remote-control") {
+      if (args[index + 1] && !args[index + 1]!.startsWith("-")) index += 1;
+      continue;
+    }
     if (["--permission-mode", "--model", "--name", "--effort"].includes(arg)) { index += 1; continue; }
-    if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg) || arg === "--dangerously-skip-permissions") continue;
+    if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
+      || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
     const identity = arg.match(/^--(?:session-id|resume)(?:=(.*))?$/);
     if (!identity) return null; // Unknown argv is not positive identity proof.
     const value = identity[1] ?? args[++index];
@@ -140,7 +196,12 @@ function claudeSessionIdentity(args: string[]): string | null | { unparsed: true
       if (!value || value.startsWith("-")) return unparsed;
       continue;
     }
-    if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg) || arg === "--dangerously-skip-permissions") continue;
+    if (arg === "--remote-control") {
+      if (args[index + 1] && !args[index + 1]!.startsWith("-")) index += 1;
+      continue;
+    }
+    if (/^--(?:permission-mode|model|name|settings|effort)=/.test(arg)
+      || arg.startsWith("--remote-control=") || arg === "--dangerously-skip-permissions") continue;
     const identity = arg.match(/^--(?:session-id|resume)(?:=(.*))?$/);
     if (!identity) return unparsed; // Unknown argv is not positive identity proof.
     const value = identity[1] ?? args[++index];

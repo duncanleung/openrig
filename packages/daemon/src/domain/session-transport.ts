@@ -6,7 +6,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import type { SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
-import type { AgentActivityStore } from "./agent-activity-store.js";
+import { latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
 import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
@@ -150,8 +150,18 @@ const CLAUDE_MODE_FOOTER = /^(?:-- [A-Z]+ -- )?(?:⏵⏵ (?:accept edits|bypass 
 // Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
 // While a hook runs, the timer follows its label: "(running PostToolUse hook · 3m 12s · …)".
 const CLAUDE_LIVE_STATUS_PATTERN = /^[✶✢✳✻✽·*]\s+\S[^(]*(?:…|\.{3})\s+\((?:running [^()·]+ hook · )?(?:\d+h\s+)?(?:\d+m\s+)?\d+s\b/;
+// The same live row before Claude shows its timer: glyph, text, a trailing ellipsis and nothing
+// after it, as in "✻ Compacting conversation…" during a compaction's first seconds. Completed rows
+// ("✻ Crunched for 2s") have no trailing ellipsis. Only callers that must not send into a busy
+// pane opt in (ClassifyPaneOptions.timerlessStatusIsLive); ordinary send readiness is unchanged.
+const CLAUDE_TIMERLESS_STATUS_PATTERN = /^[✶✢✳✻✽·*]\s+\S.*(?:…|\.{3})$/;
 
-function findClaudeComposer(paneContent: string) {
+export interface ClassifyPaneOptions {
+  /** Treat a timer-less live status row above the composer as work in progress. */
+  timerlessStatusIsLive?: boolean;
+}
+
+function findClaudeComposer(paneContent: string, options: ClassifyPaneOptions = {}) {
   // Preserve columns: a multiline draft may contain indented border/prompt text.
   // This classifier scans at most 20 physical lines; captures can be taller.
   // Exhausting the scan without reaching the status head is unknown, not idle.
@@ -184,7 +194,10 @@ function findClaudeComposer(paneContent: string) {
   for (let i = statusStart; i >= 0; i--) {
     if (!lines[i]!.startsWith(indent)) break;
     const line = lines[i]!.slice(indent.length);
-    if ([CLAUDE_LIVE_STATUS_PATTERN, ...MID_WORK_PATTERNS].some((pattern) => pattern.test(line))) {
+    const livePatterns = options.timerlessStatusIsLive
+      ? [CLAUDE_LIVE_STATUS_PATTERN, CLAUDE_TIMERLESS_STATUS_PATTERN, ...MID_WORK_PATTERNS]
+      : [CLAUDE_LIVE_STATUS_PATTERN, ...MID_WORK_PATTERNS];
+    if (livePatterns.some((pattern) => pattern.test(line))) {
       liveStatus = truncateEvidence(line);
       headSeen = true;
       break;
@@ -219,7 +232,7 @@ function findPromptDraftBeforeFooter(paneContent: string): string | null {
   return truncateEvidence(priorTrimmed);
 }
 
-export function classifyPaneActivity(paneContent: string): PaneActivityClassification {
+export function classifyPaneActivity(paneContent: string, options: ClassifyPaneOptions = {}): PaneActivityClassification {
   const lastNonBlank = trimPaneLines(paneContent);
   if (lastNonBlank.length === 0) {
     return { state: "unknown", reason: "empty_capture", evidence: null };
@@ -237,7 +250,7 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
   const idleStatusBarLine = IDLE_STATUS_BAR_PATTERNS.some((pattern) => pattern.test(lastLine))
     ? lastLine
     : null;
-  const claudeComposer = findClaudeComposer(paneContent);
+  const claudeComposer = findClaudeComposer(paneContent, options);
   const oldQuestionEnd = promptScanLines.lastIndexOf(CLAUDE_QUESTION_FOOTER);
   // A complete later empty composer with a recognized Claude bar makes the preceding question history.
   // Keep draft handling and selectors without this dialog boundary unchanged.
@@ -295,7 +308,11 @@ export function classifyPaneActivity(paneContent: string): PaneActivityClassific
     };
   }
 
-  const midWorkEvidence = findPatternEvidence(recentLines, [...MID_WORK_PATTERNS, CLAUDE_LIVE_STATUS_PATTERN]);
+  const midWorkEvidence = findPatternEvidence(recentLines, [
+    ...MID_WORK_PATTERNS,
+    CLAUDE_LIVE_STATUS_PATTERN,
+    ...(options.timerlessStatusIsLive ? [CLAUDE_TIMERLESS_STATUS_PATTERN] : []),
+  ]);
   if (idleStatusBarLine && (!idleStatusBarLine.includes("⏵⏵ accept edits") || !midWorkEvidence)) {
     return {
       state: "agent_idle",
@@ -358,6 +375,8 @@ export async function probeSessionActivity(input: {
   /** S01/S02 P2: optional read-only observer of the capture this probe already takes. */
   captureObserver?: CaptureObserverSink;
   binding?: Omit<ObservedBinding, "sessionName">;
+  /** See ClassifyPaneOptions.timerlessStatusIsLive. */
+  timerlessStatusIsLive?: boolean;
 }): Promise<AgentActivity> {
   // Capture routing and observation labels must share the entry context. The
   // caller may reuse/mutate its input while hasSession is pending.
@@ -470,7 +489,7 @@ export async function probeSessionActivity(input: {
   try {
     const paneContent = await tmuxAdapter.capturePaneContent(sessionName, 20);
     const capturedAt = new Date().toISOString();
-    const classification = classifyPaneActivity(paneContent ?? "");
+    const classification = classifyPaneActivity(paneContent ?? "", { timerlessStatusIsLive: input.timerlessStatusIsLive === true });
     return observeProbe(captureSlot(paneContent, capturedAt, captureSeq), {
       state: mapPaneState(classification.state),
       reason: classification.reason,
@@ -681,6 +700,11 @@ export interface SendOpts {
   verify?: boolean;
   force?: boolean;
   waitForIdleMs?: number;
+  /** Internal, with `waitForIdleMs`: decide idle from a live pane read only. A runtime hook can't
+   *  authorize the send (a hook saying the seat waits on a person still refuses). For a caller whose
+   *  latest hook may predate the state that matters, such as a post-compact drain whose newest hook
+   *  can be the Stop from before /compact. */
+  readinessFromPaneOnly?: boolean;
   // OPR.0.4.1.10 — interactive-prompt / permission guard.
   // `dangerouslyInteract` is the ONLY override of the prompt/permission guard (force does NOT bypass
   // it). It requires `reason` and writes an auditable `transport.prompt_override` record before the
@@ -800,6 +824,7 @@ interface SessionRow { node_id: string; session_name: string; }
 interface NodeRow { rig_id: string; logical_id: string; }
 interface SessionMetaRow { runtime: string | null; attachment_type: string | null; node_id: string | null; binding_session: string | null; pane: string | null; occupant: string | null; resume_token: string | null; }
 interface ResolvedTarget { sessionName: string; rigName: string; nodeLogicalId: string; }
+interface AbsenceProbeTarget { session_id: string; node_id: string; session_name: string; tmux_pane: string | null; }
 
 export class SessionTransport {
   readonly db: Database.Database;
@@ -834,47 +859,36 @@ export class SessionTransport {
     this.listProcesses = deps.listProcesses;
   }
 
-  /**
-   * Slice-05 D5/D6 — when a live transport op (send/capture) observes that the
-   * seat's tmux session is genuinely gone (a `probeSession` result of `absent`
-   * — POSITIVE tmux evidence, never a transport failure; OPR.0.5.4.2 mini-req
-   * 5), durably record the SAME `session_missing` identity verdict the
-   * reconciler would write, so `rig ps` stops reporting the dead seat as
-   * running WITHOUT waiting for the next reconciler poll. This is the
-   * transport-side writer of the shared verdict bridge; the reconciler is the
-   * poll-side writer. Transport-absence must never reach this method: a blip
-   * against a live seat would otherwise fabricate a durable absence verdict.
-   *
-   * Only writes an APPLICABLE verdict: the join is narrowed to the node whose
-   * LATEST running session_name equals the probed session (so
-   * `verdict.sessionName === latest session_name`, the node-inventory
-   * applicability gate), and it only writes when a binding pane is registered
-   * (a null pane is the reconciler's `tmux_unavailable` case, which is
-   * non-down-ranking — never fabricate `session_missing` without a pane).
-   * Never mutates `sessions.status`.
-   */
-  private recordSessionMissingVerdict(sessionName: string): void {
-    const seat = this.db
+  /** Freeze the registration and binding before asking tmux about this name. */
+  private absenceProbeTarget(sessionName: string): AbsenceProbeTarget | undefined {
+    return this.db
       .prepare(`
-        SELECT n.id AS node_id, s.session_name AS session_name, b.tmux_pane AS tmux_pane
+        SELECT s.id AS session_id, n.id AS node_id, s.session_name AS session_name, b.tmux_pane AS tmux_pane
         FROM nodes n
         JOIN sessions s ON s.node_id = n.id
           AND s.id = (SELECT s2.id FROM sessions s2 WHERE s2.node_id = n.id ORDER BY s2.id DESC LIMIT 1)
-        LEFT JOIN bindings b ON b.node_id = n.id
+        JOIN bindings b ON b.node_id = n.id AND b.tmux_session = s.session_name
         WHERE s.status = 'running'
           AND s.session_name = ?
         LIMIT 1
       `)
-      .get(sessionName) as { node_id: string; session_name: string; tmux_pane: string | null } | undefined;
-    if (!seat || seat.tmux_pane === null) return;
+      .get(sessionName) as AbsenceProbeTarget | undefined;
+  }
+
+  /** Positive tmux absence only; a delayed reply cannot describe a replacement. */
+  private recordSessionMissingVerdict(target: AbsenceProbeTarget | undefined, observedAt: string): void {
+    if (!target || target.tmux_pane === null) return;
+    const current = this.absenceProbeTarget(target.session_name);
+    if (!current || current.session_id !== target.session_id || current.node_id !== target.node_id
+      || current.tmux_pane !== target.tmux_pane) return;
     new SeatIdentityStore(this.db).upsert({
-      nodeId: seat.node_id,
+      nodeId: target.node_id,
       verdict: "pane_missing",
       evidenceSource: "tmux_session",
       reason: "session_missing",
-      evidence: { registeredPane: seat.tmux_pane, observedPid: null, observedCommand: null, matchedLayer: null },
-      sessionName: seat.session_name,
-      observedAt: this.now().toISOString(),
+      evidence: { registeredPane: target.tmux_pane, observedPid: null, observedCommand: null, matchedLayer: null },
+      sessionName: target.session_name,
+      observedAt,
     });
   }
 
@@ -1298,9 +1312,11 @@ export class SessionTransport {
     // transport blip must never read as a dead seat, and absence is only ever
     // asserted on positive tmux evidence.
     try {
+      const target = this.absenceProbeTarget(sessionName);
+      const observedAt = this.now().toISOString();
       const probe = await this.tmuxAdapter.probeSession(sessionName);
       if (probe.state === "absent") {
-        this.recordSessionMissingVerdict(sessionName);
+        this.recordSessionMissingVerdict(target, observedAt);
         return {
           ok: false,
           sessionName,
@@ -1385,6 +1401,7 @@ export class SessionTransport {
         attachmentType: sessionMeta.attachmentType,
         timeoutMs: waitForIdleMs,
         binding: observed?.binding,
+        readinessFromPaneOnly: opts?.readinessFromPaneOnly === true,
       });
       waitEvidence = {
         activity: waitResult.activity,
@@ -1625,6 +1642,7 @@ export class SessionTransport {
     timeoutMs: number;
     signal?: AbortSignal;
     binding?: ObservedBinding;
+    readinessFromPaneOnly?: boolean;
   }): Promise<
     | { ok: true; activity: AgentActivity; waitedMs: number; attempts: number }
     | { ok: false; reason: string; error: string; activity: AgentActivity; waitedMs: number; attempts: number }
@@ -1706,7 +1724,7 @@ export class SessionTransport {
   /** One readiness observation, raced against the time left before the wait's deadline. Null
    *  when the deadline wins; the abandoned observation is ignored, never delivered on. */
   private async observeReadinessWithin(
-    input: { sessionName: string; runtime: string | null; attachmentType: string | null; binding?: ObservedBinding },
+    input: { sessionName: string; runtime: string | null; attachmentType: string | null; binding?: ObservedBinding; readinessFromPaneOnly?: boolean },
     remainingMs: number,
   ): Promise<AgentActivity | null> {
     const observation = this.classifySendReadiness(input);
@@ -1769,16 +1787,30 @@ export class SessionTransport {
     runtime: string | null;
     attachmentType: string | null;
     binding?: ObservedBinding;
+    readinessFromPaneOnly?: boolean;
   }): Promise<AgentActivity> {
     const now = this.now();
     const hookActivity = this.agentActivityStore?.getLatestForNode({
       sessionName: input.sessionName,
       now,
     });
+    // Pane-only readiness never lets a hook authorise a send, but a fresh hook showing work or a
+    // waiting person still refuses one, as it does for every other send.
+    if (
+      input.readinessFromPaneOnly &&
+      hookActivity &&
+      hookActivity.evidenceSource === "runtime_hook" &&
+      hookActivity.stale !== true &&
+      this.hookFreshForSend(hookActivity, now) &&
+      (hookActivity.state === "running" || hookActivity.state === "needs_input")
+    ) {
+      return hookActivity;
+    }
     // Use the fresh runtime-hook as the authoritative signal ONLY within the tight send-readiness
     // window. Beyond it (but still inside the looser display freshness) the hook is too old to prove
     // "safe to send now" — fall through to the real-time capture-pane probe (also Codex's sole guard).
     if (
+      !input.readinessFromPaneOnly &&
       hookActivity &&
       hookActivity.evidenceSource === "runtime_hook" &&
       hookActivity.stale !== true
@@ -1825,6 +1857,8 @@ export class SessionTransport {
       now,
       captureObserver: this.captureObserver,
       binding: input.binding,
+      // Pane-only readiness must not send into a status row whose timer hasn't appeared yet.
+      timerlessStatusIsLive: input.readinessFromPaneOnly === true,
     });
     // A Codex empty-composer placeholder is also on screen while Codex streams with its status
     // row hidden, so a placeholder-only idle verdict must not override a display-fresh (<5min)
@@ -1840,6 +1874,19 @@ export class SessionTransport {
       (hookActivity.state === "running" || hookActivity.state === "needs_input")
     ) {
       return hookActivity;
+    }
+    // A latest hook saying the seat waits on a person (approval, picker or elicitation) stays positive
+    // picker evidence past the send window, and past the store's freshness window: nothing newer was
+    // recorded, so nothing answered it. The pane alone can miss a picker it has no signature for (a
+    // Claude AskUserQuestion with option previews read unknown, and a watchdog wake's Enter chose its
+    // first option). An UNKNOWN pane keeps the hook's verdict; a pane that reads work or a recognized
+    // empty composer shows the seat has moved on.
+    if (probe.state === "unknown" && hookActivity && latestHookWaitsOnPerson(hookActivity, input.runtime)) {
+      return {
+        ...hookActivity,
+        state: "needs_input",
+        reason: `${hookActivity.rawSubtype ?? hookActivity.rawEvent ?? "needs_input"}; latest hook, pane unrecognized`,
+      };
     }
     return probe;
   }
@@ -1998,9 +2045,11 @@ export class SessionTransport {
     // Classified probe (OPR.0.5.4.2) — same discipline as the send gate: a
     // transport blip is a transport answer, never a dead-seat answer.
     try {
+      const target = this.absenceProbeTarget(sessionName);
+      const observedAt = this.now().toISOString();
       const probe = await this.tmuxAdapter.probeSession(sessionName);
       if (probe.state === "absent") {
-        this.recordSessionMissingVerdict(sessionName);
+        this.recordSessionMissingVerdict(target, observedAt);
         return {
           ok: false,
           sessionName,

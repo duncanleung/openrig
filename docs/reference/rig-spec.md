@@ -1,12 +1,15 @@
 # RigSpec Reference
 
 Version: 0.2 (pod-aware)
-Last validated against code: 2026-10-05, at main `fcaf1f8e`
-Source of truth: `packages/daemon/src/domain/rigspec-schema.ts`, `packages/daemon/src/domain/types.ts`, `packages/daemon/src/domain/startup-validation.ts`, `packages/daemon/src/domain/permission-policy/policy-ref.ts`, `packages/daemon/src/domain/profile-resolver.ts`, `packages/daemon/src/domain/rigspec-preflight.ts`
+Last validated against code: 2026-10-07, at the 0.6.6 cut `2620dea8` (whole document at `fcaf1f8e`; changes to its sources since then checked)
+Source of truth: `packages/daemon/src/domain/rigspec-schema.ts`, `packages/daemon/src/domain/types.ts`, `packages/daemon/src/domain/startup-validation.ts`, `packages/daemon/src/domain/permission-policy/policy-ref.ts`, `packages/daemon/src/domain/profile-resolver.ts`, `packages/daemon/src/domain/rigspec-preflight.ts`, `packages/daemon/src/adapters/kernel-authority.ts`, `packages/daemon/src/domain/native-permission-store.ts`, `packages/daemon/src/domain/codex-team-workspace.ts`
 
 This is the canonical reference for the pod-aware RigSpec YAML format. Every field, validation rule, and default documented here was traced from the actual parser and validator code, not from prior documentation.
 
 ---
+
+For choosing IDs, see [naming rigs, pods and seats](topology-naming.md). Keep the same
+logical names in edges, startup instructions, workflow targets and runtime presets.
 
 ## Minimal Valid Example
 
@@ -18,7 +21,7 @@ pods:
   - id: dev
     label: Development
     members:
-      - id: impl
+      - id: build
         agent_ref: "local:agents/impl"
         profile: default
         runtime: claude-code
@@ -105,7 +108,7 @@ pods:
           required: true
       actions: []
     members:
-      - id: impl
+      - id: build
         agent_ref: "local:agents/impl"
         profile: default
         runtime: claude-code
@@ -131,7 +134,7 @@ pods:
         cwd: "."
     edges:
       - kind: delegates_to
-        from: impl
+        from: build
         to: qa
 
   - id: rev
@@ -152,13 +155,13 @@ pods:
 edges:
   - kind: delegates_to
     from: orch.lead
-    to: dev.impl
+    to: dev.build
   - kind: delegates_to
     from: orch.peer
     to: dev.qa
   - kind: can_observe
     from: rev.r1
-    to: dev.impl
+    to: dev.build
   - kind: can_observe
     from: rev.r2
     to: dev.qa
@@ -226,12 +229,35 @@ Claude keeps `acceptEdits` and receives inline session settings allowing ordinar
 `rig` commands, project reads and common project test commands (for example,
 `npm test`, `pnpm test`, `pytest`, `go test` and `cargo test`). Lifecycle commands
 such as `rig up`, `rig down`, `rig restore`, `rig bundle install` and seat stop or
-handover are listed as **ask** rules. Native deny and ask rules take precedence
-over allow rules. These are native command-matching rules, not filesystem
-containment: a project's test command can execute code. Flags before the verb
-(for example, `rig --host vps up`) or wrapper commands may not match the lifecycle
-prefixes. OpenRig does not write these settings into a personal or project
-permission file.
+handover ask through a session `PreToolUse` hook. Their literal help forms, such
+as `rig down --help`, `rig bundle install -h` and `rig help down`, run without
+that lifecycle prompt. Native personal, project and managed deny/ask rules still
+apply; OpenRig does not remove or override them.
+
+For allowances, the hook recognizes literal command words (including quoted or absolute paths),
+leading environment assignments that do not change executable lookup or startup,
+and `env`, `command` and `exec` wrappers without options other than `--`.
+Relative executable paths and assignments such as `PATH` or `NODE_OPTIONS` stay
+with native checks. The same existing team allowances apply after spelling
+normalization; project `node_modules/.bin/vitest` and `jest` paths match their
+existing `npx` allowances. It does not automatically allow pipelines, command
+substitutions, redirects, heredocs, shell functions or other unrecognized syntax.
+Lifecycle prefixes are checked at every word position, including after wrappers,
+control-flow words and CLI argument separators. A `--` separator before or after
+the subcommand ends option parsing, so a later `--help` is an operand and still
+asks. Ask detection also scans with comment text retained, so a `#` inside a
+substitution does not hide a later lifecycle command. Unquoted prose or comments
+containing a lifecycle command may also ask; ordinary trailing comments do not
+change allowance matching. Quoted messages and quoted heredoc bodies remain data.
+Arithmetic shifts are not treated as heredoc operators. These are command
+allowances, not containment: a project's test command can execute code. The
+hook and allowances are passed with `--settings` at launch, including resume
+and fork; nothing is written to personal or project permission files.
+
+If the helper asset is missing at launch, OpenRig falls back to the native lifecycle
+ask rules; help can prompt in that fallback. A helper that disappears or times out
+after launch cannot supply a decision, leaving Claude's remaining native rules
+in effect. The hook is a convenience policy, not a containment boundary.
 
 Codex keeps `workspace-write` with its existing approval policy and receives the
 configured OpenRig workspace root plus its pod's shared state directory as
@@ -267,7 +293,8 @@ The destructive class is `delete_everything`, `drop_persistent_store` and
 **At launch.** `builtin:yolo` selects Claude `--dangerously-skip-permissions`, Codex
 `-s danger-full-access -a never`, and Pi `--approve`. `builtin:auto` selects Claude
 `--permission-mode auto`, while Codex and Pi do not have an auto mode and launch at the floor.
-Every other seat launches at the floor:
+Every other seat launches at the floor (a non-kernel seat with no policy also gets the
+[team launch default](#team-launch-defaults) above):
 - Claude `--permission-mode acceptEdits`;
 - Codex `-s workspace-write`, or `-p <profile>` when the member sets
   `codex_config_profile`, in which case the profile governs its own sandbox;
@@ -276,7 +303,8 @@ Every other seat launches at the floor:
 Seats of the rig named `kernel` are the exception. With no member or rig policy, no
 per-seat choice and (for Codex) no named profile, Claude launches in `acceptEdits` with a
 per-launch `--settings` allow list for its file tools and operational commands, and Codex
-launches with `-s danger-full-access -a never`.
+launches with `-s danger-full-access -a never`, plus per-launch `-c` overrides that hide its
+full-access and GPT-5.1 migration notices, whatever the rig's non-interruptive choice.
 
 **Config-surface policies are recorded, not applied at launch.** The seat still starts at
 the floor. The `allow`, `ask` and `deny` rules take effect once they are translated into the
@@ -428,7 +456,7 @@ The canonical session name is derived from the pod ID, member ID, and rig name:
 {podId}-{memberId}@{rigName}
 ```
 
-Example: pod `dev`, member `impl`, rig `my-team` → session `dev-impl@my-team`
+Example: pod `dev`, member `build`, rig `my-team` → session `dev-build@my-team`
 
 Pod and member IDs cannot contain `@` because the first `@` separates their portion
 of the session address from the rig name. Rig names may still contain `@`.
@@ -457,13 +485,13 @@ Edges within a pod use **unqualified member IDs** (just the member `id`, not `po
 pods:
   - id: dev
     members:
-      - id: impl
+      - id: build
         # ...
       - id: qa
         # ...
     edges:
       - kind: delegates_to
-        from: impl      # NOT dev.impl
+        from: build     # NOT dev.build
         to: qa          # NOT dev.qa
 ```
 
@@ -477,7 +505,7 @@ Edges between pods use **fully-qualified `pod.member` IDs**:
 edges:
   - kind: delegates_to
     from: orch.lead     # pod.member format
-    to: dev.impl        # pod.member format
+    to: dev.build       # pod.member format
 ```
 
 Cross-pod edges must reference different pods. An edge where both `from` and `to` are in the same pod is a validation error — use pod-local edges instead.

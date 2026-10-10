@@ -10,6 +10,7 @@ import { WAKE_INTENT_PREFIX, type OutboxHandler } from "./outbox-handler.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { lastMeaningfulTransition, readWaitingView, type WaitingView, type WaitingActivityReader } from "./queue-waiting.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
+import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
 import { parseReplyToChoice, formatReplyToChoice, describeReplyToFallback, REPLY_TO_CHOICE_ACTOR, type ReplyToChoice } from "./reply-to-choice.js";
@@ -29,7 +30,7 @@ import {
 } from "./queue-wake-repository.js";
 import { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 import { armQueueWait, backOffQueueWait, refreshQueueWaits, evaluateQueueWait, retargetQueueWait, isQueueWait } from "./queue-wait-backoff.js";
-import { parseHumanQuestions, unansweredQuestions, type HumanQuestion, type HumanAnswers, type RecordHumanAnswerResult } from "./human-questions.js";
+import { parseHumanQuestions, unansweredQuestions, describeTypedReplyPlacement, type HumanQuestion, type HumanAnswers, type TypedHumanReply, type RecordHumanAnswerResult } from "./human-questions.js";
 
 export const QUEUE_STATES = [
   "pending",
@@ -288,6 +289,11 @@ export interface QueueCreateInput {
    *  that thread can't be used (e.g. a live human gate, see hasLiveHumanGate), it posts
    *  top-level and the row records why. */
   replyTo?: string | null;
+  /** #822 — Slack inbound only: the item whose OpenRig thread a person's reply was typed in.
+   *  Stored as this row's replyTo, so an update that answers this row (--reply-to it) walks on
+   *  to that thread. It never steers this row's own posts: delivery reads replyTo on updates
+   *  only. An item that does not exist is dropped, never a reason to lose the message. */
+  inboundReplyTo?: string | null;
   /** #193 — 1–4 structured questions; accepted only with humanIntent "decision". */
   humanQuestions?: HumanQuestion[] | null;
   summary?: string | null;
@@ -923,15 +929,17 @@ export class QueueRepository {
     // W1-c guard is nudge-aware for the same reason: absence of an intent is a
     // defect only when a wake WAS intended.
     if (nudge === false) return;
+    // The successor row is already written in this txn, so its stored summary is
+    // read here rather than threaded through every staging caller.
+    const successor = this.getById(successorQitemId);
     this.recordWakeIntent({
       outboxId: `${WAKE_INTENT_PREFIX}${successorQitemId}`,
       auditPointer: successorQitemId,
       fromSession,
       toSession,
       identityProvenance,
-      bareBody: `Queue handoff: ${successorQitemId} - check your queue.`,
-      tags: this.getById(successorQitemId)?.handedOffFrom
-        ? [`queue:return:${this.getByIdOrThrow(successorQitemId).handedOffFrom}`] : undefined,
+      bareBody: renderQueueHandoffNudge(successorQitemId, successor?.summary),
+      tags: successor?.handedOffFrom ? [`queue:return:${successor.handedOffFrom}`] : undefined,
     });
   }
 
@@ -1363,7 +1371,7 @@ export class QueueRepository {
     } else {
       // OPR.0.4.4.19 FR-7: bodyOverride lets the resolve verb carry the
       // decision text to the parked owner; default stays the handoff nudge.
-      const bareBody = bodyOverride ?? `Queue handoff: ${qitemId} - check your queue.`;
+      const bareBody = bodyOverride ?? renderQueueHandoffNudge(qitemId, null);
       // GHOST-STAGE (h): the single HG-5 baseline change deferred from g — the handoff nudge now carries
       // a Sent: stamp (so it renders byte-parically with a rig send) plus the SOURCE seat's occupant
       // generation (g's already-wired render, resolved here; absent=UNKNOWN=omit, never forged). The
@@ -1640,8 +1648,10 @@ export class QueueRepository {
       this.db.prepare("UPDATE queue_items SET human_intent = ?, human_detail = ? WHERE qitem_id = ?")
         .run(input.humanIntent ?? null, input.humanDetail ?? null, id);
     }
-    if (input.replyTo != null) {
-      this.db.prepare("UPDATE queue_items SET reply_to = ? WHERE qitem_id = ?").run(input.replyTo, id);
+    const replyTo = input.replyTo
+      ?? (input.inboundReplyTo != null && this.hasReplyToColumn && this.getById(input.inboundReplyTo) ? input.inboundReplyTo : null);
+    if (replyTo != null) {
+      this.db.prepare("UPDATE queue_items SET reply_to = ? WHERE qitem_id = ?").run(replyTo, id);
     }
     if (humanQuestions) {
       this.db.prepare("UPDATE queue_items SET human_questions = ? WHERE qitem_id = ?").run(JSON.stringify(humanQuestions), id);
@@ -2804,16 +2814,12 @@ export class QueueRepository {
       // OPR.0.5.8.1 S1 — start the interval at registration for EVERY explicit
       // `--wake-after` timer, not only provider-limit ones.
       //
-      // `isDue` treats a job with no `last_evaluation_at` as due immediately, so
-      // an unseeded timer fires on the scheduler's very first pass regardless of
-      // its interval: measured at 0.69s for a requested 20m and 0.77s for a
-      // requested 2h. The duration was never lost — `interval_seconds` held 1200
-      // and 7200 correctly — it simply was not the thing being measured against.
-      //
-      // S16 introduced this seeding for provider-limit parks only and recorded
-      // the narrow scope as deliberate. Widening it is the whole repair: the
-      // mechanism is unchanged and already proven by the provider-limit path, so
-      // this adds no scheduler and no per-wake bookkeeping.
+      // When this was written, `isDue` treated any job with no `last_evaluation_at`
+      // as due immediately, so an unseeded timer fired on the scheduler's first
+      // pass: measured at 0.69s for a requested 20m and 0.77s for a requested 2h.
+      // Since #801/#860 a never-evaluated periodic reminder measures its first
+      // interval from registration on its own, so this seed now sets the same
+      // start explicitly; it also gives the row's wake a real "last check" time.
       jobsRepo.recordEvaluation(job.jobId, job.registeredAt, false);
       parkWake = { kind: "timer", ref: job.jobId };
     } else if (input.state === "blocked" && effectiveBlockedOn?.startsWith("qitem-")) {
@@ -3086,6 +3092,11 @@ export class QueueRepository {
     return "park_timer_target_terminal";
   }
 
+  /** OPR.0.7.0.12 — the current park's recorded continuation, bounded (see the transition log). */
+  currentParkContinuation(qitemId: string): string | null {
+    return this.transitionLog.currentParkContinuation(qitemId);
+  }
+
   listTransitions(qitemId: string): Array<ReturnType<QueueTransitionLog["listForQitem"]>[number] & { wake?: ReturnType<QueueWakeRepository["getForTransition"]> }> {
     return this.transitionLog.listForQitem(qitemId).map((transition) => {
       const wake = this.wakeRepo.getForTransition(transition.transitionId);
@@ -3199,6 +3210,47 @@ export class QueueRepository {
     }
   }
 
+  /** Close a direct human request and retain its typed answer in the same transaction.
+   * A thread reply has no question id: store it under the first unanswered question only,
+   * preserving earlier clicks and leaving the other questions unanswered. A completed
+   * button set is already final; its resolve continuation must not overwrite those answers.
+   */
+  resolveDirectHumanReply(input: { qitemId: string; actorSession: string; decision: string }): boolean {
+    const result = this.db.transaction(() => {
+      const item = this.getById(input.qitemId);
+      if (item?.state !== "pending" || item.humanIntent === "update"
+        || item.destinationSession !== input.actorSession
+        || parseSessionName(item.destinationSession).kind !== "external") return null;
+
+      const text = input.decision.trim();
+      const unanswered = this.hasHumanQuestionsColumn && text && text !== "[file reply]"
+        ? unansweredQuestions(item.humanQuestions ?? [], item.humanAnswers ?? {})
+        : [];
+      const question = unanswered[0];
+      let transitionNote = "direct human reply received";
+      if (question) {
+        const typedReply: TypedHumanReply = {
+          kind: "typed-reply", text, placement: "first-unanswered", unansweredCount: unanswered.length - 1,
+        };
+        const answers: HumanAnswers = { ...item.humanAnswers, [question.id]: typedReply };
+        this.db.prepare("UPDATE queue_items SET human_answers = ? WHERE qitem_id = ?")
+          .run(JSON.stringify(answers), input.qitemId);
+        transitionNote += `; ${describeTypedReplyPlacement(question, typedReply)}`;
+      }
+      return this.updateInTransactionalContext({
+        qitemId: input.qitemId,
+        actorSession: input.actorSession,
+        state: "done",
+        closureReason: "no-follow-on",
+        transitionNote,
+        ownerNotificationKind: "human-decision-resolved",
+      });
+    })();
+    if (!result) return false;
+    for (const event of result.persistedEvents) this.eventBus.notifySubscribers(event);
+    return true;
+  }
+
   /**
    * #193 — record one clicked answer on a pending decision that carries structured questions.
    * Only the decision's own human may answer, and only while it is pending. A click may change
@@ -3263,9 +3315,15 @@ export class QueueRepository {
     if (!this.hasQueueTransitionsTable) return false;
     // Same trust rule as replyToChoiceFor: a pre-provenance schema reads every row as null.
     const provenance = this.hasTransitionProvenanceColumn ? " AND identity_provenance IS NULL" : "";
+    // #192: with a channel map the note carries a ` channel=<id>` suffix. Match the exact note, or
+    // the exact note followed by that suffix; a prefix compare, not LIKE (the note itself contains
+    // `_`), and the trailing space keeps thread 1.1 from matching 1.10.
+    const note = formatReplyToChoice({ kind: "thread", threadTs });
+    const withChannel = `${note} channel=`;
     return this.db.prepare(
-      `SELECT 1 FROM queue_transitions WHERE transition_note = ? AND actor_session = ?${provenance} LIMIT 1`,
-    ).get(formatReplyToChoice({ kind: "thread", threadTs }), REPLY_TO_CHOICE_ACTOR) !== undefined;
+      `SELECT 1 FROM queue_transitions
+        WHERE (transition_note = ? OR substr(transition_note, 1, ?) = ?) AND actor_session = ?${provenance} LIMIT 1`,
+    ).get(note, withChannel.length, withChannel, REPLY_TO_CHOICE_ACTOR) !== undefined;
   }
 
   private replyToFallbackFor(qitemId: string): string | null {
