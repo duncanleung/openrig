@@ -47,7 +47,7 @@ const VALID_WORKSPACE_KINDS = new Set<string>(WORKSPACE_KINDS as readonly string
 
 const RIG_KEYS = new Set([
   "version", "name", "summary", "culture_file", "permission_policy", "managed_blocks", "docs",
-  "startup", "services", "workspace", "pods", "edges", "non_interruptive",
+  "startup", "services", "workspace", "pods", "edges", "non_interruptive", "validation_gate",
 ]);
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
 const MEMBER_KEYS = new Set([
