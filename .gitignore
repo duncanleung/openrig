@@ -15,6 +15,15 @@ docs/*
 
 notes/*
 
+# Local tooling
+.codex/
+.mcp.json
+.playwright-mcp/
+NOTES.md
+pnpm-lock.yaml
+packages/daemon/pnpm-lock.yaml
+packages/daemon/pnpm-workspace.yaml
+
 # Local environment
 .env
 .env.local

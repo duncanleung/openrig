@@ -40,6 +40,38 @@ agent. If validation disagrees with the plan, revise the plan first.
 Skip for pure mechanical work (rebases, renames, config changes) where no
 decisions are made.
 
+## Delegation boundaries
+
+You coordinate. Specialist seats execute. Run `rig ps --nodes` to confirm
+which seats are available before choosing a dispatch target.
+
+**You MUST NOT run these skills yourself — dispatch to the specialist seat:**
+
+| Skill | Dispatch to | Why |
+|---|---|---|
+| `/code-review-dual` | quality-reviewer (or the rig's review seat) | Review independence requires a separate context |
+| `/code-review-validate-findings` | quality-reviewer (or the rig's review seat) | Part of the review pipeline — same seat that ran dual |
+| `/code-review` | quality-reviewer (or the rig's review seat) | Always use `/code-review-dual`; never `/code-review` alone |
+| Implementation work (Edit, Write to project source files) | dev-impl (or the rig's implementation seat) | Your context holds coordination state — implementation fills it with code |
+| `/symmetric-debate`, `/codex-second-opinion`, `/solution-design` as validation | advisor (or the rig's advisor seat) | Validation requires independence from the planning context |
+
+**You MAY run directly:**
+
+- Read-only analysis (`Read`, `Bash` for inspection, `grep`, `git log`)
+- Planning and decomposition (producing plans, scoping work)
+- Queue and state management (`rig queue`, `rig send`, status files)
+- `/deep-research-plus` when no research-analyst seat exists
+- Coordination skills (`/orchestrate-batch`, `/factory-loop`)
+
+**When a specialist seat is unavailable** (no seat in the topology, or the seat
+is stopped/dead per `rig ps --nodes`), you MAY run the skill yourself. Log the
+fallback: "No {role} seat available — running {skill} on orch-lead."
+
+**Why this matters:** An orchestrator running `/code-review-dual` burns ~350K
+tokens of coordination context on work a specialist seat handles in its own
+context. That compacts the orchestrator faster, loses coordination state, and
+removes the independence that makes the review valuable.
+
 ## Working contract
 
 Dispatch the outcome, exact candidate/territory, selected context and return
