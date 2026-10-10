@@ -4,6 +4,8 @@ import { sessionDigestsSchema } from "../src/db/migrations/096_session_digests.j
 import { reviewRunsSchema } from "../src/db/migrations/097_review_runs.js";
 import { reviewFindingsSchema } from "../src/db/migrations/098_review_findings.js";
 import { dailyTokenSnapshotsSchema } from "../src/db/migrations/099_daily_token_snapshots.js";
+import { digestTokenUsageSchema } from "../src/db/migrations/100_digest_token_usage.js";
+import { digestEscalationCountSchema } from "../src/db/migrations/101_digest_escalation_count.js";
 import {
   FleetStore,
   type SessionDigestInput,
@@ -21,6 +23,8 @@ function freshDb(): Database {
   db.exec(reviewFindingsSchema.sql);
   db.exec(sessionDigestsSchema.sql);
   db.exec(dailyTokenSnapshotsSchema.sql);
+  db.exec(digestTokenUsageSchema.sql);
+  db.exec(digestEscalationCountSchema.sql);
   return db;
 }
 
@@ -48,6 +52,12 @@ const digest = (over: Partial<SessionDigestInput> = {}): SessionDigestInput => (
   irreversibleActions: "[]",
   compactionBoundaries: "[]",
   compactionLosses: "[]",
+  tokenUsage: "[]",
+  totalInputTokens: 0,
+  totalOutputTokens: 0,
+  totalCacheCreationTokens: 0,
+  totalCacheReadTokens: 0,
+  escalationCount: 0,
   sourceHash: "abc123",
   parserVersion: "1.0.0",
   ...over,

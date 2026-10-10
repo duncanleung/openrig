@@ -90,6 +90,7 @@ import { seatCommand, handoverCommand, type SeatDeps } from "./commands/seat.js"
 import { rigModeCommand, type RigModeDeps } from "./commands/rig-mode.js";
 import { policyCommand } from "./commands/policy.js";
 import { startupProofCommand, type StartupProofDeps } from "./commands/startup-proof.js";
+import { escalateCommand } from "./commands/escalate.js";
 import type { LifecycleDeps } from "./daemon-lifecycle.js";
 import { CLI_VERSION } from "./version.js";
 
@@ -262,6 +263,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(seatCommand(depsOverride?.seatDeps));
   program.addCommand(handoverCommand(depsOverride?.seatDeps));
   program.addCommand(startupProofCommand(depsOverride?.startupProofDeps));
+  program.addCommand(escalateCommand());
   // release-0.3.2 slice 12 — rig scope CLI primitive.
   program.addCommand(scopeCommand());
   // OPR.0.4.4.19 FR-8 — rig proof: the C1 proof-drop write path.

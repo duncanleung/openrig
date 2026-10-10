@@ -5,6 +5,7 @@ import { reviewRunsSchema } from "../src/db/migrations/097_review_runs.js";
 import { reviewFindingsSchema } from "../src/db/migrations/098_review_findings.js";
 import { dailyTokenSnapshotsSchema } from "../src/db/migrations/099_daily_token_snapshots.js";
 import { digestTokenUsageSchema } from "../src/db/migrations/100_digest_token_usage.js";
+import { digestEscalationCountSchema } from "../src/db/migrations/101_digest_escalation_count.js";
 import { FleetStore } from "../src/domain/fleet-store.js";
 import { FleetIngestionService, resolveFleetReconcileIntervalMs } from "../src/domain/fleet-ingestion-service.js";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
@@ -59,6 +60,7 @@ function freshDb(): Database {
   db.exec(reviewFindingsSchema.sql);
   db.exec(dailyTokenSnapshotsSchema.sql);
   db.exec(digestTokenUsageSchema.sql);
+  db.exec(digestEscalationCountSchema.sql);
   return db;
 }
 

@@ -180,6 +180,18 @@ function resolveIdentityByTimestamp(
   }
 }
 
+/** Count queue items closed with closure_reason='escalation' from the given source session. */
+function countEscalationsBySession(db: Database, seatSession: string): number {
+  try {
+    const row = db.prepare(
+      "SELECT COUNT(*) AS c FROM queue_items WHERE source_session = ? AND closure_reason = 'escalation' AND state = 'done'",
+    ).get(seatSession) as { c: number } | undefined;
+    return row?.c ?? 0;
+  } catch {
+    return 0;
+  }
+}
+
 /** Resolve rig_name and seat_name from usage_samples by seat_session (same join pattern as rollUpSnapshots). */
 function resolveIdentityBySeatSession(
   db: Database,
@@ -255,6 +267,7 @@ function adaptDigest(
     totalOutputTokens: numField(reducerOutput.tokenTotals, "output_tokens"),
     totalCacheCreationTokens: numField(reducerOutput.tokenTotals, "cache_creation_input_tokens"),
     totalCacheReadTokens: numField(reducerOutput.tokenTotals, "cache_read_input_tokens"),
+    escalationCount: 0,
     sourceHash: hash,
     parserVersion: PARSER_VERSION,
   };
@@ -489,6 +502,10 @@ export class FleetIngestionService {
           const fallback = resolveIdentityBySeatSession(this.db, input.seatSession);
           if (fallback.rigName) input.rigName = fallback.rigName;
           if (!input.seatName && fallback.seatName) input.seatName = fallback.seatName;
+        }
+        // Count escalation events from the queue: qitems closed with escalation by this seat.
+        if (input.seatSession) {
+          input.escalationCount = countEscalationsBySession(this.db, input.seatSession);
         }
         this.fleetStore.upsertDigest(input);
         result.ingested++;

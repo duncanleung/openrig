@@ -31,6 +31,7 @@ export interface SessionDigestInput {
   totalOutputTokens: number;
   totalCacheCreationTokens: number;
   totalCacheReadTokens: number;
+  escalationCount: number;
   sourceHash: string | null;
   parserVersion: string | null;
 }
@@ -96,7 +97,7 @@ export interface DailyTokenSnapshotInput {
 }
 
 export interface FleetStoreStats {
-  session_digests: { count: number; last_ingested_at: string | null };
+  session_digests: { count: number; last_ingested_at: string | null; total_escalations: number };
   review_runs: { count: number; last_ingested_at: string | null };
   review_findings: { count: number };
   daily_token_snapshots: { count: number; last_snapshot_at: string | null };
@@ -212,6 +213,7 @@ export class FleetStore {
         compaction_boundaries, compaction_losses,
         token_usage, total_input_tokens, total_output_tokens,
         total_cache_creation_tokens, total_cache_read_tokens,
+        escalation_count,
         source_hash, parser_version
       ) VALUES (
         @rigName, @seatSession, @seatName, @nodeLogicalId, @rigId, @nodeId,
@@ -223,6 +225,7 @@ export class FleetStore {
         @compactionBoundaries, @compactionLosses,
         @tokenUsage, @totalInputTokens, @totalOutputTokens,
         @totalCacheCreationTokens, @totalCacheReadTokens,
+        @escalationCount,
         @sourceHash, @parserVersion
       )
       ON CONFLICT(native_session_id) DO UPDATE SET
@@ -253,6 +256,7 @@ export class FleetStore {
         total_output_tokens = excluded.total_output_tokens,
         total_cache_creation_tokens = excluded.total_cache_creation_tokens,
         total_cache_read_tokens = excluded.total_cache_read_tokens,
+        escalation_count = excluded.escalation_count,
         source_hash = excluded.source_hash,
         parser_version = excluded.parser_version,
         ingested_at = datetime('now')
@@ -423,13 +427,19 @@ export class FleetStore {
       return { count: row.count, ts: row.ts ?? null };
     };
 
-    const digests = agg("session_digests", "ingested_at");
+    const digestsRaw = this.db.prepare(
+      "SELECT COUNT(*) AS count, MAX(ingested_at) AS ts, SUM(escalation_count) AS total_escalations FROM session_digests",
+    ).get() as { count: number; ts: string | null; total_escalations: number | null };
     const runs = agg("review_runs", "ingested_at");
     const findings = agg("review_findings");
     const snapshots = agg("daily_token_snapshots", "snapshot_at");
 
     return {
-      session_digests: { count: digests.count, last_ingested_at: digests.ts },
+      session_digests: {
+        count: digestsRaw.count,
+        last_ingested_at: digestsRaw.ts,
+        total_escalations: digestsRaw.total_escalations ?? 0,
+      },
       review_runs: { count: runs.count, last_ingested_at: runs.ts },
       review_findings: { count: findings.count },
       daily_token_snapshots: { count: snapshots.count, last_snapshot_at: snapshots.ts },
