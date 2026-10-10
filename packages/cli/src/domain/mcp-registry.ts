@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { writeTextAtomically } from "../atomic-text-write.js";
@@ -34,7 +34,9 @@ export interface ImportResult {
 
 /** Resolve default file locations from the environment. */
 export function resolveMcpPaths(env: NodeJS.ProcessEnv = process.env): McpRegistryPaths {
-  const openrigHome = env.OPENRIG_HOME || join(homedir(), ".openrig");
+  // Inline RIGGED_HOME fallback to match readOpenRigEnv("OPENRIG_HOME", "RIGGED_HOME")
+  // in openrig-compat.ts. Inlined because getOpenRigHome() reads process.env directly.
+  const openrigHome = env.OPENRIG_HOME || env.RIGGED_HOME || join(homedir(), ".openrig");
   // claude.json lives at the root of the Claude config dir (HOME by default), not inside .claude/.
   const claudeDir = env.CLAUDE_CONFIG_DIR || homedir();
   return {
@@ -64,25 +66,39 @@ export function redactConfig(config: McpServerConfig): McpServerConfig {
   return out;
 }
 
+function parseJsonObjectFile(path: string, label: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, "utf-8"));
+  } catch (err) {
+    throw new Error(`${label} at ${path} is not valid JSON. Fix the file or delete it to reset.\n${(err as Error).message}`);
+  }
+  if (parsed == null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${label} at ${path} is not a JSON object.`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
 /** File-backed MCP server registry. Pure file I/O; no daemon dependency. */
 export class McpRegistry {
   constructor(readonly paths: McpRegistryPaths = resolveMcpPaths()) {}
 
   read(): McpRegistryFile {
     if (!existsSync(this.paths.registryPath)) return { version: 1, servers: {} };
-    const raw = JSON.parse(readFileSync(this.paths.registryPath, "utf-8")) as Partial<McpRegistryFile>;
-    return { version: 1, servers: raw.servers ?? {} };
+    const raw = parseJsonObjectFile(this.paths.registryPath, "MCP registry") as Partial<McpRegistryFile>;
+    return { version: 1, servers: raw.servers && typeof raw.servers === "object" && !Array.isArray(raw.servers) ? raw.servers as Record<string, McpRegistryEntry> : {} };
   }
 
   write(registry: McpRegistryFile): void {
-    mkdirSync(dirname(this.paths.registryPath), { recursive: true });
+    mkdirSync(dirname(this.paths.registryPath), { recursive: true, mode: 0o700 });
     writeTextAtomically(this.paths.registryPath, JSON.stringify(registry, null, 2) + "\n", "MCP registry");
+    chmodSync(this.paths.registryPath, 0o600);
   }
 
   /** Read the whole claude.json, or an empty object when it does not exist. */
   readClaudeJson(): Record<string, unknown> {
     if (!existsSync(this.paths.claudeJsonPath)) return {};
-    return JSON.parse(readFileSync(this.paths.claudeJsonPath, "utf-8")) as Record<string, unknown>;
+    return parseJsonObjectFile(this.paths.claudeJsonPath, "claude.json");
   }
 
   readClaudeMcpServers(): Record<string, McpServerConfig> {
