@@ -420,6 +420,8 @@ export interface FleetSnapshot {
   hostsDown: HostDown[];
   /** latest ambient stream items for the footer ticker (FR-10), newest last */
   stream: Array<{ tsEmitted: string; sourceSession: string; body: string }>;
+  /** MCP server registry snapshot — undefined=not loaded, null=file missing */
+  mcpRegistry?: import("./mcp/mcp-model.js").McpRegistryRead | null;
   /** named per-read failures (honest partial hydration, never silent) */
   readErrors: string[];
 }
