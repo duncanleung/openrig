@@ -78,6 +78,7 @@ import type { PluginDiscoveryService } from "./domain/plugin-discovery-service.j
 import { skillsRoutes } from "./routes/skills.js";
 import type { SkillLibraryDiscoveryService } from "./domain/skill-library-discovery.js";
 import { configRoutes } from "./routes/config.js";
+import { mcpRoutes } from "./routes/mcp.js";
 import { hostsRoutes } from "./routes/hosts.js";
 import { hostReadThrough } from "./domain/hosts/read-through.js";
 import { jsonBodyErrorHandler, trackJsonBodyParseErrors } from "./middleware/json-body-error.js";
@@ -775,6 +776,7 @@ export function createApp(deps: AppDeps): Hono {
   // Slice 28 C-3 — skill-library + per-skill file endpoints (SC-29 #11).
   app.route("/api/skills", skillsRoutes());
   app.route("/api/config", configRoutes());
+  app.route("/api/mcp", mcpRoutes);
   app.route("/api/context-packs", contextPacksRoutes());
   app.route("/api/agent-images", agentImagesRoutes({
     specRoots: deps.agentImageSpecRoots ?? (() => []),

@@ -1,6 +1,3 @@
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { homedir } from "node:os";
 import { composeHumanUpdates, type DeliveredHumanUpdates } from "./attention/attention-model.js";
 import { readTerminals } from "./terminals/terminal-model.js";
 import { fileTargetForPath } from "./reading.js";
@@ -398,17 +395,8 @@ export async function hydrateSnapshot(
   }
 
   if (viewContext?.section === "mcp") {
-    const openrigHome = process.env.OPENRIG_HOME || process.env.RIGGED_HOME || join(homedir(), ".openrig");
-    const registryPath = join(openrigHome, "mcp-registry.json");
-    let mcpRegistry: FleetSnapshot["mcpRegistry"] = null;
-    try {
-      if (existsSync(registryPath)) {
-        mcpRegistry = JSON.parse(readFileSync(registryPath, "utf-8"));
-      }
-    } catch (err) {
-      readErrors.push(`MCP registry: ${err instanceof Error ? err.message : String(err)}`);
-    }
-    return { ...emptySnapshot(), mcpRegistry, readErrors, hydratedAt: new Date().toISOString() };
+    const mcpRegistry = await safe<NonNullable<FleetSnapshot["mcpRegistry"]>>("MCP registry", () => client.mcpRegistry());
+    return { ...emptySnapshot(), mcpRegistry: mcpRegistry ?? null, readErrors, hydratedAt: new Date().toISOString() };
   }
 
   // Project reads never fall back to the daemon's default workspace or fleet queue.

@@ -518,6 +518,7 @@ export type Action =
   | { type: "act"; act: "launch-spec" }
   | { type: "act"; act: "open-terminal"; view: string; expectedPlan?: string }
   | { type: "act"; act: "run"; rigId: string; agent: string }
+  | { type: "act"; act: "mcp-toggle"; name: string }
   | { type: "notice"; message: string };
 
 /** FR-12: the section set is ONE in-code registry — adding a section is a

@@ -1,4 +1,4 @@
-import { fieldLine, listItem, sectionRule, type ContentLine } from "../detail.js";
+import { sectionRule, type ContentLine } from "../detail.js";
 import type { FleetSnapshot } from "../types.js";
 
 export interface McpRegistryRead {
@@ -27,7 +27,7 @@ export function mcpLines(snap: FleetSnapshot, width: number): ContentLine[] {
   const disabled = entries.filter(([, e]) => !e.enabled);
 
   const lines: ContentLine[] = [
-    { text: `MCP Servers · ${enabled.length} enabled, ${disabled.length} disabled` },
+    { text: `MCP Servers · ${enabled.length} enabled, ${disabled.length} disabled  (Enter toggles)` },
     { text: "" },
   ];
 
@@ -36,7 +36,7 @@ export function mcpLines(snap: FleetSnapshot, width: number): ContentLine[] {
     for (const [name, entry] of enabled) {
       const transport = transportOf(entry.config);
       const endpoint = typeof entry.config.url === "string" ? entry.config.url : typeof entry.config.command === "string" ? entry.config.command : "";
-      lines.push(listItem(name, undefined));
+      lines.push({ text: `  ● ${name}`, action: { type: "act", act: "mcp-toggle", name } });
       lines.push({ text: `      ${transport}` });
       if (endpoint) lines.push({ text: `      ${endpoint}` });
       if (entry.note) lines.push({ text: `      ${entry.note}` });
@@ -49,7 +49,7 @@ export function mcpLines(snap: FleetSnapshot, width: number): ContentLine[] {
     for (const [name, entry] of disabled) {
       const transport = transportOf(entry.config);
       const endpoint = typeof entry.config.url === "string" ? entry.config.url : typeof entry.config.command === "string" ? entry.config.command : "";
-      lines.push(listItem(name, undefined));
+      lines.push({ text: `  ○ ${name}`, action: { type: "act", act: "mcp-toggle", name } });
       lines.push({ text: `      ${transport}` });
       if (endpoint) lines.push({ text: `      ${endpoint}` });
       if (entry.disabledAt) lines.push({ text: `      since ${entry.disabledAt.slice(0, 10)}` });
@@ -60,8 +60,6 @@ export function mcpLines(snap: FleetSnapshot, width: number): ContentLine[] {
 
   lines.push(sectionRule("commands", width));
   lines.push({ text: "  rig mcp list              show all servers" });
-  lines.push({ text: "  rig mcp enable <name>     enable a server" });
-  lines.push({ text: "  rig mcp disable <name>    disable a server" });
   lines.push({ text: "  rig mcp show <name>       show config (--reveal for secrets)" });
   lines.push({ text: "  rig mcp import            import from ~/.claude.json" });
   lines.push({ text: "  rig mcp sync              force sync registry → claude.json" });
