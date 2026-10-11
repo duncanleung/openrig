@@ -35,8 +35,11 @@ export function mcpLines(snap: FleetSnapshot, width: number): ContentLine[] {
     lines.push(sectionRule("enabled", width));
     for (const [name, entry] of enabled) {
       const transport = transportOf(entry.config);
-      const url = typeof entry.config.url === "string" ? entry.config.url : typeof entry.config.command === "string" ? entry.config.command : "";
-      lines.push(listItem(`${name}  ·  ${transport}  ·  ${url}`, undefined));
+      const endpoint = typeof entry.config.url === "string" ? entry.config.url : typeof entry.config.command === "string" ? entry.config.command : "";
+      lines.push(listItem(name, undefined));
+      lines.push({ text: `      ${transport}` });
+      if (endpoint) lines.push({ text: `      ${endpoint}` });
+      if (entry.note) lines.push({ text: `      ${entry.note}` });
     }
     lines.push({ text: "" });
   }
@@ -45,8 +48,11 @@ export function mcpLines(snap: FleetSnapshot, width: number): ContentLine[] {
     lines.push(sectionRule("disabled", width));
     for (const [name, entry] of disabled) {
       const transport = transportOf(entry.config);
-      const since = entry.disabledAt ? `since ${entry.disabledAt.slice(0, 10)}` : "";
-      lines.push(listItem(`${name}  ·  ${transport}  ·  ${since}`, undefined));
+      const endpoint = typeof entry.config.url === "string" ? entry.config.url : typeof entry.config.command === "string" ? entry.config.command : "";
+      lines.push(listItem(name, undefined));
+      lines.push({ text: `      ${transport}` });
+      if (endpoint) lines.push({ text: `      ${endpoint}` });
+      if (entry.disabledAt) lines.push({ text: `      since ${entry.disabledAt.slice(0, 10)}` });
       if (entry.note) lines.push({ text: `      ${entry.note}` });
     }
     lines.push({ text: "" });
