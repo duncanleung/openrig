@@ -626,4 +626,20 @@ describe("FleetStore.checkReviewExists", () => {
     expect(result.exists).toBe(true);
     expect(result.traceId).toBe("trace-002");
   });
+
+  it("returns exists=false when the only review at that sha had must-fix findings", () => {
+    store.upsertReviewRun(
+      run({ traceId: "trace-mf", repo: "duncanleung/openrig", branch: "feat/mf", headSha: "aaa111", mustFix: 2, sourceHash: "mf1" }),
+      [],
+    );
+    expect(store.checkReviewExists("duncanleung/openrig", "feat/mf", "aaa111").exists).toBe(false);
+  });
+
+  it("returns exists=false when the review has no completed_at", () => {
+    store.upsertReviewRun(
+      run({ traceId: "trace-inc", repo: "duncanleung/openrig", branch: "feat/inc", headSha: "bbb222", completedAt: null, sourceHash: "inc1" }),
+      [],
+    );
+    expect(store.checkReviewExists("duncanleung/openrig", "feat/inc", "bbb222").exists).toBe(false);
+  });
 });

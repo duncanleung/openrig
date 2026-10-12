@@ -518,6 +518,7 @@ export class FleetStore {
       SELECT trace_id, completed_at
         FROM review_runs
        WHERE repo = ? AND branch = ? AND head_sha = ?
+         AND must_fix = 0 AND completed_at IS NOT NULL
        ORDER BY completed_at DESC LIMIT 1
     `).get(repo, branch, headSha) as { trace_id: string; completed_at: string | null } | undefined;
     return {
