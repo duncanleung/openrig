@@ -394,6 +394,11 @@ export async function hydrateSnapshot(
     return { ...emptySnapshot(), ...(health ? { health: { ...health, availability: "loaded" as const } } : {}), readErrors, hydratedAt: new Date().toISOString() };
   }
 
+  if (viewContext?.section === "mcp") {
+    const mcpRegistry = await safe<NonNullable<FleetSnapshot["mcpRegistry"]>>("MCP registry", () => client.mcpRegistry());
+    return { ...emptySnapshot(), mcpRegistry: mcpRegistry ?? null, readErrors, hydratedAt: new Date().toISOString() };
+  }
+
   // Project reads never fall back to the daemon's default workspace or fleet queue.
   if (viewContext?.section === "scopes") {
     const projects = await safe<NonNullable<FleetSnapshot["projects"]>>("projects", () => client.projects());

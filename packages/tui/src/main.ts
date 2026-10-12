@@ -416,6 +416,9 @@ async function run(): Promise<void> {
       } else if (action.act === "run") {
         const result = await client.launchNode(action.rigId, action.agent);
         view.dispatch({ type: "notice", message: launchNodeNotice(action.agent, result) });
+      } else if (action.act === "mcp-toggle") {
+        const result = await client.mcpToggle(action.name);
+        view.dispatch({ type: "notice", message: `${result.name}: ${result.enabled ? "enabled" : "disabled"}` });
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);

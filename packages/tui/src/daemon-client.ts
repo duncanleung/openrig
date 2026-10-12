@@ -362,4 +362,12 @@ export class DaemonClient {
     if (!response.ok || result.ok === false) throw new StartupRequestError(response.status, result);
     return result as T;
   }
+
+  async mcpRegistry(): Promise<import("./mcp/mcp-model.js").McpRegistryRead> {
+    return this.get("/api/mcp/registry") as Promise<import("./mcp/mcp-model.js").McpRegistryRead>;
+  }
+
+  async mcpToggle(name: string): Promise<{ name: string; enabled: boolean }> {
+    return this.post(`/api/mcp/toggle/${encodeURIComponent(name)}`, {}) as Promise<{ name: string; enabled: boolean }>;
+  }
 }
