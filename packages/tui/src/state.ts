@@ -664,7 +664,7 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
           action: { type: "drill", resource: "host", name: host.name },
           key: `host:${host.name}`,
         });
-        for (const rig of host.rigs) {
+        for (const rig of [...host.rigs].sort((a, b) => a.name.localeCompare(b.name))) {
           const stateSuffix = rig.lifecycleState && rig.lifecycleState !== "running" ? ` (${rig.lifecycleState})` : "";
           rows.push({
             label: `    ▾ ${rig.name}${stateSuffix}`,
