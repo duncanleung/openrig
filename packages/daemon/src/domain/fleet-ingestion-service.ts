@@ -487,9 +487,10 @@ export class FleetIngestionService {
         const hash = sourceHash(filePath);
         if (!opts?.force && hash !== null) {
           const existing = this.db.prepare(
-            "SELECT source_hash, parser_version FROM session_digests WHERE native_session_id = ?",
-          ).get(sessionIdFromPath(filePath)) as { source_hash: string | null; parser_version: string | null } | undefined;
-          if (existing?.source_hash === hash && existing?.parser_version === PARSER_VERSION) {
+            "SELECT source_hash, parser_version, rig_name FROM session_digests WHERE native_session_id = ?",
+          ).get(sessionIdFromPath(filePath)) as { source_hash: string | null; parser_version: string | null; rig_name: string | null } | undefined;
+          // Rows without rig_name are re-processed even when unchanged, to backfill identity.
+          if (existing?.source_hash === hash && existing?.parser_version === PARSER_VERSION && existing.rig_name) {
             result.skipped++;
             return;
           }
@@ -530,9 +531,10 @@ export class FleetIngestionService {
           const raw = JSON.parse(readFileSync(metricsPath, "utf-8")) as Record<string, unknown>;
           const traceId = typeof raw.traceId === "string" ? raw.traceId : sha256Hex(logDir);
           const existing = this.db.prepare(
-            "SELECT source_hash FROM review_runs WHERE trace_id = ?",
-          ).get(traceId) as { source_hash: string | null } | undefined;
-          if (existing?.source_hash === hash) {
+            "SELECT source_hash, rig_name FROM review_runs WHERE trace_id = ?",
+          ).get(traceId) as { source_hash: string | null; rig_name: string | null } | undefined;
+          // Rows without rig_name are re-processed even when unchanged, to backfill identity.
+          if (existing?.source_hash === hash && existing.rig_name) {
             result.skipped++;
             continue;
           }
