@@ -9,6 +9,7 @@ import type { StartupAction, StartupProofSelection } from "./types.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
   ProjectionResult, StartupDeliveryResult, ForkSource,
+  HarnessLaunchRecovery,
 } from "./runtime-adapter.js";
 import { isAttentionRequiredReadinessCode, resolveConcreteHint } from "./runtime-adapter.js";
 import type { ProjectionPlan } from "./projection-planner.js";
@@ -107,7 +108,7 @@ export type StartupResult = { warnings?: string[] } & (
   // outcomes so restore-orchestrator's per-node mapping can populate
   // `attentionEvidence` on the RestoreNodeResult. Internal type only;
   // not persisted on the failure event.
-  | { ok: false; startupStatus: "attention_required" | "failed"; errors: string[]; evidence?: string; recovery?: string });
+  | { ok: false; startupStatus: "attention_required" | "failed"; errors: string[]; evidence?: string; recovery?: HarnessLaunchRecovery });
 
 interface StartupOrchestratorDeps {
   db: Database.Database;
@@ -678,7 +679,7 @@ export class StartupOrchestrator {
     errors: string[],
     evidence?: string,
     freshContextPending = false,
-    recovery?: string,
+    recovery?: HarnessLaunchRecovery,
   ): StartupResult {
     if (status === "attention_required" && freshContextPending && input.binding.tmuxSession) {
       errors.push(`After resolving it in ${input.binding.tmuxSession}, run: rig seat continue ${shellQuote(input.binding.tmuxSession)}`);

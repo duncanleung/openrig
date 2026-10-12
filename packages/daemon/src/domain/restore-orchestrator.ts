@@ -1335,7 +1335,18 @@ export class RestoreOrchestrator {
                   ? this.resolveRestoreContext(node.cwd, resumeToken, node.logicalId, sessionName)
                   : null;
 
-                if (restoreCtx) {
+                if (restoreCtx && startupCtx) {
+                  // MF-5 fix: use the FULL startup context, not the replay-
+                  // contained empty arrays. replayContained is true here (resume
+                  // was requested + token exists), so sourceActions/filteredFiles
+                  // are empty. The re-launch is a fresh session that needs startup
+                  // files and actions.
+                  const existsFn = opts?.fsOps?.exists ?? (() => true);
+                  const freshFiles = startupCtx.resolvedStartupFiles
+                    .map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsFn))
+                    .filter((f) => existsFn(f.absolutePath));
+                  const freshActions = startupCtx.startupActions;
+
                   // Re-launch fresh with restore context injected as a startup action
                   this.clearStaleState(node.id, rigId);
                   const reLaunch = await this.nodeLauncher.launchNode(rigId, node.logicalId, { cwd: node.cwd ?? undefined, sessionName });
@@ -1350,7 +1361,16 @@ export class RestoreOrchestrator {
                       appliesOn: ["fresh_start"],
                       idempotent: false,
                     };
-                    const actionsWithRestore = [...sourceActions, restoreAction];
+                    const actionsWithRestore = [...freshActions, restoreAction];
+                    const freshPlan: import("./projection-planner.js").ProjectionPlan = {
+                      runtime: startupCtx.runtime,
+                      cwd: node.cwd ?? ".",
+                      entries: [],
+                      startup: { files: freshFiles as import("./types.js").StartupFile[], actions: actionsWithRestore },
+                      conflicts: [],
+                      noOps: [],
+                      diagnostics: [],
+                    };
                     try {
                       const { StartupOrchestrator } = await import("./startup-orchestrator.js");
                       const freshStartupOrch = new StartupOrchestrator({ db: this.db, sessionRegistry: this.sessionRegistry, eventBus: this.eventBus, tmuxAdapter: this.tmuxAdapter });
@@ -1360,8 +1380,8 @@ export class RestoreOrchestrator {
                         sessionId: reLaunch.session.id,
                         binding: { ...reLaunch.binding, cwd: node.cwd ?? ".", codexConfigProfile: node.codexConfigProfile ?? undefined, launchPosture: this.resolveRestorePosture(node.id, rigId), model: node.model ?? undefined, effort: node.effort ?? undefined } as import("./runtime-adapter.js").NodeBinding,
                         adapter,
-                        plan: { ...plan, startup: { files: filteredFiles as import("./types.js").StartupFile[], actions: actionsWithRestore } },
-                        resolvedStartupFiles: filteredFiles,
+                        plan: freshPlan,
+                        resolvedStartupFiles: freshFiles,
                         startupActions: actionsWithRestore,
                         isRestore: false,
                         preserveStartupContext: false,
@@ -1374,7 +1394,6 @@ export class RestoreOrchestrator {
                         warnings?.push(`Seat ${node.logicalId}: expired session restored from ${restoreCtx.kind}`);
                         return { nodeId: node.id, logicalId: node.logicalId, status: "rebuilt" };
                       }
-                      // Fresh startup failed — fall through to awaiting-decision
                       warnings?.push(`Seat ${node.logicalId}: context-aware fresh restore failed: ${freshResult.errors.join("; ")}`);
                     } catch (err) {
                       warnings?.push(`Seat ${node.logicalId}: context-aware fresh restore error: ${(err as Error).message}`);
@@ -1382,7 +1401,11 @@ export class RestoreOrchestrator {
                     // Rollback the re-launched session on failure
                     await this.rollbackToZeroSession(node.id, sessionName, reLaunch.session.id, priorState);
                   } else {
-                    warnings?.push(`Seat ${node.logicalId}: re-launch for context restore failed`);
+                    // MF-1/MF-4 fix: restore prior state after failed relaunch
+                    // since clearStaleState destroyed the binding
+                    const reLaunchResult = reLaunch as { code?: string; message?: string };
+                    warnings?.push(`Seat ${node.logicalId}: re-launch for context restore failed: ${reLaunchResult.message ?? reLaunchResult.code ?? "unknown"}`);
+                    if (priorState) this.restoreNodeState(node.id, priorState);
                   }
                 }
 
