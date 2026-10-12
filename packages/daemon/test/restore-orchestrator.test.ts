@@ -2202,7 +2202,7 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
-  it("pod-aware Claude restore rebuilds from checkpoint when resume launch proves session expired", async () => {
+  it("pod-aware Claude restore rebuilds from checkpoint and delivers content via sendText", async () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-checkpoint-restore-"));
     try {
       const rig = rigRepo.createRig("test-rig");
@@ -2213,17 +2213,17 @@ describe("RestoreOrchestrator", () => {
       sessionRegistry.updateResumeToken(session.id, "claude_id", "stale-claude-token");
       db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "claude-code");
 
-      // Create .ai/compact-checkpoint-<token>.md with matching SESSION_ID
-      const aiDir = path.join(tmpDir, ".ai");
-      fs.mkdirSync(aiDir, { recursive: true });
-      fs.writeFileSync(path.join(aiDir, "compact-checkpoint-stale-claude-token.md"), [
+      const checkpointContent = [
         "# Compact Checkpoint",
         "SESSION_ID: stale-claude-token",
         "MODEL: claude-opus-4-6",
         "---",
         "## Goal",
         "Implementing feature X",
-      ].join("\n"));
+      ].join("\n");
+      const aiDir = path.join(tmpDir, ".ai");
+      fs.mkdirSync(aiDir, { recursive: true });
+      fs.writeFileSync(path.join(aiDir, "compact-checkpoint-stale-claude-token.md"), checkpointContent);
 
       const snap = snapshotCapture.captureSnapshot(rig.id, "test");
       sessionRegistry.updateStatus(session.id, "exited");
@@ -2232,6 +2232,64 @@ describe("RestoreOrchestrator", () => {
       const launchHarness = vi.fn()
         .mockResolvedValueOnce({ ok: false as const, error: "Claude resume failed: no conversation found", recovery: "retry_fresh" })
         .mockResolvedValueOnce({ ok: true as const, resumeToken: "fresh-claude-token", resumeType: "claude_id" });
+      const tmux = mockTmux();
+      const mockAdapter = {
+        runtime: "claude-code",
+        listInstalled: vi.fn(async () => []),
+        project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+        deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+        checkReady: vi.fn(async () => ({ ready: true })),
+        launchHarness,
+      };
+
+      const orch = createOrchestrator({ tmux });
+      const result = await orch.restore(snap.id, { adapters: { "claude-code": mockAdapter } });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
+        expect(nodeResult!.status).toBe("rebuilt");
+        expect(launchHarness).toHaveBeenCalledTimes(2);
+        // Verify checkpoint content was delivered via sendText (startup's sendInteractiveText)
+        const sendTextCalls = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls;
+        const checkpointDelivered = sendTextCalls.some(
+          (call: unknown[]) => typeof call[1] === "string" && call[1].includes("Implementing feature X"),
+        );
+        expect(checkpointDelivered).toBe(true);
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("checkpoint with mismatched SESSION_ID is ignored — falls through to awaiting-decision", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-bad-checkpoint-"));
+    try {
+      const rig = rigRepo.createRig("test-rig");
+      db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-claude-badckpt", rig.id, "Dev");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-claude-badckpt", cwd: tmpDir });
+      const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateResumeToken(session.id, "claude_id", "my-token-abc");
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "claude-code");
+
+      // Checkpoint file exists but SESSION_ID does not match the token
+      const aiDir = path.join(tmpDir, ".ai");
+      fs.mkdirSync(aiDir, { recursive: true });
+      fs.writeFileSync(path.join(aiDir, "compact-checkpoint-my-token-abc.md"), [
+        "# Compact Checkpoint",
+        "SESSION_ID: different-session-id",
+        "---",
+        "## Goal",
+        "Wrong session",
+      ].join("\n"));
+
+      const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+      sessionRegistry.updateStatus(session.id, "exited");
+      db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+      const launchHarness = vi.fn()
+        .mockResolvedValueOnce({ ok: false as const, error: "no conversation found", recovery: "retry_fresh" });
       const mockAdapter = {
         runtime: "claude-code",
         listInstalled: vi.fn(async () => []),
@@ -2247,9 +2305,66 @@ describe("RestoreOrchestrator", () => {
       expect(result.ok).toBe(true);
       if (result.ok) {
         const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-        expect(nodeResult!.status).toBe("rebuilt");
-        // First call: resume attempt (fails). Second call: fresh re-launch with restore context.
-        expect(launchHarness).toHaveBeenCalledTimes(2);
+        expect(nodeResult!.status).toBe("awaiting-decision");
+        expect(launchHarness).toHaveBeenCalledTimes(1);
+      }
+    } finally {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("failed relaunch after clearStaleState restores prior node state", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-failed-relaunch-"));
+    try {
+      const rig = rigRepo.createRig("test-rig");
+      db.prepare("INSERT INTO pods (id, rig_id, label) VALUES (?, ?, ?)").run("pod-claude-failrelaunch", rig.id, "Dev");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", podId: "pod-claude-failrelaunch", cwd: tmpDir });
+      const session = sessionRegistry.registerSession(node.id, "dev-impl@test-rig");
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateResumeToken(session.id, "claude_id", "stale-relaunch-token");
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, ?, ?, ?, ?)").run(node.id, "[]", "[]", "[]", "claude-code");
+
+      const aiDir = path.join(tmpDir, ".ai");
+      fs.mkdirSync(aiDir, { recursive: true });
+      fs.writeFileSync(path.join(aiDir, "compact-checkpoint-stale-relaunch-token.md"), [
+        "# Compact Checkpoint",
+        "SESSION_ID: stale-relaunch-token",
+        "---",
+        "## Goal",
+        "Test relaunch failure",
+      ].join("\n"));
+
+      const snap = snapshotCapture.captureSnapshot(rig.id, "test");
+      sessionRegistry.updateStatus(session.id, "exited");
+      db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
+
+      // First launchHarness: resume fails. The tmux createSession will fail
+      // on the second launch (the context-aware relaunch), simulating a
+      // launchNode failure.
+      const tmux = mockTmux();
+      (tmux.createSession as ReturnType<typeof vi.fn>)
+        .mockResolvedValueOnce({ ok: true as const })
+        .mockResolvedValueOnce({ ok: false as const, message: "tmux: duplicate session" });
+      const launchHarness = vi.fn()
+        .mockResolvedValueOnce({ ok: false as const, error: "no conversation found", recovery: "retry_fresh" });
+      const mockAdapter = {
+        runtime: "claude-code",
+        listInstalled: vi.fn(async () => []),
+        project: vi.fn(async () => ({ projected: [], skipped: [], failed: [] })),
+        deliverStartup: vi.fn(async () => ({ delivered: 0, failed: [] })),
+        checkReady: vi.fn(async () => ({ ready: true })),
+        launchHarness,
+      };
+
+      const orch = createOrchestrator({ tmux });
+      const result = await orch.restore(snap.id, { adapters: { "claude-code": mockAdapter } });
+
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
+        expect(nodeResult!.status).toBe("awaiting-decision");
+        // Verify the warning includes the relaunch failure
+        expect(result.result.warnings?.some((w) => w.includes("re-launch for context restore failed"))).toBe(true);
       }
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -2287,7 +2402,6 @@ describe("RestoreOrchestrator", () => {
       expect(result.ok).toBe(true);
       if (result.ok) {
         const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-        // No checkpoint, no transcript → falls through to awaiting-decision
         expect(nodeResult!.status).toBe("awaiting-decision");
         expect(nodeResult!.error).toContain("Original session unresumable");
         expect(launchHarness).toHaveBeenCalledTimes(1);
