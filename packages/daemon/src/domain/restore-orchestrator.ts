@@ -1,6 +1,7 @@
 import { nonInterruptiveNotice, nonInterruptiveSummary } from "../adapters/non-interruptive.js";
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import type Database from "better-sqlite3";
 import { NativePermissionStore } from "./native-permission-store.js";
 import type { RigRepository } from "./rig-repository.js";
@@ -954,6 +955,59 @@ export class RestoreOrchestrator {
     }
   }
 
+  /**
+   * Option C: resolve the best available restore context for an expired session.
+   * Returns checkpoint content if `.ai/compact-checkpoint-<token>.md` exists and
+   * its SESSION_ID header matches, else a transcript-restore directive if the
+   * JSONL transcript exists, else null (plain fresh-prime).
+   */
+  private resolveRestoreContext(
+    cwd: string | null,
+    predecessorToken: string,
+    logicalId: string,
+    sessionName: string,
+  ): { kind: "checkpoint"; content: string } | { kind: "transcript"; directive: string } | null {
+    // 1. Checkpoint path — purpose-built restore packet, 3-10 KB
+    if (cwd) {
+      const checkpointPath = join(cwd, ".ai", `compact-checkpoint-${predecessorToken}.md`);
+      if (existsSync(checkpointPath)) {
+        try {
+          const content = readFileSync(checkpointPath, "utf-8");
+          const sessionIdMatch = content.match(/^SESSION_ID:\s*(.+)$/m);
+          if (sessionIdMatch && sessionIdMatch[1]!.trim() === predecessorToken) {
+            return { kind: "checkpoint", content };
+          }
+        } catch { /* fall through to transcript */ }
+      }
+    }
+
+    // 2. Transcript path — JSONL at ~/.claude/projects/<encoded-cwd>/<token>.jsonl
+    const projectsRoot = join(homedir(), ".claude", "projects");
+    if (existsSync(projectsRoot)) {
+      try {
+        const dirs = readdirSync(projectsRoot, { withFileTypes: true })
+          .filter((d) => d.isDirectory())
+          .map((d) => d.name);
+        for (const d of dirs) {
+          const candidate = join(projectsRoot, d, `${predecessorToken}.jsonl`);
+          if (existsSync(candidate)) {
+            return {
+              kind: "transcript",
+              directive: [
+                `You are restoring seat ${logicalId} (${sessionName}) after a session expiry.`,
+                `Your predecessor's transcript is at: ${candidate}`,
+                `Run the claude-compaction-restore skill to rebuild your context from that transcript.`,
+                `Do not start new work until restore completes.`,
+              ].join("\n"),
+            };
+          }
+        }
+      } catch { /* fall through to null */ }
+    }
+
+    return null;
+  }
+
   private async postLaunchRestore(
     entry: PlanEntry,
     rigId: string,
@@ -1272,6 +1326,96 @@ export class RestoreOrchestrator {
               };
             }
             if (isPodAware && resumeRequested) {
+              if (startupResult.recovery === "retry_fresh") {
+                await this.rollbackToZeroSession(node.id, sessionName, launchResult?.session.id, priorState);
+
+                // Option C: attempt context-aware fresh restore before falling
+                // back to awaiting-decision.
+                const restoreCtx = resumeToken
+                  ? this.resolveRestoreContext(node.cwd, resumeToken, node.logicalId, sessionName)
+                  : null;
+
+                if (restoreCtx && startupCtx) {
+                  // MF-5 fix: use the FULL startup context, not the replay-
+                  // contained empty arrays. replayContained is true here (resume
+                  // was requested + token exists), so sourceActions/filteredFiles
+                  // are empty. The re-launch is a fresh session that needs startup
+                  // files and actions.
+                  const existsFn = opts?.fsOps?.exists ?? (() => true);
+                  const freshFiles = startupCtx.resolvedStartupFiles
+                    .map((f) => reanchorBuiltinStartupFile(f, undefined, undefined, existsFn))
+                    .filter((f) => existsFn(f.absolutePath));
+                  const freshActions = startupCtx.startupActions;
+
+                  // Re-launch fresh with restore context injected as a startup action
+                  this.clearStaleState(node.id, rigId);
+                  const reLaunch = await this.nodeLauncher.launchNode(rigId, node.logicalId, { cwd: node.cwd ?? undefined, sessionName });
+                  if (reLaunch.ok) {
+                    const restoreText = restoreCtx.kind === "checkpoint"
+                      ? restoreCtx.content
+                      : restoreCtx.directive;
+                    const restoreAction: import("./types.js").StartupAction = {
+                      type: "send_text",
+                      value: restoreText,
+                      phase: "after_ready",
+                      appliesOn: ["fresh_start"],
+                      idempotent: false,
+                    };
+                    const actionsWithRestore = [...freshActions, restoreAction];
+                    const freshPlan: import("./projection-planner.js").ProjectionPlan = {
+                      runtime: startupCtx.runtime,
+                      cwd: node.cwd ?? ".",
+                      entries: [],
+                      startup: { files: freshFiles as import("./types.js").StartupFile[], actions: actionsWithRestore },
+                      conflicts: [],
+                      noOps: [],
+                      diagnostics: [],
+                    };
+                    try {
+                      const { StartupOrchestrator } = await import("./startup-orchestrator.js");
+                      const freshStartupOrch = new StartupOrchestrator({ db: this.db, sessionRegistry: this.sessionRegistry, eventBus: this.eventBus, tmuxAdapter: this.tmuxAdapter });
+                      const freshResult = await freshStartupOrch.startNode({
+                        rigId,
+                        nodeId: node.id,
+                        sessionId: reLaunch.session.id,
+                        binding: { ...reLaunch.binding, cwd: node.cwd ?? ".", codexConfigProfile: node.codexConfigProfile ?? undefined, launchPosture: this.resolveRestorePosture(node.id, rigId), model: node.model ?? undefined, effort: node.effort ?? undefined } as import("./runtime-adapter.js").NodeBinding,
+                        adapter,
+                        plan: freshPlan,
+                        resolvedStartupFiles: freshFiles,
+                        startupActions: actionsWithRestore,
+                        isRestore: false,
+                        preserveStartupContext: false,
+                        skipHarnessLaunch: false,
+                        sessionName,
+                        allowFreshFallback: true,
+                        includeDurableObligations: true,
+                      });
+                      if (freshResult.ok) {
+                        warnings?.push(`Seat ${node.logicalId}: expired session restored from ${restoreCtx.kind}`);
+                        return { nodeId: node.id, logicalId: node.logicalId, status: "rebuilt" };
+                      }
+                      warnings?.push(`Seat ${node.logicalId}: context-aware fresh restore failed: ${freshResult.errors.join("; ")}`);
+                    } catch (err) {
+                      warnings?.push(`Seat ${node.logicalId}: context-aware fresh restore error: ${(err as Error).message}`);
+                    }
+                    // Rollback the re-launched session on failure
+                    await this.rollbackToZeroSession(node.id, sessionName, reLaunch.session.id, priorState);
+                  } else {
+                    // MF-1/MF-4 fix: restore prior state after failed relaunch
+                    // since clearStaleState destroyed the binding
+                    const reLaunchResult = reLaunch as { code?: string; message?: string };
+                    warnings?.push(`Seat ${node.logicalId}: re-launch for context restore failed: ${reLaunchResult.message ?? reLaunchResult.code ?? "unknown"}`);
+                    if (priorState) this.restoreNodeState(node.id, priorState);
+                  }
+                }
+
+                return {
+                  nodeId: node.id,
+                  logicalId: node.logicalId,
+                  status: "awaiting-decision",
+                  error: `Original session unresumable: ${startupResult.errors.join("; ")}. No session was started. Re-run with --fresh ${node.logicalId} to deliberately start a fresh-primed seat, or restore the original session manually.`,
+                };
+              }
               return {
                 nodeId: node.id,
                 logicalId: node.logicalId,
