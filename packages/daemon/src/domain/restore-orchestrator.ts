@@ -1272,6 +1272,15 @@ export class RestoreOrchestrator {
               };
             }
             if (isPodAware && resumeRequested) {
+              if (startupResult.recovery === "retry_fresh") {
+                await this.rollbackToZeroSession(node.id, sessionName, launchResult?.session.id, priorState);
+                return {
+                  nodeId: node.id,
+                  logicalId: node.logicalId,
+                  status: "awaiting-decision",
+                  error: `Original session unresumable: ${startupResult.errors.join("; ")}. No session was started. Re-run with --fresh ${node.logicalId} to deliberately start a fresh-primed seat, or restore the original session manually.`,
+                };
+              }
               return {
                 nodeId: node.id,
                 logicalId: node.logicalId,
