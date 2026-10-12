@@ -23,40 +23,36 @@ export function mcpLines(snap: FleetSnapshot, width: number): ContentLine[] {
   if (reg === null) return [{ text: "MCP Servers · registry not found" }, { text: "" }, { text: "  Run `rig mcp import` to bootstrap the registry from ~/.claude.json" }];
 
   const entries = Object.entries(reg.servers).sort(([a], [b]) => a.localeCompare(b));
-  const enabled = entries.filter(([, e]) => e.enabled);
-  const disabled = entries.filter(([, e]) => !e.enabled);
+  const enabledCount = entries.filter(([, e]) => e.enabled).length;
+  const disabledCount = entries.length - enabledCount;
 
   const lines: ContentLine[] = [
-    { text: `MCP Servers · ${enabled.length} enabled, ${disabled.length} disabled  (Enter toggles)` },
+    { text: `MCP Servers · ${enabledCount} enabled, ${disabledCount} disabled  (Enter toggles)` },
     { text: "" },
   ];
 
-  if (enabled.length > 0) {
-    lines.push(sectionRule("enabled", width));
-    for (const [name, entry] of enabled) {
-      const transport = transportOf(entry.config);
-      const endpoint = typeof entry.config.url === "string" ? entry.config.url : typeof entry.config.command === "string" ? entry.config.command : "";
-      lines.push({ text: `  ● ${name}`, action: { type: "act", act: "mcp-toggle", name } });
-      lines.push({ text: `      ${transport}` });
-      if (endpoint) lines.push({ text: `      ${endpoint}` });
-      if (entry.note) lines.push({ text: `      ${entry.note}` });
-    }
-    lines.push({ text: "" });
+  for (const [name, entry] of entries) {
+    const glyph = entry.enabled ? "●" : "○";
+    const status = entry.enabled ? "enabled" : "disabled";
+    const transport = transportOf(entry.config);
+    const endpoint = typeof entry.config.url === "string" ? entry.config.url : typeof entry.config.command === "string" ? entry.config.command : "";
+    const prefix = `  ${glyph} ${name}`;
+    const pad = Math.max(2, width - prefix.length - status.length);
+    const full = prefix + " ".repeat(pad) + status;
+    lines.push({
+      text: full,
+      action: { type: "act", act: "mcp-toggle", name },
+      segs: [
+        { text: prefix },
+        { text: " ".repeat(pad) + status, token: entry.enabled ? "accent" : "dim" },
+      ],
+    });
+    lines.push({ text: `      ${transport}` });
+    if (endpoint) lines.push({ text: `      ${endpoint}` });
+    if (!entry.enabled && entry.disabledAt) lines.push({ text: `      since ${entry.disabledAt.slice(0, 10)}` });
+    if (entry.note) lines.push({ text: `      ${entry.note}` });
   }
-
-  if (disabled.length > 0) {
-    lines.push(sectionRule("disabled", width));
-    for (const [name, entry] of disabled) {
-      const transport = transportOf(entry.config);
-      const endpoint = typeof entry.config.url === "string" ? entry.config.url : typeof entry.config.command === "string" ? entry.config.command : "";
-      lines.push({ text: `  ○ ${name}`, action: { type: "act", act: "mcp-toggle", name } });
-      lines.push({ text: `      ${transport}` });
-      if (endpoint) lines.push({ text: `      ${endpoint}` });
-      if (entry.disabledAt) lines.push({ text: `      since ${entry.disabledAt.slice(0, 10)}` });
-      if (entry.note) lines.push({ text: `      ${entry.note}` });
-    }
-    lines.push({ text: "" });
-  }
+  lines.push({ text: "" });
 
   lines.push(sectionRule("commands", width));
   lines.push({ text: "  rig mcp list              show all servers" });
