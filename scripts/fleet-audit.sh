@@ -20,13 +20,13 @@
 #   PUSHOVER_USER_KEY, PUSHOVER_APP_TOKEN   Pushover credentials. Missing = alerts skipped, report still written.
 #   OPENRIG_HOME            default ~/.openrig
 #   FLEET_AUDIT_ENV         optional env file, default $OPENRIG_HOME/fleet-audit.env
-#   FLEET_AUDIT_DB          default $OPENRIG_HOME/openrig.sqlite
+#   FLEET_AUDIT_DB          default $OPENRIG_DB, then $RIGGED_DB, then $OPENRIG_HOME/openrig.sqlite
 #   FLEET_AUDIT_DIR         default $OPENRIG_HOME/fleet-audit
 #   FLEET_AUDIT_DAY         YYYY-MM-DD to audit (default: yesterday)
 #   FLEET_AUDIT_WEEKLY=1    force the weekly digest on any weekday
 #   COMPACTION_LIMIT (10)  TOKEN_LIMIT (10000000)  RATIO_LIMIT (10000000)
 #   DORMANT_DAYS (3)  IDLE_TOKENS (100000 tokens per rig across the window counts as idle)
-#   KEEP_REPORTS (30)
+#   KEEP_REPORTS (30, min 1)
 #
 # Usage: fleet-audit.sh [--dry-run]     (--dry-run prints alerts instead of sending them)
 #
@@ -34,9 +34,10 @@
 #   1. Put credentials in ~/.openrig/fleet-audit.env (chmod 600), sourced by this script:
 #        PUSHOVER_USER_KEY=...
 #        PUSHOVER_APP_TOKEN=...      # app: https://pushover.net/apps/nqbujh-openrig
-#   2. sed -e "s|__SCRIPT__|$PWD/scripts/fleet-audit.sh|" -e "s|__HOME__|$HOME|g" \
+#   2. mkdir -p ~/.openrig/fleet-audit   # launchd does not create parent directories for log paths
+#   3. sed -e "s|__SCRIPT__|$PWD/scripts/fleet-audit.sh|" -e "s|__HOME__|$HOME|g" \
 #        scripts/fleet-audit.plist.template > ~/Library/LaunchAgents/com.openrig.fleet-audit.plist
-#   3. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.openrig.fleet-audit.plist
+#   4. launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.openrig.fleet-audit.plist
 #   Test now:  scripts/fleet-audit.sh --dry-run     Run via launchd: launchctl kickstart gui/$(id -u)/com.openrig.fleet-audit
 #   Remove:    launchctl bootout gui/$(id -u)/com.openrig.fleet-audit
 #   Logs: ~/.openrig/fleet-audit/launchd.log
@@ -50,7 +51,7 @@ OPENRIG_HOME="${OPENRIG_HOME:-$HOME/.openrig}"
 ENV_FILE="${FLEET_AUDIT_ENV:-$OPENRIG_HOME/fleet-audit.env}"
 # shellcheck disable=SC1090
 [[ -r "$ENV_FILE" ]] && { set -a; . "$ENV_FILE"; set +a; }
-DB="${FLEET_AUDIT_DB:-$OPENRIG_HOME/openrig.sqlite}"
+DB="${FLEET_AUDIT_DB:-${OPENRIG_DB:-${RIGGED_DB:-$OPENRIG_HOME/openrig.sqlite}}}"
 OUT_DIR="${FLEET_AUDIT_DIR:-$OPENRIG_HOME/fleet-audit}"
 COMPACTION_LIMIT="${COMPACTION_LIMIT:-10}"
 TOKEN_LIMIT="${TOKEN_LIMIT:-10000000}"
@@ -65,6 +66,7 @@ die() { log "ERROR $*"; exit 1; }
 for n in COMPACTION_LIMIT TOKEN_LIMIT RATIO_LIMIT DORMANT_DAYS IDLE_TOKENS KEEP_REPORTS; do
   [[ "${!n}" =~ ^[0-9]+$ ]] || die "$n must be a non-negative integer (got '${!n}')"
 done
+(( KEEP_REPORTS >= 1 )) || die "KEEP_REPORTS must be >= 1 (got '$KEEP_REPORTS')"
 command -v sqlite3 >/dev/null || die "sqlite3 not found"
 [[ -r "$DB" ]] || die "database not readable: $DB"
 
