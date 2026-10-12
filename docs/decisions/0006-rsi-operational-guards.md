@@ -1,7 +1,7 @@
 ---
 id: ADR-0006
 title: RSI operational guards — worktree isolation, compaction limits, and output tracking
-status: proposed
+status: accepted
 date: 2026-10-12
 tags: [rsi, factory, operational, safety]
 supersedes: []
