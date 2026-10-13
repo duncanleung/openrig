@@ -634,8 +634,8 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
       });
     }
     async function adviseWith(store: AgentActivityStore, ageMs: number, generation: string | null,
-      hasSessionEnv?: (sessionName: string, varName: string) => Promise<boolean | null>, hookEvent = "UserPromptSubmit") {
-      store.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent,
+      hasSessionEnv?: (sessionName: string, varName: string) => Promise<boolean | null>, hookEvent = "UserPromptSubmit", subtype?: string) {
+      store.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent, subtype,
         occurredAt: new Date(now.getTime() - ageMs).toISOString(), generation });
       const { sendText } = spies();
       const base = mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText });
@@ -706,6 +706,14 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
       const store = storeWith({ generation: null, live: null, resolver: false });
       const w = await adviseWith(store, FOUR_DAYS, null, undefined, "Stop");
       expect(w).toContain("last event: Stop, 345600s ago");
+      expect(w).toContain("quiet seat, expected");
+      expect(w).not.toContain("hooks stopped firing");
+    });
+
+    it("a stale Notification/idle_prompt event also reads as an expected quiet seat", async () => {
+      const store = storeWith({ generation: null, live: null, resolver: false });
+      const w = await adviseWith(store, FOUR_DAYS, null, undefined, "Notification", "idle_prompt");
+      expect(w).toContain("last event: Notification/idle_prompt, 345600s ago");
       expect(w).toContain("quiet seat, expected");
       expect(w).not.toContain("hooks stopped firing");
     });

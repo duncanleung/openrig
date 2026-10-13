@@ -6,7 +6,7 @@ import type Database from "better-sqlite3";
 import type { RigRepository } from "./rig-repository.js";
 import { claudeResumeRotation, type SessionRegistry } from "./session-registry.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
-import { latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
+import { hookEventState, latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
 import type { GuardTarget, SeatDeliveryGuard } from "./seat-delivery-guard.js";
@@ -2483,8 +2483,8 @@ export class SessionTransport {
     }
     if (latest.stale === true) {
       return withEnv(`producer link STALE — the last activity hook arrived ${ageText} (beyond the store window)${lastEventNote}; ${
-        latest.rawEvent && ["Stop", "stop", "idle", "SessionEnd"].includes(latest.rawEvent)
-          ? "quiet seat, expected — an idle seat fires no hooks; its last event says it went idle"
+        hookEventState(latest.rawEvent, latest.rawSubtype, null) === "idle"
+          ? "quiet seat, expected — an idle seat fires no hooks; its last event was an idle signal (a dead producer would look the same)"
           : "the seat has gone quiet or its hooks stopped firing"}`);
     }
     return `a recent activity hook exists but the live pane probe could not confirm idle (possible identity mismatch between the seat env, the DB, and the stored payload)`;
