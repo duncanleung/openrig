@@ -79,6 +79,7 @@ describe("0.3.0 conveyor starter workflow specs", () => {
       "factory-rsi",
       "gated-release",
       "linear-build",
+      "ticket-factory",
     ]);
     expect(result.skipped).toEqual([]);
   });
