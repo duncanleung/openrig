@@ -7,6 +7,7 @@ import { dailyTokenSnapshotsSchema } from "../src/db/migrations/099_daily_token_
 import { digestTokenUsageSchema } from "../src/db/migrations/100_digest_token_usage.js";
 import { digestEscalationCountSchema } from "../src/db/migrations/101_digest_escalation_count.js";
 import { digestSessionTimestampsSchema } from "../src/db/migrations/102_digest_session_timestamps.js";
+import { digestSkillInvocationsSchema } from "../src/db/migrations/103_digest_skill_invocations.js";
 import {
   FleetStore,
   type SessionDigestInput,
@@ -27,6 +28,7 @@ function freshDb(): Database {
   db.exec(digestTokenUsageSchema.sql);
   db.exec(digestEscalationCountSchema.sql);
   db.exec(digestSessionTimestampsSchema.sql);
+  db.exec(digestSkillInvocationsSchema.sql);
   return db;
 }
 
@@ -49,6 +51,7 @@ const digest = (over: Partial<SessionDigestInput> = {}): SessionDigestInput => (
   repeatedReads: "{}",
   reviewFindings: "{}",
   handoffEvents: "[]",
+  skillInvocations: "[]",
   claudeMdLoaded: "[]",
   errors: "[]",
   irreversibleActions: "[]",
@@ -163,6 +166,14 @@ describe("096 session_digests — upsert idempotence", () => {
     expect(get()).toEqual({ started_at: "2026-10-12T10:00:00.000Z", ended_at: "2026-10-12T10:01:00.000Z", duration_ms: 60000 });
     store.upsertDigest(digest({ endedAt: "2026-10-12T10:02:00.000Z", startedAt: "2026-10-12T10:00:00.000Z", durationMs: 120000 }));
     expect(get()).toEqual({ started_at: "2026-10-12T10:00:00.000Z", ended_at: "2026-10-12T10:02:00.000Z", duration_ms: 120000 });
+  });
+
+  it("persists skill_invocations and resets to [] when re-upserted without them", () => {
+    store.upsertDigest(digest({ skillInvocations: JSON.stringify([{ skill: "recap", args: null, turn: 1 }]) }));
+    const get = () => (db.prepare("SELECT skill_invocations FROM session_digests WHERE native_session_id = 'sess-001'").get() as { skill_invocations: string }).skill_invocations;
+    expect(JSON.parse(get())).toEqual([{ skill: "recap", args: null, turn: 1 }]);
+    store.upsertDigest(digest());
+    expect(get()).toBe("[]");
   });
 
   it("different native_session_ids create separate rows", () => {

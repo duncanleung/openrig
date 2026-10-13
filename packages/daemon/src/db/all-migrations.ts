@@ -106,6 +106,7 @@ import { dailyTokenSnapshotsSchema } from "./migrations/099_daily_token_snapshot
 import { digestTokenUsageSchema } from "./migrations/100_digest_token_usage.js";
 import { digestEscalationCountSchema } from "./migrations/101_digest_escalation_count.js";
 import { digestSessionTimestampsSchema } from "./migrations/102_digest_session_timestamps.js";
+import { digestSkillInvocationsSchema } from "./migrations/103_digest_skill_invocations.js";
 import type { Migration } from "./migrate.js";
 
 import { rigInstallRootSchema } from "./migrations/096_rig_install_root.js";
@@ -224,4 +225,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   queueItemsRecoveryTagsSchema,
   resumeRotationSchema,
   digestSessionTimestampsSchema,
+  digestSkillInvocationsSchema,
 ];
