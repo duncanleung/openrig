@@ -46,7 +46,7 @@ export interface SnapshotRollupResult {
   snapshotsUpserted: number;
 }
 
-const PARSER_VERSION = "reduce-transcript.mjs@4";
+const PARSER_VERSION = "reduce-transcript.mjs@5";
 const MAX_CONCURRENT_REDUCERS = 3;
 
 function sha256Hex(data: Buffer | string): string {
@@ -257,6 +257,7 @@ function adaptDigest(
     repeatedReads: str(reducerOutput.repeatedReads),
     reviewFindings: str(reducerOutput.reviewFindings),
     handoffEvents: str(reducerOutput.handoffEvents),
+    skillInvocations: str(reducerOutput.skillInvocations),
     claudeMdLoaded: str(reducerOutput.claudeMdLoaded),
     errors: str(reducerOutput.errors),
     irreversibleActions: str(reducerOutput.irreversibleActions),

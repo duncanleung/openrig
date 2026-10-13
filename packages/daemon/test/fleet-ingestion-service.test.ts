@@ -7,6 +7,7 @@ import { dailyTokenSnapshotsSchema } from "../src/db/migrations/099_daily_token_
 import { digestTokenUsageSchema } from "../src/db/migrations/100_digest_token_usage.js";
 import { digestEscalationCountSchema } from "../src/db/migrations/101_digest_escalation_count.js";
 import { digestSessionTimestampsSchema } from "../src/db/migrations/102_digest_session_timestamps.js";
+import { digestSkillInvocationsSchema } from "../src/db/migrations/103_digest_skill_invocations.js";
 import { FleetStore } from "../src/domain/fleet-store.js";
 import { FleetIngestionService, resolveFleetReconcileIntervalMs } from "../src/domain/fleet-ingestion-service.js";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
@@ -63,6 +64,7 @@ function freshDb(): Database {
   db.exec(digestTokenUsageSchema.sql);
   db.exec(digestEscalationCountSchema.sql);
   db.exec(digestSessionTimestampsSchema.sql);
+  db.exec(digestSkillInvocationsSchema.sql);
   return db;
 }
 
@@ -421,6 +423,59 @@ describe("FleetIngestionService — session started_at / ended_at / duration_ms"
     expect(row.started_at).toBe("2026-10-12T10:00:05.000Z");
     expect(row.ended_at).toBeNull();
     expect(row.duration_ms).toBeNull();
+  });
+});
+
+// ── Skill invocations (real reducer) ───────────────────────────────────────────
+
+describe("FleetIngestionService — skill_invocations", () => {
+  let db: Database;
+  let tmpDir: string;
+  const realReducer = join(__dirname, "..", "assets", "plugins", "openrig-core", "skills", "retro", "scripts", "reduce-transcript.mjs");
+
+  beforeEach(() => {
+    db = freshDb();
+    tmpDir = mkdtempSync(join(tmpdir(), "fleet-skills-"));
+  });
+
+  const ingest = async (sessionId: string, lines: unknown[]) => {
+    const projectsDir = join(tmpDir, ".claude", "projects", "test-project");
+    mkdirSync(projectsDir, { recursive: true });
+    writeFileSync(join(projectsDir, `${sessionId}.jsonl`), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+    await makeService(db, tmpDir, realReducer).reconcileDigests();
+    const row = db.prepare("SELECT skill_invocations FROM session_digests WHERE native_session_id = ?").get(sessionId) as { skill_invocations: string };
+    return JSON.parse(row.skill_invocations) as Array<{ skill: string; args: string | null; turn: number }>;
+  };
+  const skillCall = (id: string, input: Record<string, unknown>) => ({
+    type: "assistant",
+    message: { id, content: [{ type: "tool_use", id: `tu_${id}`, name: "Skill", input }] },
+  });
+
+  it("records skill name, args and turn for each Skill call, in order", async () => {
+    const got = await ingest("skills-aaaa-bbbb-cccc-dddddddddddd", [
+      { type: "assistant", message: { id: "m0", content: [{ type: "text", text: "hi" }] } },
+      skillCall("m1", { skill: "ticket-loop", args: "RIG-57" }),
+      skillCall("m2", { skill: "recap" }),
+    ]);
+    expect(got).toEqual([
+      { skill: "ticket-loop", args: "RIG-57", turn: 2 },
+      { skill: "recap", args: null, turn: 3 },
+    ]);
+  });
+
+  it("truncates args to 200 characters", async () => {
+    const got = await ingest("skills-long-bbbb-cccc-dddddddddddd", [
+      skillCall("m1", { skill: "orchestrate", args: "x".repeat(500) }),
+    ]);
+    expect(got[0].args).toHaveLength(200);
+  });
+
+  it("stores [] when no Skill tool is called, and ignores malformed Skill inputs", async () => {
+    const none = await ingest("skills-none-bbbb-cccc-dddddddddddd", [
+      { type: "assistant", message: { id: "m1", content: [{ type: "tool_use", id: "t1", name: "Bash", input: { command: "ls" } }] } },
+      skillCall("m2", { args: "no skill name" }),
+    ]);
+    expect(none).toEqual([]);
   });
 });
 
