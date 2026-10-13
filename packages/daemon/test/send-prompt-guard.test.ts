@@ -634,8 +634,8 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
       });
     }
     async function adviseWith(store: AgentActivityStore, ageMs: number, generation: string | null,
-      hasSessionEnv?: (sessionName: string, varName: string) => Promise<boolean | null>) {
-      store.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent: "UserPromptSubmit",
+      hasSessionEnv?: (sessionName: string, varName: string) => Promise<boolean | null>, hookEvent = "UserPromptSubmit", subtype?: string) {
+      store.recordHookEvent({ runtime: "claude-code", sessionName: "dev-impl@my-rig", hookEvent, subtype,
         occurredAt: new Date(now.getTime() - ageMs).toISOString(), generation });
       const { sendText } = spies();
       const base = mockTmux({ capturePaneContent: async () => "xyzzy no prompt here", sendText });
@@ -692,6 +692,30 @@ describe("OPR.0.4.1.10 rig send prompt/permission guard (keystone)", () => {
       const w = await adviseWith(storeWith({ generation: null, live: null, resolver: false }), FOUR_DAYS, null);
       expect(w).toContain("producer link STALE — the last activity hook arrived 345600s ago (beyond the store window)");
       expect(w).not.toContain("producer link OK");
+    });
+
+    // RIG-3 — the advisory names the last raw event, and a retained Stop reads as an expected quiet seat.
+    it("a stale hook advisory names the last event and its age", async () => {
+      const w = await adviseWith(storeWith({ generation: null, live: null, resolver: false }), FOUR_DAYS, null);
+      expect(w).toContain("last event: UserPromptSubmit, 345600s ago");
+      expect(w).toContain("the seat has gone quiet or its hooks stopped firing");
+      expect(w).not.toContain("quiet seat, expected");
+    });
+
+    it("a stale Stop event says 'quiet seat, expected' instead of suggesting broken hooks", async () => {
+      const store = storeWith({ generation: null, live: null, resolver: false });
+      const w = await adviseWith(store, FOUR_DAYS, null, undefined, "Stop");
+      expect(w).toContain("last event: Stop, 345600s ago");
+      expect(w).toContain("quiet seat, expected");
+      expect(w).not.toContain("hooks stopped firing");
+    });
+
+    it("a stale Notification/idle_prompt event also reads as an expected quiet seat", async () => {
+      const store = storeWith({ generation: null, live: null, resolver: false });
+      const w = await adviseWith(store, FOUR_DAYS, null, undefined, "Notification", "idle_prompt");
+      expect(w).toContain("last event: Notification/idle_prompt, 345600s ago");
+      expect(w).toContain("quiet seat, expected");
+      expect(w).not.toContain("hooks stopped firing");
     });
   });
 
