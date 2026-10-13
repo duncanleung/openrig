@@ -69,6 +69,25 @@ describe("shutdown manifest (RIG-83)", () => {
     expect(fs.readdirSync(dir)).toEqual(["shutdown-manifest.json"]);
   });
 
+  it("removes the previous manifest when the new write fails, so an older stop is never trusted", () => {
+    const file = path.join(dir, "shutdown-manifest.json");
+    fs.writeFileSync(file, JSON.stringify({ schema: SHUTDOWN_MANIFEST_SCHEMA, at: "2026-10-01T00:00:00.000Z", rigs: [{ id: "old", name: "old-rig" }] }));
+    db.close();
+    expect(() => writeShutdownManifest(file, db)).toThrow();
+    expect(fs.existsSync(file)).toBe(false);
+    db = createFullTestDb();
+  });
+
+  it("replaces an existing manifest with the new one on success", () => {
+    const repo = new RigRepository(db);
+    const up = repo.createRig("up-rig");
+    lifecycle.byRigName.set("up-rig", "running");
+    const file = path.join(dir, "shutdown-manifest.json");
+    fs.writeFileSync(file, JSON.stringify({ schema: SHUTDOWN_MANIFEST_SCHEMA, at: "2026-10-01T00:00:00.000Z", rigs: [{ id: "old", name: "old-rig" }] }));
+    writeShutdownManifest(file, db, new Date("2026-10-12T00:00:00Z"));
+    expect(JSON.parse(fs.readFileSync(file, "utf8")).rigs).toEqual([{ id: up.id, name: "up-rig" }]);
+  });
+
   it("writes an empty list when nothing is running", () => {
     new RigRepository(db).createRig("downed-rig");
     const file = path.join(dir, "m.json");

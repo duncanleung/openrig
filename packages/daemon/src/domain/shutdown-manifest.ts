@@ -1,4 +1,4 @@
-import { mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type Database from "better-sqlite3";
 import { RigRepository } from "./rig-repository.js";
@@ -34,8 +34,13 @@ export function collectRunningRigs(db: Database.Database): ShutdownManifest["rig
     .map((s) => ({ id: s.id, name: s.name }));
 }
 
-/** Atomically write the manifest. Must run before shutdown phases change rig state. */
+/**
+ * Atomically write the manifest. Must run before shutdown phases change rig state.
+ * The previous manifest is removed first: if this write fails, `rig start --last` finds no
+ * manifest and restores every candidate, instead of trusting the set from an earlier stop.
+ */
 export function writeShutdownManifest(path: string, db: Database.Database, now: Date = new Date()): ShutdownManifest {
+  rmSync(path, { force: true });
   const manifest: ShutdownManifest = {
     schema: SHUTDOWN_MANIFEST_SCHEMA,
     at: now.toISOString(),
