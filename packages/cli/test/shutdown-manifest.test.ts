@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   SHUTDOWN_MANIFEST_MAX_AGE_MS,
-  clearShutdownManifest,
   readShutdownManifest,
   selectLastRunning,
 } from "../src/shutdown-manifest.js";
@@ -49,10 +48,12 @@ describe("shutdown manifest (RIG-83)", () => {
     expect(picked.warning).toMatch(/No usable shutdown manifest/);
   });
 
-  it("clear removes the file and tolerates a missing one", () => {
+  it("reading never consumes the manifest: a second --last selects the same set", () => {
     write(good());
-    clearShutdownManifest(file);
-    expect(fs.existsSync(file)).toBe(false);
-    expect(() => clearShutdownManifest(file)).not.toThrow();
+    const first = selectLastRunning(cands, readShutdownManifest(file, NOW));
+    const second = selectLastRunning(cands, readShutdownManifest(file, NOW));
+    expect(fs.existsSync(file)).toBe(true);
+    expect(second.selected).toEqual(first.selected);
+    expect(second.selected.map((c) => c.rigId)).toEqual(["r1", "r2"]);
   });
 });

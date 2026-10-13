@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { OPENRIG_HOME } from "./openrig-compat.js";
 
@@ -20,7 +20,10 @@ export function shutdownManifestPath(home: string = OPENRIG_HOME): string {
   return join(home, SHUTDOWN_MANIFEST_FILE);
 }
 
-/** Read the manifest the daemon wrote at its last stop. */
+/**
+ * Read the manifest the daemon wrote at its last stop. Reading never consumes it: it stays the
+ * record of the last running set until the next daemon shutdown overwrites it.
+ */
 export function readShutdownManifest(path: string = shutdownManifestPath(), now: number = Date.now()): ManifestRead {
   if (!existsSync(path)) return { ok: false, reason: "missing" };
   try {
@@ -42,11 +45,6 @@ export function readShutdownManifest(path: string = shutdownManifestPath(), now:
   } catch {
     return { ok: false, reason: "corrupt" };
   }
-}
-
-/** Consume the manifest after a restore. A missing file is already consumed. */
-export function clearShutdownManifest(path: string = shutdownManifestPath()): void {
-  try { unlinkSync(path); } catch { /* already gone */ }
 }
 
 /**

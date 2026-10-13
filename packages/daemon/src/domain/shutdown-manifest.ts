@@ -12,16 +12,25 @@ export interface ShutdownManifest {
   schema: typeof SHUTDOWN_MANIFEST_SCHEMA;
   /** ISO time the daemon began shutting down. */
   at: string;
-  /** Rigs whose derived lifecycle was "running" when the daemon began shutting down. */
+  /** Rigs with at least one live (running) seat when the daemon began shutting down. */
   rigs: Array<{ id: string; name: string }>;
 }
 
-/** Rigs that are running right now, using the same fold as GET /api/rigs/summary. */
+/**
+ * Rigs worth restoring: running, plus degraded or attention_required rigs that still have a live
+ * session. A rig with no live seat (stopped, recoverable, or attention_required with nothing up)
+ * stays out, so a manual `rig down` is respected.
+ */
 export function collectRunningRigs(db: Database.Database): ShutdownManifest["rigs"] {
   const summaries = new RigRepository(db).getRigSummaries({});
   const inventory = getNodeInventoryForRigs(db, new Set(summaries.map((s) => s.id)));
   return summaries
-    .filter((s) => deriveRigLifecycleState((inventory.get(s.id) ?? []).map((e) => e.lifecycleState)) === "running")
+    .filter((s) => {
+      const states = (inventory.get(s.id) ?? []).map((e) => e.lifecycleState);
+      const rigState = deriveRigLifecycleState(states);
+      if (rigState === "running") return true;
+      return (rigState === "degraded" || rigState === "attention_required") && states.some((st) => st === "running");
+    })
     .map((s) => ({ id: s.id, name: s.name }));
 }
 

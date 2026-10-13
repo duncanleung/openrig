@@ -6,13 +6,14 @@ import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 
-const lifecycle = vi.hoisted(() => ({ byRigName: new Map<string, string>() }));
+const lifecycle = vi.hoisted(() => ({ byRigName: new Map<string, string | string[]>() }));
 vi.mock("../src/domain/node-inventory.js", () => ({
   getNodeInventoryForRigs: (db: Database.Database, ids: ReadonlySet<string>) => {
     const out = new Map<string, Array<{ lifecycleState: string }>>();
     for (const id of ids) {
       const name = (db.prepare("SELECT name FROM rigs WHERE id = ?").get(id) as { name: string }).name;
-      out.set(id, [{ lifecycleState: lifecycle.byRigName.get(name) ?? "detached" }]);
+      const states = lifecycle.byRigName.get(name) ?? "detached";
+      out.set(id, (Array.isArray(states) ? states : [states]).map((lifecycleState) => ({ lifecycleState })));
     }
     return out;
   },
@@ -36,6 +37,24 @@ describe("shutdown manifest (RIG-83)", () => {
     repo.createRig("downed-rig");
     lifecycle.byRigName.set("up-rig", "running");
     expect(collectRunningRigs(db)).toEqual([{ id: up.id, name: "up-rig" }]);
+  });
+
+  it("keeps degraded and attention_required rigs that still have a live seat", () => {
+    const repo = new RigRepository(db);
+    const degraded = repo.createRig("degraded-live");
+    const attention = repo.createRig("attention-live");
+    lifecycle.byRigName.set("degraded-live", ["running", "detached"]);
+    lifecycle.byRigName.set("attention-live", ["running", "attention_required"]);
+    expect(collectRunningRigs(db).map((r) => r.id).sort()).toEqual([degraded.id, attention.id].sort());
+  });
+
+  it("drops attention_required and recoverable rigs with no live seat", () => {
+    const repo = new RigRepository(db);
+    repo.createRig("attention-dead");
+    repo.createRig("recoverable-dead");
+    lifecycle.byRigName.set("attention-dead", ["attention_required", "detached"]);
+    lifecycle.byRigName.set("recoverable-dead", ["recoverable"]);
+    expect(collectRunningRigs(db)).toEqual([]);
   });
 
   it("writes an atomic, schema-tagged file", () => {

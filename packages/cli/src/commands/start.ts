@@ -13,7 +13,7 @@ import {
   type LifecycleDeps,
 } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
-import { clearShutdownManifest, readShutdownManifest, selectLastRunning } from "../shutdown-manifest.js";
+import { readShutdownManifest, selectLastRunning } from "../shutdown-manifest.js";
 import type { StatusDeps } from "./status.js";
 
 const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
@@ -551,8 +551,6 @@ Examples:
         r.nodes.some((n) => n.status === "failed" || n.status === "awaiting-decision"),
       );
       if (hasFailure) process.exitCode = 1;
-      // --last consumes the manifest; keep it after a failure so a retry restores the same set.
-      else if (opts.last && !opts.all) clearShutdownManifest();
     });
 
   return cmd;
