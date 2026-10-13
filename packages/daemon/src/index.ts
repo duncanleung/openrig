@@ -2,6 +2,7 @@ import { serve, type ServerType } from "@hono/node-server";
 import path from "node:path";
 import os from "node:os";
 import { pathToFileURL } from "node:url";
+import { writeShutdownManifest, SHUTDOWN_MANIFEST_FILE } from "./domain/shutdown-manifest.js";
 import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT, trackHttpServerResponses } from "./daemon-shutdown.js";
 import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
 import { makeOperatorDeliveryEngine } from "./domain/gateway/operator-delivery-engine.js";
@@ -412,6 +413,9 @@ export async function startServer(port?: number) {
   const shutdown = createDaemonShutdown({
     receiptPath: path.join(OPENRIG_HOME, DAEMON_SHUTDOWN_RECEIPT),
     phases: [
+      // First: record which rigs are running before any phase can change rig state,
+      // so `rig start --last` restores only those (RIG-83).
+      ["shutdown-manifest", () => { writeShutdownManifest(path.join(OPENRIG_HOME, SHUTDOWN_MANIFEST_FILE), deps.rigRepo.db); }],
       ["timers", () => {
         if (heartbeatTimer) clearInterval(heartbeatTimer);
         if (retentionTimer) clearInterval(retentionTimer);
