@@ -19,7 +19,11 @@
  * as workflowFrontierPredicate bypass).
  */
 
+import fs from "node:fs";
+import os from "node:os";
+import nodePath from "node:path";
 import type Database from "better-sqlite3";
+import { RigSpecCodec } from "./rigspec-codec.js";
 import type { ValidationGateConfig } from "./validation-gate-predicate.js";
 import {
   matchesImplSeatPattern,
@@ -147,31 +151,43 @@ export function checkValidationGate(opts: ValidationGateCheckOpts): ValidationGa
  * not treated as an impl-seat).
  */
 /**
- * Default config source: the `validation_gate` block of the newest rig spec row.
- * NOTE (RIG-77 follow-up): `rigs` has no `spec_json` column today, so this query throws and the
- * loader returns null, which makes the gate a no-op. Persisting the rig-level block is tracked
- * separately; tests inject their own loader.
+ * Default config source: the `validation_gate` block of the rig's spec FILE (the spec file is the
+ * source of truth; `rigs` has no spec column). The path comes from the rig's completed
+ * `rig_spec` bootstrap run, falling back to `<OPENRIG_HOME>/specs/<rig name>.rig.yaml`. A missing,
+ * unreadable or block-less spec means no gate (same as validation_gate=off). File I/O is
+ * acceptable here: the gate runs only on queue create/handoff.
  */
-export function loadValidationGateConfigFromRigs(db: Database.Database): ValidationGateConfig | null {
+export function loadValidationGateConfigFromRigs(db: Database.Database, rigId?: string | null): ValidationGateConfig | null {
   try {
-    const row = db.prepare(`
-      SELECT r.spec_json
-        FROM rigs r
-       WHERE r.spec_json IS NOT NULL
-         AND r.archived_at IS NULL
-       ORDER BY r.created_at DESC
-       LIMIT 1
-    `).get() as { spec_json: string } | undefined;
-    if (!row) return null;
-    const spec = JSON.parse(row.spec_json) as Record<string, unknown>;
-    const vg = spec["validation_gate"] as Record<string, unknown> | undefined;
-    if (!vg) return null;
-    return {
-      mode: (vg["mode"] as ValidationGateConfig["mode"]) ?? "warn",
-      validators: (vg["validators"] as string[]) ?? [],
-      implSeats: (vg["impl_seats"] as string[]) ?? [],
-      warnUntil: vg["warn_until"] as string | undefined,
-    };
+    if (!rigId) return null;
+    const candidates: string[] = [];
+    const run = db.prepare(
+      "SELECT source_ref FROM bootstrap_runs WHERE rig_id = ? AND source_kind = 'rig_spec' AND status = 'completed' ORDER BY created_at DESC LIMIT 1",
+    ).get(rigId) as { source_ref: string } | undefined;
+    if (run?.source_ref) candidates.push(run.source_ref);
+    const rig = db.prepare("SELECT name FROM rigs WHERE id = ? AND archived_at IS NULL").get(rigId) as { name: string } | undefined;
+    if (rig?.name) {
+      const home = process.env["OPENRIG_HOME"] ?? nodePath.join(os.homedir(), ".openrig");
+      candidates.push(nodePath.join(home, "specs", `${rig.name}.rig.yaml`));
+    }
+    for (const file of candidates) {
+      let raw: unknown;
+      try {
+        raw = RigSpecCodec.parse(fs.readFileSync(file, "utf-8"));
+      } catch {
+        continue;
+      }
+      if (!raw || typeof raw !== "object") continue;
+      const vg = (raw as Record<string, unknown>)["validation_gate"] as Record<string, unknown> | undefined;
+      if (!vg || typeof vg !== "object") return null;
+      return {
+        mode: (vg["mode"] as ValidationGateConfig["mode"]) ?? "warn",
+        validators: (vg["validators"] as string[]) ?? [],
+        implSeats: (vg["impl_seats"] as string[]) ?? [],
+        warnUntil: vg["warn_until"] as string | undefined,
+      };
+    }
+    return null;
   } catch {
     return null;
   }
@@ -179,26 +195,28 @@ export function loadValidationGateConfigFromRigs(db: Database.Database): Validat
 
 export function createValidationGatePredicate(
   db: Database.Database,
-  loadConfig: (db: Database.Database) => ValidationGateConfig | null = loadValidationGateConfigFromRigs,
+  loadConfig: (db: Database.Database, rigId?: string | null) => ValidationGateConfig | null = loadValidationGateConfigFromRigs,
 ): (input: { destinationSession: string; tags: string[] | null; viaWorkflowProjection?: boolean; dedupSeed?: string }) => ValidationGateResult {
   return (input): ValidationGateResult => {
-    const config = loadConfig(db);
-    if (!config) return { ok: true };
-
-    // Resolve the logical_id for this destination session.
+    // Resolve the destination's logical_id and rig for this session.
     let destinationLogicalId: string | null = null;
+    let rigId: string | null = null;
     try {
       const node = db.prepare(`
-        SELECT n.logical_id
+        SELECT n.logical_id, n.rig_id
           FROM nodes n
           JOIN sessions s ON s.node_id = n.id
          WHERE s.session_name = ?
          LIMIT 1
-      `).get(input.destinationSession) as { logical_id: string } | undefined;
+      `).get(input.destinationSession) as { logical_id: string; rig_id: string } | undefined;
       destinationLogicalId = node?.logical_id ?? null;
+      rigId = node?.rig_id ?? null;
     } catch {
       return { ok: true };
     }
+
+    const config = loadConfig(db, rigId);
+    if (!config) return { ok: true };
 
     if (!destinationLogicalId) return { ok: true };
     if (!matchesImplSeatPattern(config.implSeats, destinationLogicalId)) return { ok: true };

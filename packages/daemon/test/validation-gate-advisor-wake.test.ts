@@ -1,6 +1,9 @@
 // RIG-77 — the validation gate wakes the advisor on demand: one deduplicated request
 // qitem per blocked dispatch, written after the gate decision (no poll loop).
 
+import fs from "node:fs";
+import os from "node:os";
+import nodePath from "node:path";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
 import { createFullTestDb } from "./helpers/test-app.js";
@@ -70,5 +73,37 @@ describe("validation gate — advisor wake (RIG-77)", () => {
     const item = await dispatch(build({ ...CONFIG, mode: "off" }));
     expect(item.destinationSession).toBe("dev-impl@rig");
     expect(requests()).toHaveLength(0);
+  });
+
+  describe("config source: rig spec file (no spec_json column)", () => {
+    let dir: string;
+    beforeEach(() => { dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "vg-spec-")); });
+    afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+    const realRepo = () => new QueueRepository(db, new EventBus(db), { validationGatePredicate: createValidationGatePredicate(db) });
+    const writeSpec = (body: string) => {
+      const file = nodePath.join(dir, "rig.yaml");
+      fs.writeFileSync(file, body);
+      db.prepare("INSERT INTO bootstrap_runs (id, source_kind, source_ref, status, rig_id) VALUES ('b1', 'rig_spec', ?, 'completed', 'rig')").run(file);
+    };
+
+    it("enforces validation_gate read from the spec file and wakes the advisor", async () => {
+      expect(() => db.prepare("SELECT spec_json FROM rigs").all()).toThrow();
+      seedSeat(db, "rig", "orch.advisor", "advisor@rig");
+      writeSpec("name: rig\nvalidation_gate:\n  mode: enforce\n  validators: ['advisor@*']\n  impl_seats: [dev.impl]\n");
+      await expect(dispatch(realRepo())).rejects.toMatchObject({ code: "validation_gate_missing" });
+      expect(requests()).toHaveLength(1);
+    });
+
+    it("a missing spec file means no gate", async () => {
+      db.prepare("INSERT INTO bootstrap_runs (id, source_kind, source_ref, status, rig_id) VALUES ('b2', 'rig_spec', ?, 'completed', 'rig')").run(nodePath.join(dir, "gone.yaml"));
+      const item = await dispatch(realRepo());
+      expect(item.destinationSession).toBe("dev-impl@rig");
+    });
+
+    it("a spec without a validation_gate block means no gate", async () => {
+      writeSpec("name: rig\n");
+      const item = await dispatch(realRepo());
+      expect(item.destinationSession).toBe("dev-impl@rig");
+    });
   });
 });
