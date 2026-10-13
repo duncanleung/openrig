@@ -74,6 +74,21 @@ describe("validation gate — advisor wake (RIG-77)", () => {
     expect(requests()).toHaveLength(1);
   });
 
+  it("prefers the destination rig's advisor over an older advisor in another rig", async () => {
+    seedSeat(db, "kernel", "kernel.advisor", "advisor@kernel");
+    seedSeat(db, "rig", "orch.advisor", "advisor@rig");
+    db.prepare("UPDATE sessions SET created_at = '2020-01-01 00:00:00' WHERE session_name = 'advisor@kernel'").run();
+    db.prepare("UPDATE sessions SET created_at = '2021-01-01 00:00:00' WHERE session_name = 'advisor@rig'").run();
+    await expect(dispatch(build(CONFIG))).rejects.toMatchObject({ code: "validation_gate_missing" });
+    expect(requests().map((r) => r.destination_session)).toEqual(["advisor@rig"]);
+  });
+
+  it("falls back to an advisor in another rig when the destination rig has none", async () => {
+    seedSeat(db, "kernel", "kernel.advisor", "advisor@kernel");
+    await expect(dispatch(build(CONFIG))).rejects.toMatchObject({ code: "validation_gate_missing" });
+    expect(requests().map((r) => r.destination_session)).toEqual(["advisor@kernel"]);
+  });
+
   it("no advisor seat running: the gate still blocks, with no request row", async () => {
     await expect(dispatch(build(CONFIG))).rejects.toMatchObject({ code: "validation_gate_missing" });
     expect(requests()).toHaveLength(0);

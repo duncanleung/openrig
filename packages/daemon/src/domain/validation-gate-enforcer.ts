@@ -239,7 +239,7 @@ export function createValidationGatePredicate(
     const fix = `Run /codex-second-opinion or /symmetric-debate, close the gate:validation qitem as done from a validator seat, then re-dispatch`;
 
     // RIG-77 — wake the advisor on demand: one request per blocked dispatch, no poll loop.
-    const advisorSession = input.dedupSeed ? findAdvisorSession(db, config) : null;
+    const advisorSession = input.dedupSeed ? findAdvisorSession(db, config, rigId) : null;
     const advisorRequest: AdvisorRequest | undefined = advisorSession && input.dedupSeed
       ? { dedupKey: input.dedupSeed, advisorSession, destinationLogicalId, mode: effectiveMode, what }
       : undefined;
