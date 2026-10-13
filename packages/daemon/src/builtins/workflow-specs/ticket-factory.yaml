@@ -4,18 +4,32 @@
 # and recovery, independent of the orchestrator session staying alive. Admission
 # is manual: the orchestrator instantiates one instance per ticket.
 #
-#   intake -> plan -> validate -> implement -> qa_check -> review -> merge_disposition
+#   intake -> plan -> validate -> implement -> qa_check -> review
+#          -> merge_prep -> merge_disposition (human gate)
 #
 # Skeleton is conveyor's packet lifecycle. Bounded remediation is ported from
 # factory-rsi: a failing qa_check or review routes back to implement
 # (`on: failed: implement`), a failing validate routes back to plan, all under
-# the enforced max_hops guard. There is no release stage; the last step records
-# the merge disposition and holds the merge decision at a human gate.
+# the enforced max_hops guard. There is no release stage. merge_prep prepares the
+# evidence; only then does merge_disposition hold the merge decision at a human
+# gate. The gate item compiles when the workflow ROUTES INTO the gated step, so
+# its summary and evidence_ref must already exist at that moment. That is why
+# evidence preparation is its own step before the gated one.
 #
-# Validation is an explicit workflow step. The RIG-77 validation gate does not
-# cover workflow-projected handoffs (viaWorkflow bypass in
-# validation-gate-enforcer.ts), so this workflow carries its own candidate-bound
-# validation step before any code is written.
+# Validation is an explicit workflow step with an enforced acceptance contract.
+# The RIG-77 validation gate does not cover workflow-projected handoffs
+# (viaWorkflow bypass in validation-gate-enforcer.ts), so the validate step
+# declares `acceptance`: any exit other than waiting is rejected by the engine
+# unless closureEvidence.acceptance carries the declared candidate, a declared
+# verdict, and the declared evidence_ref.
+#
+# max_hops behavior: every projected transition counts one hop. When the next
+# transition would exceed loop_guards.max_hops, the engine overrides the exit to
+# `failed`, records `max_hops_exceeded` in the result note and closure evidence,
+# and does not route to the next step. The failure surfaces as a workflow
+# exception to the orchestrator (exception_routing). A resume grants one more
+# bounded window. A happy-path ticket uses 7 hops; each remediation cycle
+# (for example implement -> qa_check -> implement) uses 2.
 #
 # Enforcement caveats, by design of the engine: `skill_refs` are documentation
 # only and `spawn_budget` is not enforced. Only max_hops, allowed_exits,
@@ -25,7 +39,7 @@ workflow:
   version: 1
   objective: >
     Take one ticket from intake through plan, validation, implementation, QA,
-    and review to a merge disposition, as a bounded engine-routed loop on the
+    review, and merge preparation to a human-held merge disposition, as a bounded engine-routed loop on the
     openrig rig.
   target:
     rig: openrig
@@ -80,9 +94,16 @@ workflow:
       objective: >
         Validate the candidate plan from the plan step. The verdict binds to the
         plan content recorded in the packet, not to the ticket id alone. Approve
-        by handing off to implement. A rejected plan exits failed and routes back
-        to plan for bounded rework.
+        by handing off to implement with acceptance verdict `approved`. A
+        rejected plan exits failed with verdict `rejected` and routes back to
+        plan for bounded rework. The engine refuses either exit without the
+        acceptance payload (candidate, verdict, evidence_ref). It cannot check
+        that the verdict agrees with the exit, so the validator must pair them.
       allowed_exits: [handoff, waiting, failed]
+      acceptance:
+        candidate: ticket-plan
+        verdicts: [approved, rejected]
+        evidence_ref: proof/validation.md
       next_hop:
         # Explicit step-id route: plan and implement share the implementer
         # role, so a role-based hop would match plan first.
@@ -106,44 +127,62 @@ workflow:
         verdict, not the step's dysfunction) routes back to implement.
       allowed_exits: [handoff, waiting, failed]
       next_hop:
-        # Explicit step-id route: qa_check and review share a target seat, so a
-        # role-based hop would be ambiguous.
+        mode: require
+        suggested_roles: [reviewer]
         on:
-          handoff: review
           failed: implement
     - id: review
       actor_role: reviewer
       objective: >
         Run the dual-stack code review on the PR head and validate its findings.
-        A clean review hands off to merge_disposition. Must-fix findings exit
-        failed and route back to implement.
+        A clean review hands off to merge_prep. Must-fix findings exit failed
+        and route back to implement.
       allowed_exits: [handoff, waiting, failed]
       next_hop:
+        # Explicit step-id route: a role-based hop to the orchestrator role
+        # would resolve to the first step holding that role (intake).
+        on:
+          handoff: merge_prep
+          failed: implement
+    - id: merge_prep
+      actor_role: orchestrator
+      objective: >
+        Prepare the merge evidence before the human gate compiles. Write
+        `proof/PROOF.md` in the workspace with the PR number and head sha, the
+        clean review result, and CI status. Hand off to merge_disposition only
+        when the file exists. Exit failed if CI is red or the PR head moved
+        after review.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        # Explicit step-id route: merge_prep and intake share the orchestrator
+        # role, and a role-based hop would resolve to intake.
         on:
           handoff: merge_disposition
-          failed: implement
     - id: merge_disposition
       actor_role: orchestrator
       objective: >
-        Record the merge disposition for the reviewed PR (ready to merge, hold,
-        or close) with the review evidence at `proof/PROOF.md`. This step does
-        not merge. Merging stays a human act held at the gate.
+        Entering this step parks it on the human gate with the evidence from
+        merge_prep. After the human resolves the gate, record the disposition.
+        Exit done when the human approved the merge (the human merges; this step
+        never merges). Exit failed when the human rejected it, which routes back
+        to implement.
       allowed_exits: [done, waiting, failed]
       gate:
         target: human@kernel
         summary: "Ticket reviewed and clean; PR is ready for your merge decision (merging is a human act)."
         evidence_ref: proof/PROOF.md
       next_hop:
-        mode: forbid
+        on:
+          failed: implement
   invariants:
     continuation_required: true
     preserve_lineage: true
     closure_required: true
     allowed_exits: [handoff, waiting, done, failed]
   loop_guards:
-    # Enforced. Sanctions the remediation loops (validate->plan,
-    # qa_check->implement, review->implement). A trip becomes an exception
-    # routed to the orchestrator.
+    # Enforced; see the max_hops note at the top of this file. Sanctions the
+    # remediation loops (validate->plan, qa_check->implement,
+    # review->implement, merge_disposition->implement).
     max_hops: 30
     spawn_budget: 0
   closure:
