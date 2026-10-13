@@ -19,11 +19,15 @@
  * as workflowFrontierPredicate bypass).
  */
 
+import fs from "node:fs";
+import os from "node:os";
+import nodePath from "node:path";
 import type Database from "better-sqlite3";
+import { RigSpecCodec } from "./rigspec-codec.js";
 import type { ValidationGateConfig } from "./validation-gate-predicate.js";
 import {
   matchesImplSeatPattern,
-  matchesValidatorPattern,
+  findAdvisorSession,
   findValidationEvidence,
   resolveEffectiveMode,
 } from "./validation-gate-predicate.js";
@@ -43,10 +47,24 @@ export interface ValidationGateCheckInput {
   bypassAlreadyLogged?: boolean;
 }
 
+/**
+ * RIG-77 — asks the repository to wake the advisor once for a blocked dispatch. The repository
+ * writes the request row AFTER the gate decision (a rejected create rolls its transaction back,
+ * so the predicate never writes). `dedupKey` makes the request idempotent.
+ */
+export interface AdvisorRequest {
+  dedupKey: string;
+  advisorSession: string;
+  destinationLogicalId: string;
+  mode: "warn" | "enforce";
+  what: string;
+}
+
 export interface ValidationGateOk {
   ok: true;
   /** "bypassed:mechanical" when the work:mechanical tag was present. */
   reason?: string;
+  advisorRequest?: AdvisorRequest;
 }
 
 export interface ValidationGateErr {
@@ -54,6 +72,7 @@ export interface ValidationGateErr {
   code: "validation_gate_missing";
   message: string;
   meta: { what: string; why: string; fix: string };
+  advisorRequest?: AdvisorRequest;
 }
 
 export type ValidationGateResult = ValidationGateOk | ValidationGateErr;
@@ -131,48 +150,73 @@ export function checkValidationGate(opts: ValidationGateCheckOpts): ValidationGa
  * record is found the gate is skipped (conservative: unknown destination is
  * not treated as an impl-seat).
  */
-export function createValidationGatePredicate(
-  db: Database.Database,
-): (input: { destinationSession: string; tags: string[] | null; viaWorkflowProjection?: boolean }) => ValidationGateResult {
-  return (input): ValidationGateResult => {
-    let config: ValidationGateConfig | null = null;
-    try {
-      const row = db.prepare(`
-        SELECT r.spec_json
-          FROM rigs r
-         WHERE r.spec_json IS NOT NULL
-           AND r.archived_at IS NULL
-         ORDER BY r.created_at DESC
-         LIMIT 1
-      `).get() as { spec_json: string } | undefined;
-      if (!row) return { ok: true };
-      const spec = JSON.parse(row.spec_json) as Record<string, unknown>;
-      const vg = spec["validation_gate"] as Record<string, unknown> | undefined;
-      if (!vg) return { ok: true };
-      config = {
+/**
+ * Default config source: the `validation_gate` block of the rig's spec FILE (the spec file is the
+ * source of truth; `rigs` has no spec column). The path comes from the rig's completed
+ * `rig_spec` bootstrap run, falling back to `<OPENRIG_HOME>/specs/<rig name>.rig.yaml`. A missing,
+ * unreadable or block-less spec means no gate (same as validation_gate=off). File I/O is
+ * acceptable here: the gate runs only on queue create/handoff.
+ */
+export function loadValidationGateConfigFromRigs(db: Database.Database, rigId?: string | null): ValidationGateConfig | null {
+  try {
+    if (!rigId) return null;
+    const candidates: string[] = [];
+    const run = db.prepare(
+      "SELECT source_ref FROM bootstrap_runs WHERE rig_id = ? AND source_kind = 'rig_spec' AND status = 'completed' ORDER BY created_at DESC LIMIT 1",
+    ).get(rigId) as { source_ref: string } | undefined;
+    if (run?.source_ref) candidates.push(run.source_ref);
+    const rig = db.prepare("SELECT name FROM rigs WHERE id = ? AND archived_at IS NULL").get(rigId) as { name: string } | undefined;
+    if (rig?.name) {
+      const home = process.env["OPENRIG_HOME"] ?? nodePath.join(os.homedir(), ".openrig");
+      candidates.push(nodePath.join(home, "specs", `${rig.name}.rig.yaml`));
+    }
+    for (const file of candidates) {
+      let raw: unknown;
+      try {
+        raw = RigSpecCodec.parse(fs.readFileSync(file, "utf-8"));
+      } catch {
+        continue;
+      }
+      if (!raw || typeof raw !== "object") continue;
+      const vg = (raw as Record<string, unknown>)["validation_gate"] as Record<string, unknown> | undefined;
+      if (!vg || typeof vg !== "object") return null;
+      return {
         mode: (vg["mode"] as ValidationGateConfig["mode"]) ?? "warn",
         validators: (vg["validators"] as string[]) ?? [],
         implSeats: (vg["impl_seats"] as string[]) ?? [],
         warnUntil: vg["warn_until"] as string | undefined,
       };
-    } catch {
-      return { ok: true };
     }
+    return null;
+  } catch {
+    return null;
+  }
+}
 
-    // Resolve the logical_id for this destination session.
+export function createValidationGatePredicate(
+  db: Database.Database,
+  loadConfig: (db: Database.Database, rigId?: string | null) => ValidationGateConfig | null = loadValidationGateConfigFromRigs,
+): (input: { destinationSession: string; tags: string[] | null; viaWorkflowProjection?: boolean; dedupSeed?: string }) => ValidationGateResult {
+  return (input): ValidationGateResult => {
+    // Resolve the destination's logical_id and rig for this session.
     let destinationLogicalId: string | null = null;
+    let rigId: string | null = null;
     try {
       const node = db.prepare(`
-        SELECT n.logical_id
+        SELECT n.logical_id, n.rig_id
           FROM nodes n
           JOIN sessions s ON s.node_id = n.id
          WHERE s.session_name = ?
          LIMIT 1
-      `).get(input.destinationSession) as { logical_id: string } | undefined;
+      `).get(input.destinationSession) as { logical_id: string; rig_id: string } | undefined;
       destinationLogicalId = node?.logical_id ?? null;
+      rigId = node?.rig_id ?? null;
     } catch {
       return { ok: true };
     }
+
+    const config = loadConfig(db, rigId);
+    if (!config) return { ok: true };
 
     if (!destinationLogicalId) return { ok: true };
     if (!matchesImplSeatPattern(config.implSeats, destinationLogicalId)) return { ok: true };
@@ -194,9 +238,15 @@ export function createValidationGatePredicate(
     const why = `No done gate:validation qitem closed by a configured validator (${config.validators.join(", ")}) was found in the queue`;
     const fix = `Run /codex-second-opinion or /symmetric-debate, close the gate:validation qitem as done from a validator seat, then re-dispatch`;
 
+    // RIG-77 — wake the advisor on demand: one request per blocked dispatch, no poll loop.
+    const advisorSession = input.dedupSeed ? findAdvisorSession(db, config, rigId) : null;
+    const advisorRequest: AdvisorRequest | undefined = advisorSession && input.dedupSeed
+      ? { dedupKey: input.dedupSeed, advisorSession, destinationLogicalId, mode: effectiveMode, what }
+      : undefined;
+
     if (effectiveMode === "warn") {
       console.warn(`[validation-gate] WARNING: ${what}. ${why}. ${fix}`);
-      return { ok: true };
+      return { ok: true, advisorRequest };
     }
 
     return {
@@ -204,6 +254,7 @@ export function createValidationGatePredicate(
       code: "validation_gate_missing",
       message: `${what}. ${why}. ${fix}.`,
       meta: { what, why, fix },
+      advisorRequest,
     };
   };
 }

@@ -103,3 +103,32 @@ export function resolveEffectiveMode(
   }
   return config.mode;
 }
+
+/**
+ * First running session whose name matches a configured validator pattern, or null.
+ * A match in the destination's own rig wins; a match in another rig (for example a shared
+ * kernel advisor) is the fallback, so a wildcard pattern never wakes a foreign advisor while
+ * the destination rig has its own. The advisor wake (RIG-77) targets this seat. Null means no
+ * advisor is configured or up: the gate then only returns its block message, with no request row.
+ */
+export function findAdvisorSession(
+  db: Database.Database,
+  config: ValidationGateConfig,
+  rigId: string | null = null,
+): string | null {
+  try {
+    const rows = db
+      .prepare(`
+        SELECT s.session_name, n.rig_id
+          FROM sessions s
+          LEFT JOIN nodes n ON n.id = s.node_id
+         WHERE s.status = 'running'
+         ORDER BY s.created_at, s.session_name
+      `)
+      .all() as Array<{ session_name: string; rig_id: string | null }>;
+    const matches = rows.filter((r) => matchesValidatorPattern(config.validators, r.session_name));
+    return (matches.find((r) => rigId != null && r.rig_id === rigId) ?? matches[0])?.session_name ?? null;
+  } catch {
+    return null;
+  }
+}
