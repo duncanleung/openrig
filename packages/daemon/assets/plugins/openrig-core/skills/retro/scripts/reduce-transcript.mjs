@@ -66,6 +66,8 @@ try {
 let seat = basename(jsonlPath, ".jsonl"); // fallback: session ID
 let totalTurns = 0;                        // assistant messages with content
 let conversationTurns = 0;                 // human (non-tool-result) user messages
+let startedAt = null;                      // timestamp of the first human turn
+let endedAt = null;                        // timestamp of the last assistant turn
 
 const toolCounts = {};
 const readPaths = {};           // path → count
@@ -107,6 +109,7 @@ for (const line of rawLines) {
     const content = obj.message.content;
     const hasAction = content.some(c => c.type === "tool_use" || c.type === "text");
     if (hasAction) totalTurns++;
+    if (hasAction && typeof obj.timestamp === "string") endedAt = obj.timestamp;
 
     // Extract token usage from assistant message (dedupe by message.id)
     const usage = obj.message?.usage;
@@ -242,9 +245,13 @@ for (const line of rawLines) {
           }
         }
       }
-      if (hasHumanText) conversationTurns++;
+      if (hasHumanText) {
+        conversationTurns++;
+        if (!startedAt && typeof obj.timestamp === "string") startedAt = obj.timestamp;
+      }
     } else if (rawText) {
       conversationTurns++;
+      if (!startedAt && typeof obj.timestamp === "string") startedAt = obj.timestamp;
     }
   }
 }
@@ -284,6 +291,8 @@ const digest = {
   transcriptPath: jsonlPath,
   totalTurns,
   conversationTurns,
+  startedAt,
+  endedAt,
   toolCalls: toolCounts,
   repeatedReads,
   reviewFindings,

@@ -6,6 +6,7 @@ import { reviewFindingsSchema } from "../src/db/migrations/098_review_findings.j
 import { dailyTokenSnapshotsSchema } from "../src/db/migrations/099_daily_token_snapshots.js";
 import { digestTokenUsageSchema } from "../src/db/migrations/100_digest_token_usage.js";
 import { digestEscalationCountSchema } from "../src/db/migrations/101_digest_escalation_count.js";
+import { digestSessionTimestampsSchema } from "../src/db/migrations/102_digest_session_timestamps.js";
 import { FleetStore } from "../src/domain/fleet-store.js";
 import { FleetIngestionService, resolveFleetReconcileIntervalMs } from "../src/domain/fleet-ingestion-service.js";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
@@ -61,6 +62,7 @@ function freshDb(): Database {
   db.exec(dailyTokenSnapshotsSchema.sql);
   db.exec(digestTokenUsageSchema.sql);
   db.exec(digestEscalationCountSchema.sql);
+  db.exec(digestSessionTimestampsSchema.sql);
   return db;
 }
 
@@ -365,6 +367,60 @@ describe("FleetIngestionService — token usage dedup across multi-line messages
 
     const tokenUsage = JSON.parse(row.token_usage as string) as Array<Record<string, unknown>>;
     expect(tokenUsage).toHaveLength(1);
+  });
+});
+
+// ── Session timespan (real reducer) ───────────────────────────────────────────
+
+describe("FleetIngestionService — session started_at / ended_at / duration_ms", () => {
+  let db: Database;
+  let tmpDir: string;
+  const realReducer = join(__dirname, "..", "assets", "plugins", "openrig-core", "skills", "retro", "scripts", "reduce-transcript.mjs");
+
+  beforeEach(() => {
+    db = freshDb();
+    tmpDir = mkdtempSync(join(tmpdir(), "fleet-span-"));
+  });
+
+  const ingest = async (sessionId: string, lines: unknown[]) => {
+    const projectsDir = join(tmpDir, ".claude", "projects", "test-project");
+    mkdirSync(projectsDir, { recursive: true });
+    writeFileSync(join(projectsDir, `${sessionId}.jsonl`), lines.map((l) => JSON.stringify(l)).join("\n") + "\n");
+    const svc = makeService(db, tmpDir, realReducer);
+    await svc.reconcileDigests();
+    return db.prepare(
+      "SELECT started_at, ended_at, duration_ms FROM session_digests WHERE native_session_id = ?",
+    ).get(sessionId) as { started_at: string | null; ended_at: string | null; duration_ms: number | null };
+  };
+
+  it("uses the first human turn as start and the last assistant turn as end", async () => {
+    const row = await ingest("span-test-aaaa-bbbb-cccc-dddddddddddd", [
+      { type: "user", timestamp: "2026-10-12T10:00:00.000Z", message: { content: [{ type: "tool_result", tool_use_id: "x", content: "ignored" }] } },
+      { type: "user", timestamp: "2026-10-12T10:00:05.000Z", message: { content: "first human turn" } },
+      { type: "assistant", timestamp: "2026-10-12T10:00:10.000Z", message: { id: "m1", content: [{ type: "text", text: "a" }] } },
+      { type: "user", timestamp: "2026-10-12T10:05:00.000Z", message: { content: "second human turn" } },
+      { type: "assistant", timestamp: "2026-10-12T10:10:05.000Z", message: { id: "m2", content: [{ type: "text", text: "b" }] } },
+    ]);
+    expect(row.started_at).toBe("2026-10-12T10:00:05.000Z");
+    expect(row.ended_at).toBe("2026-10-12T10:10:05.000Z");
+    expect(row.duration_ms).toBe(10 * 60 * 1000);
+  });
+
+  it("leaves all three columns NULL when the transcript has no timestamps", async () => {
+    const row = await ingest("span-none-aaaa-bbbb-cccc-dddddddddddd", [
+      { type: "user", message: { content: "hi" } },
+      { type: "assistant", message: { id: "m1", content: [{ type: "text", text: "a" }] } },
+    ]);
+    expect(row).toEqual({ started_at: null, ended_at: null, duration_ms: null });
+  });
+
+  it("leaves duration_ms NULL when there is no assistant turn", async () => {
+    const row = await ingest("span-half-aaaa-bbbb-cccc-dddddddddddd", [
+      { type: "user", timestamp: "2026-10-12T10:00:05.000Z", message: { content: "hi" } },
+    ]);
+    expect(row.started_at).toBe("2026-10-12T10:00:05.000Z");
+    expect(row.ended_at).toBeNull();
+    expect(row.duration_ms).toBeNull();
   });
 });
 

@@ -91,6 +91,9 @@ function normalizeDigest(body: Record<string, unknown>): SessionDigestInput | st
     totalCacheCreationTokens: typeof body.totalCacheCreationTokens === "number" ? body.totalCacheCreationTokens : 0,
     totalCacheReadTokens: typeof body.totalCacheReadTokens === "number" ? body.totalCacheReadTokens : 0,
     escalationCount: typeof body.escalationCount === "number" ? body.escalationCount : 0,
+    startedAt: strOrNull(body.startedAt),
+    endedAt: strOrNull(body.endedAt),
+    durationMs: numOrNull(body.durationMs),
     sourceHash: strOrNull(body.sourceHash),
     parserVersion: strOrNull(body.parserVersion),
   };
