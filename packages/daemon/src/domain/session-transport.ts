@@ -2448,6 +2448,9 @@ export class SessionTransport {
     const ageMs = latest.eventAt ? this.now().getTime() - Date.parse(latest.eventAt) : NaN;
     const ageText = Number.isFinite(ageMs) ? `${Math.round(ageMs / 1000)}s ago` : "at an unknown time";
     const recent = Number.isFinite(ageMs) && ageMs <= store.freshnessMs;
+    // RIG-3 — name the last raw event, so a quiet seat is distinguishable from a broken producer.
+    const lastEvent = latest.rawEvent ? (latest.rawSubtype ? `${latest.rawEvent}/${latest.rawSubtype}` : latest.rawEvent) : null;
+    const lastEventNote = lastEvent ? `; last event: ${lastEvent}, ${ageText}` : "";
     // W2a-1 — a GENERATION verdict is stale:true even for a RECENT hook; collapsing a recent one to
     // "seat quiet" mislabels per-path missing carry / dead-tenure as a DARK seat. Age is checked FIRST
     // so an old hook is never called recent; its generation verdict is still reported, separately.
@@ -2459,7 +2462,7 @@ export class SessionTransport {
           generation_mismatch: "it belongs to a PRIOR occupant generation (a dead tenure)",
           generation_resolver_error: "the occupant-generation resolver errored",
         };
-        return withEnv(`producer link STALE — the last activity hook arrived ${ageText}, beyond the ${Math.round(store.freshnessMs / 1000)}s store window, and ${verdict[latest.reason] ?? `its generation verdict is ${latest.reason}`}; no recent hook from this live occupant`);
+        return withEnv(`producer link STALE — the last activity hook arrived ${ageText}, beyond the ${Math.round(store.freshnessMs / 1000)}s store window, and ${verdict[latest.reason] ?? `its generation verdict is ${latest.reason}`}; no recent hook from this live occupant${lastEventNote}`);
       }
       // A recent hook not verified as the LIVE occupant's says nothing about this occupant's own
       // producer prerequisites, so none of these is "producer link OK" and each keeps the env note.
@@ -2479,7 +2482,10 @@ export class SessionTransport {
       }
     }
     if (latest.stale === true) {
-      return withEnv(`producer link STALE — the last activity hook arrived ${ageText} (beyond the store window); the seat has gone quiet or its hooks stopped firing`);
+      return withEnv(`producer link STALE — the last activity hook arrived ${ageText} (beyond the store window)${lastEventNote}; ${
+        latest.rawEvent && ["Stop", "stop", "idle", "SessionEnd"].includes(latest.rawEvent)
+          ? "quiet seat, expected — an idle seat fires no hooks; its last event says it went idle"
+          : "the seat has gone quiet or its hooks stopped firing"}`);
     }
     return `a recent activity hook exists but the live pane probe could not confirm idle (possible identity mismatch between the seat env, the DB, and the stored payload)`;
   }
