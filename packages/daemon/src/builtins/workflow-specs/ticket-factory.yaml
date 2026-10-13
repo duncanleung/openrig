@@ -1,0 +1,152 @@
+# Single-ticket factory workflow (RIG-86, slice 1 of RIG-81).
+#
+# One ticket moves through the daemon workflow engine with persistence, routing,
+# and recovery, independent of the orchestrator session staying alive. Admission
+# is manual: the orchestrator instantiates one instance per ticket.
+#
+#   intake -> plan -> validate -> implement -> qa_check -> review -> merge_disposition
+#
+# Skeleton is conveyor's packet lifecycle. Bounded remediation is ported from
+# factory-rsi: a failing qa_check or review routes back to implement
+# (`on: failed: implement`), a failing validate routes back to plan, all under
+# the enforced max_hops guard. There is no release stage; the last step records
+# the merge disposition and holds the merge decision at a human gate.
+#
+# Validation is an explicit workflow step. The RIG-77 validation gate does not
+# cover workflow-projected handoffs (viaWorkflow bypass in
+# validation-gate-enforcer.ts), so this workflow carries its own candidate-bound
+# validation step before any code is written.
+#
+# Enforcement caveats, by design of the engine: `skill_refs` are documentation
+# only and `spawn_budget` is not enforced. Only max_hops, allowed_exits,
+# next_hop and gate are enforced.
+workflow:
+  id: ticket-factory
+  version: 1
+  objective: >
+    Take one ticket from intake through plan, validation, implementation, QA,
+    and review to a merge disposition, as a bounded engine-routed loop on the
+    openrig rig.
+  target:
+    rig: openrig
+  entry:
+    role: orchestrator
+  coordination_terminal_turn_rule: hot_potato
+  # Exceptions route orchestrator-first (same dial as factory-rsi).
+  exception_routing:
+    default: orchestrator
+    orchestrator_role: orchestrator
+  roles:
+    orchestrator:
+      skill_refs: [openrig-user, orchestration-team]
+      preferred_targets: [orch-lead@openrig]
+    implementer:
+      skill_refs: [openrig-user, ticket-loop, test-driven-development]
+      preferred_targets: [dev-impl@openrig]
+    validator:
+      skill_refs: [openrig-user, plan-review]
+      preferred_targets: [orch-advisor@openrig]
+    qa:
+      skill_refs: [openrig-user, verification-before-completion]
+      preferred_targets: [quality-reviewer@openrig]
+    reviewer:
+      skill_refs: [openrig-user, review-team, code-review-dual]
+      preferred_targets: [quality-reviewer@openrig]
+  steps:
+    - id: intake
+      actor_role: orchestrator
+      objective: >
+        Read the ticket named in the instance input. Run the admission checks
+        (ticket is unblocked, main is current, no open PR already covers it) and
+        record the ticket id, title, and acceptance criteria in the packet.
+        Hand off to plan, or exit failed with the blocker named.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [implementer]
+    - id: plan
+      actor_role: implementer
+      objective: >
+        Turn the ticket into a file-level plan with a classifier verdict (AUTO,
+        ADJUDICATE_LIGHT, ADJUDICATE_HEAVY, or ESCALATE) and a test plan. Do not
+        write code in this step. Record the plan as the candidate the validate
+        step binds to.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [validator]
+    - id: validate
+      actor_role: validator
+      objective: >
+        Validate the candidate plan from the plan step. The verdict binds to the
+        plan content recorded in the packet, not to the ticket id alone. Approve
+        by handing off to implement. A rejected plan exits failed and routes back
+        to plan for bounded rework.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        # Explicit step-id route: plan and implement share the implementer
+        # role, so a role-based hop would match plan first.
+        on:
+          handoff: implement
+          failed: plan
+    - id: implement
+      actor_role: implementer
+      objective: >
+        Implement the validated plan on a feature branch, add tests, open the PR,
+        and record the branch, head sha, PR number, and test results as proof.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        mode: require
+        suggested_roles: [qa]
+    - id: qa_check
+      actor_role: qa
+      objective: >
+        Check the PR head against the acceptance criteria and test evidence. A
+        passing check hands off to review. A failing check (the artifact's
+        verdict, not the step's dysfunction) routes back to implement.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        # Explicit step-id route: qa_check and review share a target seat, so a
+        # role-based hop would be ambiguous.
+        on:
+          handoff: review
+          failed: implement
+    - id: review
+      actor_role: reviewer
+      objective: >
+        Run the dual-stack code review on the PR head and validate its findings.
+        A clean review hands off to merge_disposition. Must-fix findings exit
+        failed and route back to implement.
+      allowed_exits: [handoff, waiting, failed]
+      next_hop:
+        on:
+          handoff: merge_disposition
+          failed: implement
+    - id: merge_disposition
+      actor_role: orchestrator
+      objective: >
+        Record the merge disposition for the reviewed PR (ready to merge, hold,
+        or close) with the review evidence at `proof/PROOF.md`. This step does
+        not merge. Merging stays a human act held at the gate.
+      allowed_exits: [done, waiting, failed]
+      gate:
+        target: human@kernel
+        summary: "Ticket reviewed and clean; PR is ready for your merge decision (merging is a human act)."
+        evidence_ref: proof/PROOF.md
+      next_hop:
+        mode: forbid
+  invariants:
+    continuation_required: true
+    preserve_lineage: true
+    closure_required: true
+    allowed_exits: [handoff, waiting, done, failed]
+  loop_guards:
+    # Enforced. Sanctions the remediation loops (validate->plan,
+    # qa_check->implement, review->implement). A trip becomes an exception
+    # routed to the orchestrator.
+    max_hops: 30
+    spawn_budget: 0
+  closure:
+    success: Ticket reviewed clean and held at the human merge gate.
+    degraded: Ticket stopped with a named blocker or a max_hops trip awaiting resume.
+    failed: Step failed as an exception; preserve the finding and route via the dial.
