@@ -21,7 +21,7 @@ import {
   type ClosureReason,
 } from "./hot-potato-enforcer.js";
 import { isHumanSeatSession, validateHumanPark, validateHumanRoute } from "./human-route-enforcer.js";
-import type { ValidationGateResult } from "./validation-gate-enforcer.js";
+import type { AdvisorRequest, ValidationGateResult } from "./validation-gate-enforcer.js";
 import {
   QueueWakeRepository,
   USAGE_LIMIT_BLOCKER_TAG,
@@ -31,6 +31,9 @@ import {
 import { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 import { armQueueWait, backOffQueueWait, refreshQueueWaits, evaluateQueueWait, retargetQueueWait, isQueueWait } from "./queue-wait-backoff.js";
 import { parseHumanQuestions, unansweredQuestions, describeTypedReplyPlacement, type HumanQuestion, type HumanAnswers, type TypedHumanReply, type RecordHumanAnswerResult } from "./human-questions.js";
+
+/** RIG-77 — source of the advisor wake requests the validation gate creates. */
+const GATE_REQUEST_ACTOR = "validation-gate@system";
 
 export const QUEUE_STATES = [
   "pending",
@@ -769,8 +772,11 @@ export class QueueRepository {
   /** RIG-77 — injected by startup (never imported): the validation-gate
    *  admission predicate. Absent = gate disabled (tests, bootstrap). */
   private readonly validationGatePredicate:
-    | ((input: { destinationSession: string; tags: string[] | null; viaWorkflowProjection?: boolean }) => ValidationGateResult)
+    | ((input: { destinationSession: string; tags: string[] | null; viaWorkflowProjection?: boolean; dedupSeed?: string }) => ValidationGateResult)
     | undefined;
+  /** RIG-77 — advisor wake requests recorded by the gate, written after the gate decision (a
+   *  rejected create rolls its transaction back) by flushGateRequests(). */
+  private pendingGateRequests: AdvisorRequest[] = [];
 
   constructor(
     db: Database.Database,
@@ -810,7 +816,7 @@ export class QueueRepository {
        * (queue is the lower primitive; startup wires the domain modules). When
        * absent the gate never fires.
        */
-      validationGatePredicate?: (input: { destinationSession: string; tags: string[] | null; viaWorkflowProjection?: boolean }) => ValidationGateResult;
+      validationGatePredicate?: (input: { destinationSession: string; tags: string[] | null; viaWorkflowProjection?: boolean; dedupSeed?: string }) => ValidationGateResult;
     }
   ) {
     this.db = db;
@@ -1469,6 +1475,16 @@ export class QueueRepository {
     /** Response-only: the retry's changed body was not written. Never stored on the row. */
     createWarning?: { code: "qitem_body_not_saved"; message: string };
   }> {
+    try {
+      return await this.createCore(input);
+    } finally {
+      await this.flushGateRequests();
+    }
+  }
+
+  private async createCore(input: QueueCreateInput): Promise<QueueItem & {
+    createWarning?: { code: "qitem_body_not_saved"; message: string };
+  }> {
     // FOUNDER ROOT INVARIANT (2026-08-27, supersedes 51-09 incr 4 / ruling cb19867f Q2):
     // a LOCAL write stores the bare transport identity — no self-host suffix inside one
     // instance. Host identity is added only at the cross-host forwarding boundary
@@ -1595,6 +1611,34 @@ export class QueueRepository {
   }
 
   /**
+   * RIG-77 — wake the advisor on demand. For each blocked dispatch the gate recorded, create ONE
+   * pending qitem for the advisor (existing create path: durable row + nudge/wake ladder). The
+   * dedup key rides on the row as a `gate-for:<key>` tag, so a retried dispatch never makes a
+   * second row. Best effort: a failure here must never mask the gate's own verdict.
+   */
+  private async flushGateRequests(): Promise<void> {
+    const requests = this.pendingGateRequests.splice(0);
+    for (const req of requests) {
+      try {
+        const tag = `gate-for:${req.dedupKey}`;
+        const existing = this.db
+          .prepare("SELECT 1 AS hit FROM queue_items WHERE tags LIKE ? LIMIT 1")
+          .get(`%${JSON.stringify(tag)}%`);
+        if (existing) continue;
+        await this.createCore({
+          sourceSession: GATE_REQUEST_ACTOR,
+          destinationSession: req.advisorSession,
+          body: `Validation requested (${req.mode}): ${req.what}. Run /codex-second-opinion, /symmetric-debate or /solution-design on the plan, then close a qitem tagged gate:validation as done from this seat so the dispatch can proceed.`,
+          tags: ["gate:validation-request", tag],
+          nudge: true,
+        });
+      } catch (err) {
+        console.warn(`[validation-gate] advisor request failed (${req.dedupKey}): ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+  }
+
+  /**
    * Internal: insert + transition + emit event. Caller is responsible
    * for transaction wrapping (the public create() wraps; the public
    * createWithinTransaction() does not — caller's outer transaction
@@ -1623,7 +1667,9 @@ export class QueueRepository {
         destinationSession: input.destinationSession,
         tags: input.tags ?? null,
         viaWorkflowProjection: input.viaWorkflowProjection,
+        dedupSeed: `create:${createHash("sha256").update(JSON.stringify([input.sourceSession, input.destinationSession, input.body])).digest("hex").slice(0, 24)}`,
       });
+      if (gateResult.advisorRequest) this.pendingGateRequests.push(gateResult.advisorRequest);
       if (!gateResult.ok) {
         throw new QueueRepositoryError(gateResult.code, gateResult.message, gateResult.meta);
       }
@@ -1743,6 +1789,14 @@ export class QueueRepository {
    * with `handed_off_from` recording the chain. One atomic transaction.
    */
   async handoff(input: QueueHandoffInput): Promise<{ closed: QueueItem; created: QueueItem }> {
+    try {
+      return await this.handoffCore(input);
+    } finally {
+      await this.flushGateRequests();
+    }
+  }
+
+  private async handoffCore(input: QueueHandoffInput): Promise<{ closed: QueueItem; created: QueueItem }> {
     const source = this.getById(input.qitemId);
     if (!source) {
       throw new QueueRepositoryError(
@@ -1794,7 +1848,9 @@ export class QueueRepository {
       const gateResult = this.validationGatePredicate({
         destinationSession: input.toSession,
         tags: rawTags,
+        dedupSeed: `handoff:${input.qitemId}`,
       });
+      if (gateResult.advisorRequest) this.pendingGateRequests.push(gateResult.advisorRequest);
       if (!gateResult.ok) {
         throw new QueueRepositoryError(gateResult.code, gateResult.message, gateResult.meta);
       }
@@ -1936,6 +1992,14 @@ export class QueueRepository {
    * tracking needed against the source qitem.
    */
   async handoffAndComplete(input: QueueHandoffAndCompleteInput): Promise<{ closed: QueueItem; created: QueueItem }> {
+    try {
+      return await this.handoffAndCompleteCore(input);
+    } finally {
+      await this.flushGateRequests();
+    }
+  }
+
+  private async handoffAndCompleteCore(input: QueueHandoffAndCompleteInput): Promise<{ closed: QueueItem; created: QueueItem }> {
     const source = this.getById(input.qitemId);
     if (!source) {
       throw new QueueRepositoryError(
@@ -1984,7 +2048,9 @@ export class QueueRepository {
       const gateResult = this.validationGatePredicate({
         destinationSession: input.toSession,
         tags: rawTagsHAC,
+        dedupSeed: `handoff:${input.qitemId}`,
       });
+      if (gateResult.advisorRequest) this.pendingGateRequests.push(gateResult.advisorRequest);
       if (!gateResult.ok) {
         throw new QueueRepositoryError(gateResult.code, gateResult.message, gateResult.meta);
       }

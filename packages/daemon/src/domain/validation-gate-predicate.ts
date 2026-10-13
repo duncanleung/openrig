@@ -103,3 +103,22 @@ export function resolveEffectiveMode(
   }
   return config.mode;
 }
+
+/**
+ * First running session whose name matches a configured validator pattern, or null.
+ * The advisor wake (RIG-77) targets this seat. Null means no advisor is configured or up:
+ * the gate then only returns its block message, with no request row.
+ */
+export function findAdvisorSession(
+  db: Database.Database,
+  config: ValidationGateConfig,
+): string | null {
+  try {
+    const rows = db
+      .prepare("SELECT session_name FROM sessions WHERE status = 'running' ORDER BY created_at, session_name")
+      .all() as Array<{ session_name: string }>;
+    return rows.find((r) => matchesValidatorPattern(config.validators, r.session_name))?.session_name ?? null;
+  } catch {
+    return null;
+  }
+}
