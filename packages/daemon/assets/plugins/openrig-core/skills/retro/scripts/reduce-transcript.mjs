@@ -72,6 +72,7 @@ let endedAt = null;                        // timestamp of the last assistant tu
 const toolCounts = {};
 const readPaths = {};           // path → count
 const reviewFindings = [];      // strings from ReportFindings calls
+const skillInvocations = [];    // { skill, args (<=200 chars | null), turn }
 const handoffEvents = [];       // { type: 'send'|'queue', to, message, turn }
 const claudeMdLoaded = new Set();
 const errors = [];              // { tool, message, turn }
@@ -151,6 +152,15 @@ for (const line of rawLines) {
         if (fp.includes("CLAUDE.md") || fp.includes("AGENTS.md")) {
           claudeMdLoaded.add(fp);
         }
+      }
+
+      // Skill invocations
+      if (toolName === "Skill" && typeof input.skill === "string" && input.skill) {
+        skillInvocations.push({
+          skill: input.skill,
+          args: typeof input.args === "string" && input.args ? input.args.slice(0, 200) : null,
+          turn: totalTurns,
+        });
       }
 
       // Handoff events: rig send / rig queue
@@ -297,6 +307,7 @@ const digest = {
   repeatedReads,
   reviewFindings,
   handoffEvents,
+  skillInvocations,
   claudeMdLoaded: [...claudeMdLoaded],
   errors,
   irreversibleActions,

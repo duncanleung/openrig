@@ -80,6 +80,7 @@ function normalizeDigest(body: Record<string, unknown>): SessionDigestInput | st
     repeatedReads: strOrDefault(body.repeatedReads, "{}"),
     reviewFindings: strOrDefault(body.reviewFindings, "{}"),
     handoffEvents: strOrDefault(body.handoffEvents, "[]"),
+    skillInvocations: strOrDefault(body.skillInvocations, "[]"),
     claudeMdLoaded: strOrDefault(body.claudeMdLoaded, "[]"),
     errors: strOrDefault(body.errors, "[]"),
     irreversibleActions: strOrDefault(body.irreversibleActions, "[]"),

@@ -21,6 +21,7 @@ export interface SessionDigestInput {
   repeatedReads: string;
   reviewFindings: string;
   handoffEvents: string;
+  skillInvocations: string;
   claudeMdLoaded: string;
   errors: string;
   irreversibleActions: string;
@@ -211,7 +212,7 @@ export class FleetStore {
         native_session_id, generation_uuid, occupant_generation,
         transcript_path, transcript_bytes, transcript_modified_at,
         total_turns, conversation_turns,
-        tool_calls, repeated_reads, review_findings, handoff_events,
+        tool_calls, repeated_reads, review_findings, handoff_events, skill_invocations,
         claude_md_loaded, errors, irreversible_actions,
         compaction_boundaries, compaction_losses,
         token_usage, total_input_tokens, total_output_tokens,
@@ -224,7 +225,7 @@ export class FleetStore {
         @nativeSessionId, @generationUuid, @occupantGeneration,
         @transcriptPath, @transcriptBytes, @transcriptModifiedAt,
         @totalTurns, @conversationTurns,
-        @toolCalls, @repeatedReads, @reviewFindings, @handoffEvents,
+        @toolCalls, @repeatedReads, @reviewFindings, @handoffEvents, @skillInvocations,
         @claudeMdLoaded, @errors, @irreversibleActions,
         @compactionBoundaries, @compactionLosses,
         @tokenUsage, @totalInputTokens, @totalOutputTokens,
@@ -251,6 +252,7 @@ export class FleetStore {
         repeated_reads = excluded.repeated_reads,
         review_findings = excluded.review_findings,
         handoff_events = excluded.handoff_events,
+        skill_invocations = excluded.skill_invocations,
         claude_md_loaded = excluded.claude_md_loaded,
         errors = excluded.errors,
         irreversible_actions = excluded.irreversible_actions,
