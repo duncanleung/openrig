@@ -6,6 +6,7 @@ import { reviewFindingsSchema } from "../src/db/migrations/098_review_findings.j
 import { dailyTokenSnapshotsSchema } from "../src/db/migrations/099_daily_token_snapshots.js";
 import { digestTokenUsageSchema } from "../src/db/migrations/100_digest_token_usage.js";
 import { digestEscalationCountSchema } from "../src/db/migrations/101_digest_escalation_count.js";
+import { digestSessionTimestampsSchema } from "../src/db/migrations/102_digest_session_timestamps.js";
 import {
   FleetStore,
   type SessionDigestInput,
@@ -25,6 +26,7 @@ function freshDb(): Database {
   db.exec(dailyTokenSnapshotsSchema.sql);
   db.exec(digestTokenUsageSchema.sql);
   db.exec(digestEscalationCountSchema.sql);
+  db.exec(digestSessionTimestampsSchema.sql);
   return db;
 }
 
@@ -58,6 +60,9 @@ const digest = (over: Partial<SessionDigestInput> = {}): SessionDigestInput => (
   totalCacheCreationTokens: 0,
   totalCacheReadTokens: 0,
   escalationCount: 0,
+  startedAt: null,
+  endedAt: null,
+  durationMs: null,
   sourceHash: "abc123",
   parserVersion: "1.0.0",
   ...over,
@@ -150,6 +155,14 @@ describe("096 session_digests — upsert idempotence", () => {
     expect(count()).toBe(1);
     const row = db.prepare("SELECT total_turns FROM session_digests WHERE native_session_id = 'sess-001'").get() as { total_turns: number };
     expect(row.total_turns).toBe(99);
+  });
+
+  it("persists started_at/ended_at/duration_ms and overwrites them on re-upsert", () => {
+    store.upsertDigest(digest({ startedAt: "2026-10-12T10:00:00.000Z", endedAt: "2026-10-12T10:01:00.000Z", durationMs: 60000 }));
+    const get = () => db.prepare("SELECT started_at, ended_at, duration_ms FROM session_digests WHERE native_session_id = 'sess-001'").get();
+    expect(get()).toEqual({ started_at: "2026-10-12T10:00:00.000Z", ended_at: "2026-10-12T10:01:00.000Z", duration_ms: 60000 });
+    store.upsertDigest(digest({ endedAt: "2026-10-12T10:02:00.000Z", startedAt: "2026-10-12T10:00:00.000Z", durationMs: 120000 }));
+    expect(get()).toEqual({ started_at: "2026-10-12T10:00:00.000Z", ended_at: "2026-10-12T10:02:00.000Z", duration_ms: 120000 });
   });
 
   it("different native_session_ids create separate rows", () => {

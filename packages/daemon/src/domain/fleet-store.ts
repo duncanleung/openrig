@@ -32,6 +32,9 @@ export interface SessionDigestInput {
   totalCacheCreationTokens: number;
   totalCacheReadTokens: number;
   escalationCount: number;
+  startedAt: string | null;
+  endedAt: string | null;
+  durationMs: number | null;
   sourceHash: string | null;
   parserVersion: string | null;
 }
@@ -214,6 +217,7 @@ export class FleetStore {
         token_usage, total_input_tokens, total_output_tokens,
         total_cache_creation_tokens, total_cache_read_tokens,
         escalation_count,
+        started_at, ended_at, duration_ms,
         source_hash, parser_version
       ) VALUES (
         @rigName, @seatSession, @seatName, @nodeLogicalId, @rigId, @nodeId,
@@ -226,6 +230,7 @@ export class FleetStore {
         @tokenUsage, @totalInputTokens, @totalOutputTokens,
         @totalCacheCreationTokens, @totalCacheReadTokens,
         @escalationCount,
+        @startedAt, @endedAt, @durationMs,
         @sourceHash, @parserVersion
       )
       ON CONFLICT(native_session_id) DO UPDATE SET
@@ -257,6 +262,9 @@ export class FleetStore {
         total_cache_creation_tokens = excluded.total_cache_creation_tokens,
         total_cache_read_tokens = excluded.total_cache_read_tokens,
         escalation_count = excluded.escalation_count,
+        started_at = excluded.started_at,
+        ended_at = excluded.ended_at,
+        duration_ms = excluded.duration_ms,
         source_hash = excluded.source_hash,
         parser_version = excluded.parser_version,
         ingested_at = datetime('now')

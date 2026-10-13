@@ -46,7 +46,7 @@ export interface SnapshotRollupResult {
   snapshotsUpserted: number;
 }
 
-const PARSER_VERSION = "reduce-transcript.mjs@3";
+const PARSER_VERSION = "reduce-transcript.mjs@4";
 const MAX_CONCURRENT_REDUCERS = 3;
 
 function sha256Hex(data: Buffer | string): string {
@@ -268,9 +268,20 @@ function adaptDigest(
     totalCacheCreationTokens: numField(reducerOutput.tokenTotals, "cache_creation_input_tokens"),
     totalCacheReadTokens: numField(reducerOutput.tokenTotals, "cache_read_input_tokens"),
     escalationCount: 0,
+    ...sessionTimespan(reducerOutput.startedAt, reducerOutput.endedAt),
     sourceHash: hash,
     parserVersion: PARSER_VERSION,
   };
+}
+
+function sessionTimespan(
+  startedAt: unknown,
+  endedAt: unknown,
+): { startedAt: string | null; endedAt: string | null; durationMs: number | null } {
+  const start = typeof startedAt === "string" && !Number.isNaN(Date.parse(startedAt)) ? startedAt : null;
+  const end = typeof endedAt === "string" && !Number.isNaN(Date.parse(endedAt)) ? endedAt : null;
+  const durationMs = start && end ? Math.max(0, Date.parse(end) - Date.parse(start)) : null;
+  return { startedAt: start, endedAt: end, durationMs };
 }
 
 function adaptReviewRun(
