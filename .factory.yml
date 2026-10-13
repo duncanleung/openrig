@@ -1,0 +1,50 @@
+backlog:
+  source: linear
+  team: RIG
+  query_filter: "state:backlog"
+  priority_floor: low
+
+topology:
+  implement_seat: dev-impl
+  advisor_seat: orch-advisor
+  review_seat: quality-reviewer
+  merge_seat: orch-lead
+
+risk:
+  peripheral_paths:
+    - "test/**"
+    - "docs/**"
+    - "*.md"
+    - "scripts/**"
+  semantic_risk_keywords:
+    - migration
+    - auth
+    - permission
+    - secret
+    - delete
+    - irreversible
+    - security
+    - "public API"
+    - "breaking change"
+    - concurrency
+    - idempotent
+    - "external service"
+    - lifecycle
+    - shutdown
+  escalate_paths:
+    - "packages/daemon/src/db/migrations/**"
+    - "packages/daemon/src/domain/gateway/**"
+
+budget:
+  max_tickets_per_run: 3
+  wall_clock_per_ticket_min: 60
+  wall_clock_per_run_min: 120
+  token_cap_per_ticket: 500000
+  context_ceiling: 140000
+  max_review_rounds: 3
+
+merge_policy: auto-low-risk
+
+approval_batching:
+  plan_gate: escalate-only
+  merge_gate: all
