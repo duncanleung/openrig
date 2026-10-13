@@ -475,7 +475,7 @@ describe("FleetIngestionService — reconcileReviews (fs)", () => {
   it("skips unchanged source on second reconcile (source_hash check)", async () => {
     const logDir = join(tmpDir, ".claude", "logs", "code-review", "dual-20261006-stable");
     mkdirSync(logDir, { recursive: true });
-    writeFileSync(join(logDir, "metrics.json"), JSON.stringify({ traceId: "trace-003", mode: "default" }));
+    writeFileSync(join(logDir, "metrics.json"), JSON.stringify({ traceId: "trace-003", mode: "default", rig_name: "my-rig" }));
 
     const svc = makeService(db, tmpDir);
     const first = await svc.reconcileReviews();
@@ -484,6 +484,31 @@ describe("FleetIngestionService — reconcileReviews (fs)", () => {
     const second = await svc.reconcileReviews();
     expect(second.ingested).toBe(0);
     expect(second.skipped).toBe(1);
+  });
+
+  it("backfills rig/seat identity on unchanged rows where rig_name IS NULL", async () => {
+    const logDir = join(tmpDir, ".claude", "logs", "code-review", "dual-20261006-backfill");
+    mkdirSync(logDir, { recursive: true });
+    writeFileSync(join(logDir, "metrics.json"), JSON.stringify({ traceId: "trace-bf", completed_at: "2026-10-06T10:05:00Z" }));
+
+    const svc = makeService(db, tmpDir);
+    await svc.reconcileReviews();
+    const before = db.prepare("SELECT rig_name FROM review_runs WHERE trace_id = 'trace-bf'").get() as { rig_name: string | null };
+    expect(before.rig_name).toBeNull();
+
+    // Identity data arrives later; the file itself is unchanged.
+    db.prepare(`INSERT INTO rigs (id, name) VALUES ('rig-bf', 'bf-rig')`).run();
+    db.prepare(`INSERT INTO nodes (id, rig_id, logical_id) VALUES ('node-bf', 'rig-bf', 'review.reviewer')`).run();
+    db.prepare(`INSERT INTO usage_samples (lane, seat_session, node_id, captured_at) VALUES ('context', 'rr@bf-rig', 'node-bf', '2026-10-06 10:00:00')`).run();
+
+    const second = await svc.reconcileReviews();
+    expect(second.ingested).toBe(1);
+    const after = db.prepare("SELECT rig_name, seat_name FROM review_runs WHERE trace_id = 'trace-bf'").get() as { rig_name: string | null; seat_name: string | null };
+    expect(after).toEqual({ rig_name: "bf-rig", seat_name: "review.reviewer" });
+
+    // Once populated, the row is skipped again.
+    const third = await svc.reconcileReviews();
+    expect(third.skipped).toBe(1);
   });
 
   it("re-ingests when force=true even if source_hash matches", async () => {
