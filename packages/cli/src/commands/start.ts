@@ -13,6 +13,7 @@ import {
   type LifecycleDeps,
 } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
+import { readShutdownManifest, selectLastRunning } from "../shutdown-manifest.js";
 import type { StatusDeps } from "./status.js";
 
 const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
@@ -351,8 +352,13 @@ Examples:
 
       // ---- PHASE 4: selection (id-grounded, rev1 BLOCKING b4c6ada4) ----
       let selectedCandidates: StartCandidate[];
-      if (opts.all || opts.last) {
+      if (opts.all) {
         selectedCandidates = [...candidates];
+      } else if (opts.last) {
+        // RIG-83: only rigs running when the daemon last stopped.
+        const picked = selectLastRunning(candidates, readShutdownManifest());
+        if (picked.warning && !opts.json) console.error(picked.warning);
+        selectedCandidates = picked.selected;
       } else if (opts.rigs) {
         selectedCandidates = candidates.filter((c) => opts.rigs!.includes(c.rigName));
         const missing = opts.rigs.filter((n) => !candidates.some((c) => c.rigName === n));
