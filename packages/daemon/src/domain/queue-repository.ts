@@ -1601,13 +1601,20 @@ export class QueueRepository {
     if (!this.validateRig(input.destinationSession)) {
       throw destinationValidationError("destination_session", input.destinationSession, this.loadHumanRegistryFn);
     }
-    const result = this.createInTransactionalContext(input);
-    return {
-      qitemId: result.qitemId,
-      persistedEvent: result.persistedEvent,
-      destinationSession: input.destinationSession,
-      nudge: input.nudge,
-    };
+    try {
+      const result = this.createInTransactionalContext(input);
+      return {
+        qitemId: result.qitemId,
+        persistedEvent: result.persistedEvent,
+        destinationSession: input.destinationSession,
+        nudge: input.nudge,
+      };
+    } finally {
+      // RIG-77 — the gate may have recorded an advisor request (also when it rejects). The caller's
+      // outer transaction is synchronous, so a microtask runs after it commits or rolls back. The
+      // flush is best effort and idempotent (gate-for dedup tag).
+      if (this.pendingGateRequests.length > 0) queueMicrotask(() => { void this.flushGateRequests(); });
+    }
   }
 
   /**

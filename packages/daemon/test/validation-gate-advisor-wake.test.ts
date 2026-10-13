@@ -63,6 +63,17 @@ describe("validation gate — advisor wake (RIG-77)", () => {
     expect(requests()).toHaveLength(1);
   });
 
+  it("createWithinTransaction (workflow / mission-control path) wakes the advisor after the caller's transaction", async () => {
+    seedSeat(db, "rig", "orch.advisor", "advisor@rig");
+    const repo = build(CONFIG);
+    const input = { sourceSession: "orch-lead@rig", destinationSession: "dev-impl@rig", body: "implement the plan" };
+    expect(() => db.transaction(() => repo.createWithinTransaction(input))()).toThrowError(/validation/i);
+    expect(requests()).toHaveLength(0);
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(requests()).toHaveLength(1);
+  });
+
   it("no advisor seat running: the gate still blocks, with no request row", async () => {
     await expect(dispatch(build(CONFIG))).rejects.toMatchObject({ code: "validation_gate_missing" });
     expect(requests()).toHaveLength(0);
