@@ -41,6 +41,9 @@ export const PHASE_D_POLICIES = [
   // additionalPolicies like parked-owner-consumer.
   "delivery-deferral",
   "delivery-digest-flush",
+  // RIG-88 — recurring ticket-factory backlog poll. Injected via additionalPolicies; the
+  // policy only wakes the controller, which polls in a detached single-flight worker.
+  "ticket-factory-poll",
 ] as const;
 
 /** @deprecated since Phase D — use PHASE_D_POLICIES. */

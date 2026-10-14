@@ -23,6 +23,7 @@ import { workflowInstanceVersionSchema } from "../src/db/migrations/049_workflow
 import { workflowSpecJsonSchema } from "../src/db/migrations/050_workflow_spec_json.js";
 import { missionControlActionsSchema } from "../src/db/migrations/037_mission_control_actions.js";
 import { ticketAdmissionsSchema } from "../src/db/migrations/104_ticket_admissions.js";
+import { ticketFactoryControlSchema } from "../src/db/migrations/105_ticket_factory_control.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
@@ -38,7 +39,7 @@ const MIGRATIONS = [
   outboxEntriesSchema, coreSchema, bindingsSessionsSchema, eventsSchema, queueItemsSchema, queueTransitionsSchema,
   workflowSpecsSchema, workflowInstancesSchema, workflowStepTrailsSchema, queueItemSummarySchema,
   queueItemEvidenceRefSchema, workflowInstanceVersionSchema, workflowSpecJsonSchema, missionControlActionsSchema,
-  ticketAdmissionsSchema,
+  ticketAdmissionsSchema, ticketFactoryControlSchema,
 ];
 
 describe("ticket admission service (RIG-87)", () => {

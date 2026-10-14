@@ -1992,6 +1992,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // gateway subsystem is constructed after the watchdog engine; the ref fills
   // at activation below, which is OUTSIDE the sessionTransport block — hence
   // function scope). Registry loads through the shipped loader.
+  // RIG-88: the ticket-factory controller is built after the workflow runtime; the poll policy
+  // reaches it through this holder.
+  const lateTicketFactory: { controller?: import("./domain/ticket-factory-controller.js").TicketFactoryController } = {};
   const lateGatewayDispatch: { fn?: (op: string, ref: string, payload: unknown, opts?: { decisionId?: string }) => { ok: boolean; error?: string } } = {};
   const { loadHumanRegistry: loadHumanRegistryForDelivery } = await import("./domain/gateway/human-registry.js");
   void loadHumanRegistryForDelivery; // consumed inside the sessionTransport block below
@@ -2148,6 +2151,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
             const res = dispatch(OUTBOUND_OP, String(payload["destinationSession"] ?? ""), payload, { decisionId: `deferral:${notificationKey}` });
             return { ok: res.ok };
           },
+        }),
+        (await import("./domain/policies/ticket-factory-poll.js")).makeTicketFactoryPollPolicy({
+          trigger: () => lateTicketFactory.controller?.triggerPoll(),
         }),
         (await import("./domain/policies/delivery-digest-flush.js")).makeDeliveryDigestFlushPolicy({
           queueRepo: queueRepoInstance,
@@ -2377,11 +2383,40 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     if (workflowRuntime) {
       try {
         const { TicketAdmissionService } = await import("./domain/ticket-admission-service.js");
+        const { TicketFactoryController } = await import("./domain/ticket-factory-controller.js");
+        const { loadFactorySettings } = await import("./domain/ticket-factory-config.js");
+        const { TICKET_FACTORY_POLL_POLICY, TICKET_FACTORY_POLL_TARGET } = await import("./domain/policies/ticket-factory-poll.js");
+        const factorySettings = loadFactorySettings(process.env["OPENRIG_FACTORY_CONFIG"] ?? nodePath.join(process.cwd(), ".factory.yml"));
+        // Capacity and cooldown read the control row on every admit, so a settings reload applies at once.
+        const readControl = (): { capacity: number; cooldown_s: number } =>
+          (db.prepare("SELECT capacity, cooldown_s FROM ticket_factory_control WHERE id = 1").get() as { capacity: number; cooldown_s: number } | undefined)
+          ?? { capacity: factorySettings.capacity, cooldown_s: factorySettings.cooldownSeconds };
         const admissions = new TicketAdmissionService({
           db,
           runtime: workflowRuntime,
           runChecks: async () => { throw new Error("ticket admission checks are not configured"); },
           createdBySession: "orch-lead@openrig",
+          capacity: () => readControl().capacity,
+          cooldownSeconds: () => readControl().cooldown_s,
+        });
+        const factoryController = new TicketFactoryController({
+          db,
+          admissions,
+          listBacklog: async () => { throw new Error("ticket backlog adapter is not configured"); },
+          tokenCapPerTicket: factorySettings.tokenCapPerTicket,
+        });
+        factoryController.seed(factorySettings);
+        lateTicketFactory.controller = factoryController;
+        deps.ticketFactory = factoryController;
+        // The job only wakes the controller; cadence, pause and backoff live in the control row.
+        watchdogJobsRepoInstance.ensureAutoRegistration({
+          policy: TICKET_FACTORY_POLL_POLICY,
+          targetSession: TICKET_FACTORY_POLL_TARGET,
+          registeredBySession: "daemon@kernel",
+          intervalSeconds: 30,
+          activeWakeIntervalSeconds: null,
+          scanIntervalSeconds: null,
+          specYaml: `policy: ${TICKET_FACTORY_POLL_POLICY}\ntarget:\n  session: ${TICKET_FACTORY_POLL_TARGET}\n`,
         });
         const recovered = await admissions.recoverPending();
         const settled = admissions.settleFinished();

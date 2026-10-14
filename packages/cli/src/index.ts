@@ -89,6 +89,7 @@ import { heartbeatCommand, type HeartbeatDeps } from "./commands/heartbeat.js";
 import { seatCommand, handoverCommand, type SeatDeps } from "./commands/seat.js";
 import { rigModeCommand, type RigModeDeps } from "./commands/rig-mode.js";
 import { policyCommand } from "./commands/policy.js";
+import { ticketFactoryCommand } from "./commands/ticket-factory.js";
 import { startupProofCommand, type StartupProofDeps } from "./commands/startup-proof.js";
 import { escalateCommand } from "./commands/escalate.js";
 import type { LifecycleDeps } from "./daemon-lifecycle.js";
@@ -217,6 +218,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(terminalCommand(depsOverride?.terminalDeps));
   program.addCommand(watchdogCommand(depsOverride?.watchdogDeps));
   program.addCommand(workflowCommand(depsOverride?.workflowDeps));
+  program.addCommand(ticketFactoryCommand());
   program.addCommand(captureCommand(depsOverride?.captureDeps));
   program.addCommand(broadcastCommand(depsOverride?.broadcastDeps));
   program.addCommand(walkCommand(depsOverride?.walkDeps));
