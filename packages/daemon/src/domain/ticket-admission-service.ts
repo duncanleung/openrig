@@ -35,7 +35,9 @@ export interface AdmissionRow {
 
 export type AdmissionResult =
   | { admitted: true; admission: AdmissionRow }
-  | { admitted: false; reason: "duplicate" | "capacity" | "not-ready"; admission: AdmissionRow | null };
+  | { admitted: false; reason: "duplicate" | "capacity" | "cooldown" | "not-ready"; admission: AdmissionRow | null };
+
+const TERMINAL_INSTANCE = new Set(["completed", "failed", "aborted"]);
 
 export interface TicketAdmissionDeps {
   db: Database.Database;
@@ -45,7 +47,10 @@ export interface TicketAdmissionDeps {
   createdBySession: string;
   specPath?: string;
   now?: () => Date;
-  capacity?: number;
+  /** Max live admissions. A function lets the recurring controller change it without a restart. */
+  capacity?: number | (() => number);
+  /** A ticket closed less than this many seconds ago is not re-admitted (RIG-88). 0 disables. */
+  cooldownSeconds?: number | (() => number);
 }
 
 interface Raw {
@@ -55,12 +60,16 @@ interface Raw {
 
 export class TicketAdmissionService {
   private readonly now: () => Date;
-  private readonly capacity: number;
+  private readonly capacityOf: () => number;
+  private readonly cooldownOf: () => number;
   private readonly specPath: string;
 
   constructor(private readonly deps: TicketAdmissionDeps) {
     this.now = deps.now ?? (() => new Date());
-    this.capacity = deps.capacity ?? 1;
+    const cap = deps.capacity ?? 1;
+    this.capacityOf = typeof cap === "function" ? cap : () => cap;
+    const cool = deps.cooldownSeconds ?? 0;
+    this.cooldownOf = typeof cool === "function" ? cool : () => cool;
     this.specPath = deps.specPath ?? TICKET_FACTORY_SPEC;
   }
 
@@ -69,11 +78,12 @@ export class TicketAdmissionService {
     return `${ticketId}@${at.toISOString()}`;
   }
 
-  async admit(ticketId: string): Promise<AdmissionResult> {
+  async admit(ticketId: string, opts: { runId?: string } = {}): Promise<AdmissionResult> {
     // Cheap pre-checks; the partial unique index below is the real guarantee.
     const live = this.liveRowFor(ticketId);
     if (live) return { admitted: false, reason: "duplicate", admission: live };
-    if (this.liveCount() >= this.capacity) return { admitted: false, reason: "capacity", admission: null };
+    if (this.liveCount() >= this.capacityOf()) return { admitted: false, reason: "capacity", admission: null };
+    if (this.inCooldown(ticketId)) return { admitted: false, reason: "cooldown", admission: null };
 
     const evidence = await this.deps.runChecks(ticketId);
     const ready = evidence.disposition === "ready";
@@ -83,12 +93,12 @@ export class TicketAdmissionService {
     try {
       this.deps.db.transaction(() => {
         // Capacity re-check inside the write transaction (counts live rows only; non-ready rows are terminal).
-        if (ready && this.liveCount() >= this.capacity) throw new CapacityError();
+        if (ready && this.liveCount() >= this.capacityOf()) throw new CapacityError();
         this.deps.db.prepare(
-          `INSERT INTO ticket_admissions (id, ticket_id, instance_key, state, disposition, evidence_json, state_reason, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          `INSERT INTO ticket_admissions (id, ticket_id, instance_key, state, disposition, evidence_json, state_reason, created_at, updated_at, run_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         ).run(id, ticketId, key, ready ? "pending" : "rejected", evidence.disposition, JSON.stringify(evidence),
-          ready ? null : `disposition ${evidence.disposition}`, at.toISOString(), at.toISOString());
+          ready ? null : `disposition ${evidence.disposition}`, at.toISOString(), at.toISOString(), opts.runId ?? null);
       })();
     } catch (err) {
       if (err instanceof CapacityError) return { admitted: false, reason: "capacity", admission: null };
@@ -98,7 +108,22 @@ export class TicketAdmissionService {
       throw err;
     }
     if (!ready) return { admitted: false, reason: "not-ready", admission: this.getById(id) };
-    await this.startInstance(id);
+    try {
+      await this.startInstance(id);
+    } catch (err) {
+      // instantiate() can reject after it committed the instance (e.g. a nudge failure): adopt it, as boot recovery does.
+      const orphan = this.findOrphanInstance(this.deps.db.prepare(`SELECT * FROM ticket_admissions WHERE id = ?`).get(id) as Raw);
+      if (orphan) {
+        this.setActive(id, orphan);
+        return { admitted: true, admission: this.getById(id)! };
+      }
+      // A rejected start must not leave a pending row holding a capacity slot until the next boot.
+      // "rejected" (not "closed") so a transient failure does not start the closed-ticket cooldown.
+      try {
+        this.setState(id, "rejected", `workflow start failed: ${err instanceof Error ? err.message : String(err)}`);
+      } catch { /* keep the original error; the row stays pending and boot recovery retries it */ }
+      throw err;
+    }
     return { admitted: true, admission: this.getById(id)! };
   }
 
@@ -108,9 +133,16 @@ export class TicketAdmissionService {
     let adopted = 0;
     const rows = this.deps.db.prepare(`SELECT * FROM ticket_admissions WHERE state = 'pending'`).all() as Raw[];
     for (const raw of rows) {
-      const orphan = this.findOrphanInstance(raw.instance_key);
+      const orphan = this.findOrphanInstance(raw);
       if (orphan) {
-        this.setActive(raw.id, orphan);
+        // A finished orphan is terminal: closing it keeps a failed run from holding a capacity slot.
+        const status = this.deps.runtime.instanceStore.getById(orphan)?.status;
+        if (status && TERMINAL_INSTANCE.has(status)) {
+          this.deps.db.prepare(`UPDATE ticket_admissions SET instance_id = ? WHERE id = ?`).run(orphan, raw.id);
+          this.setState(raw.id, "closed", `workflow ${status}`);
+        } else {
+          this.setActive(raw.id, orphan);
+        }
         adopted++;
       } else {
         await this.startInstance(raw.id);
@@ -129,8 +161,14 @@ export class TicketAdmissionService {
       return "reconciling";
     }
     if (external === "open") {
-      if (row.state === "reconciling") this.setState(row.id, "active", "external state confirmed open");
-      return row.state === "reconciling" ? "active" : row.state;
+      if (row.state !== "reconciling") return row.state;
+      const status = row.instanceId ? this.deps.runtime.instanceStore.getById(row.instanceId)?.status : undefined;
+      if (status && TERMINAL_INSTANCE.has(status)) {
+        this.setState(row.id, "closed", `workflow ${status}`);
+        return "closed";
+      }
+      this.setState(row.id, "active", "external state confirmed open");
+      return "active";
     }
     if (row.instanceId) {
       const inst = this.deps.runtime.instanceStore.getById(row.instanceId);
@@ -151,12 +189,59 @@ export class TicketAdmissionService {
     let n = 0;
     for (const raw of this.deps.db.prepare(`SELECT * FROM ticket_admissions WHERE state IN ('active','reconciling') AND instance_id IS NOT NULL`).all() as Raw[]) {
       const inst = this.deps.runtime.instanceStore.getById(raw.instance_id!);
-      if (inst && (inst.status === "completed" || inst.status === "failed" || inst.status === "aborted")) {
+      if (inst && TERMINAL_INSTANCE.has(inst.status)) {
         this.setState(raw.id, "closed", `workflow ${inst.status}`);
         n++;
       }
     }
     return n;
+  }
+
+  /** Abort and close live admissions older than maxAgeSeconds (wall-clock budget per ticket). */
+  async expireOverBudget(maxAgeSeconds: number): Promise<string[]> {
+    const cutoff = new Date(this.now().getTime() - maxAgeSeconds * 1000).toISOString();
+    const rows = this.deps.db.prepare(
+      `SELECT * FROM ticket_admissions WHERE state IN ('active','reconciling') AND created_at < ?`,
+    ).all(cutoff) as Raw[];
+    const expired: string[] = [];
+    const failed: string[] = [];
+    for (const raw of rows) {
+      try {
+        const inst = raw.instance_id ? this.deps.runtime.instanceStore.getById(raw.instance_id) : null;
+        if (inst && (inst.status === "active" || inst.status === "waiting")) {
+          await this.deps.runtime.abort({
+            instanceId: raw.instance_id!,
+            reason: `ticket ${raw.ticket_id} exceeded its wall-clock budget`,
+            actorSession: this.deps.createdBySession,
+          });
+        }
+        this.setState(raw.id, "closed", `wall-clock budget exceeded (${maxAgeSeconds}s)`);
+        expired.push(raw.ticket_id);
+      } catch (err) {
+        // The row stays live and is retried next poll; one bad abort must not strand the other rows.
+        failed.push(`${raw.ticket_id}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (failed.length > 0) throw new Error(`wall-clock expiry failed for ${failed.join("; ")}`);
+    return expired;
+  }
+
+  /** Admissions that started a workflow in this run. Derived from rows, so it survives restart. */
+  admittedInRun(runId: string): number {
+    return (this.deps.db.prepare(`SELECT COUNT(*) AS c FROM ticket_admissions WHERE run_id = ? AND disposition = 'ready'`).get(runId) as { c: number }).c;
+  }
+
+  liveAdmissionCount(): number {
+    return this.liveCount();
+  }
+
+  private inCooldown(ticketId: string): boolean {
+    const seconds = this.cooldownOf();
+    if (seconds <= 0) return false;
+    const since = new Date(this.now().getTime() - seconds * 1000).toISOString();
+    return !!this.deps.db.prepare(
+      `SELECT 1 FROM ticket_admissions WHERE ticket_id = ? AND state = 'closed' AND updated_at > ? LIMIT 1`,
+    ).get(ticketId, since);
   }
 
   getById(id: string): AdmissionRow | null {
@@ -180,19 +265,24 @@ export class TicketAdmissionService {
     // The key rides in the root objective so a crash after instantiate can be recognised on recovery.
     const created = await this.deps.runtime.instantiate({
       specPath: this.specPath,
-      rootObjective: `${row.ticketId} [admission ${row.instanceKey}]`,
+      rootObjective: rootObjectiveFor(row.ticketId, row.instanceKey),
       createdBySession: this.deps.createdBySession,
     });
     this.setActive(admissionId, created.instance.instanceId);
   }
 
-  /** An instance created before a crash, found by the key in its entry packet body. */
-  private findOrphanInstance(instanceKey: string): string | null {
-    const q = this.deps.db.prepare(`SELECT qitem_id FROM queue_items WHERE body LIKE ? ESCAPE '\\' ORDER BY ts_created DESC LIMIT 1`)
-      .get(`%${instanceKey.replace(/[\\%_]/g, "\\$&")}%`) as { qitem_id: string } | undefined;
-    if (!q) return null;
+  /**
+   * An instance created before a crash. The key rides on the entry packet's exact
+   * "Root objective:" line; a loose LIKE hit is only a prefilter and never decides the match.
+   */
+  private findOrphanInstance(row: Raw): string | null {
+    const wanted = `Root objective: ${rootObjectiveFor(row.ticket_id, row.instance_key)}`;
+    const candidates = this.deps.db.prepare(`SELECT qitem_id, body FROM queue_items WHERE body LIKE ? ESCAPE '\\'`)
+      .all(`%${row.instance_key.replace(/[\\%_]/g, "\\$&")}%`) as Array<{ qitem_id: string; body: string }>;
+    const exact = candidates.filter((q) => q.body.split("\n").some((line) => line.trim() === wanted)).map((q) => q.qitem_id);
+    if (exact.length === 0) return null;
     const inst = this.deps.runtime.instanceStore.listAll().find(
-      (i) => i.workflowName === TICKET_FACTORY_SPEC && i.currentFrontier.includes(q.qitem_id),
+      (i) => i.workflowName === TICKET_FACTORY_SPEC && i.currentFrontier.some((id) => exact.includes(id)),
     );
     return inst?.instanceId ?? null;
   }
@@ -209,6 +299,10 @@ export class TicketAdmissionService {
 }
 
 class CapacityError extends Error {}
+
+function rootObjectiveFor(ticketId: string, instanceKey: string): string {
+  return `${ticketId} [admission ${instanceKey}]`;
+}
 
 function toRow(raw: Raw): AdmissionRow {
   return {

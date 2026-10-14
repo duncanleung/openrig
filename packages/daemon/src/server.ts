@@ -101,6 +101,7 @@ import { projectsRoutes } from "./routes/projects.js";
 import { viewsRoutes } from "./routes/views.js";
 import { watchdogRoutes } from "./routes/watchdog.js";
 import { workflowRoutes } from "./routes/workflow.js";
+import { ticketFactoryRoutes } from "./routes/ticket-factory.js";
 import { missionControlRoutes } from "./routes/mission-control.js";
 import { slicesRoutes } from "./routes/slices.js";
 import { reviewRoutes } from "./routes/review.js";
@@ -238,6 +239,8 @@ export interface AppDeps {
   gatewaySubsystem?: import("./domain/gateway/gateway-subsystem.js").GatewaySubsystem;
   periodicSnapshotScheduler?: import("./domain/periodic-snapshot-scheduler.js").PeriodicSnapshotScheduler;
   workflowRuntime?: WorkflowRuntime;
+  /** RIG-88: recurring ticket-factory controller; routes answer 503 when absent. */
+  ticketFactory?: import("./domain/ticket-factory-controller.js").TicketFactoryController;
   /**
    * Absolute path to the daemon's bundled built-in workflow-specs
    * directory. Used by `GET /api/workflow/specs` to
@@ -576,6 +579,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("watchdogPolicyEngine" as never, deps.watchdogPolicyEngine);
     c.set("watchdogScheduler" as never, deps.watchdogScheduler);
     c.set("workflowRuntime" as never, deps.workflowRuntime);
+    c.set("ticketFactory" as never, deps.ticketFactory);
     c.set("workflowBuiltinSpecsDir" as never, deps.workflowBuiltinSpecsDir);
     c.set("workflowsFolderDir" as never, deps.workflowsFolderDir);
     c.set("workflowSpecCache" as never, deps.workflowSpecCache);
@@ -794,6 +798,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/views", viewsRoutes());
   app.route("/api/watchdog", watchdogRoutes());
   app.route("/api/workflow", workflowRoutes());
+  app.route("/api/ticket-factory", ticketFactoryRoutes());
   app.route(
     "/api/mission-control",
     missionControlRoutes({ bearerToken: deps.missionControlBearerToken ?? null }),

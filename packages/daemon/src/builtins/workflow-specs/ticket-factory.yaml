@@ -34,6 +34,13 @@
 # Enforcement caveats, by design of the engine: `skill_refs` are documentation
 # only and `spawn_budget` is not enforced. Only max_hops, allowed_exits,
 # next_hop and gate are enforced.
+#
+# Merge approval precedence (RIG-88): `merge_gate: all` overrides
+# `merge_policy: auto-low-risk`. Explicit approval wins, and the
+# merge_disposition gate below is unconditional, so auto-merge is reachable
+# only when the project sets a merge_gate other than `all`. The resolver is
+# resolveMergePolicy in ticket-factory-config.ts; `rig ticket-factory status`
+# prints the effective policy and the reason.
 workflow:
   id: ticket-factory
   version: 1

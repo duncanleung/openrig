@@ -15,6 +15,7 @@ import {
   renderStatus,
   renderTraceTree,
 } from "./workflow-render.js";
+import { ticketFactoryStatus } from "./ticket-factory.js";
 import { describeDaemonRejection, formatThreePart } from "./workflow-errors.js";
 
 /**
@@ -895,7 +896,7 @@ Examples:
   // own authorization when it needs one; this verb is not the
   // permanent home of that composition).
   cmd
-    .command("status")
+    .command("status [name]")
     .description("Which instances need attention: counts + one row per failed/stuck/waiting instance with reason + next action (read-only)")
     .option("--json", "Rollup as JSON for agents")
     .addHelpText("after", `
@@ -907,9 +908,19 @@ renders the proven-empty statement with counts — never a blank.
 Examples:
   $ rig workflow status
   $ rig workflow status --json | jq '.attention[] | {instanceId, classes}'
+  $ rig workflow status ticket-factory     recurring factory: state, cadence, budget consumed
 `)
-    .action(async (opts: { json?: boolean }) => {
+    .action(async (name: string | undefined, opts: { json?: boolean }) => {
       const deps = getDeps();
+      if (name === "ticket-factory") {
+        await ticketFactoryStatus(deps, opts.json ?? false);
+        return;
+      }
+      if (name) {
+        process.stderr.write(`Error: unknown workflow status target "${name}"\nOnly "ticket-factory" takes a name here.\nRun "rig workflow status" for the attention rollup.\n`);
+        process.exitCode = 1;
+        return;
+      }
       await withClient(deps, async (client) => {
         const res = await client.get<unknown>("/api/workflow/list");
         if (res.status >= 400) {
