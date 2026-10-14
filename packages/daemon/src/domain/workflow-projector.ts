@@ -21,6 +21,8 @@ import { readWorkflowGuidance, type GuidanceInput } from "./workflow-guidance.js
 // All in one db.transaction. If any step throws, all rollback. After
 // commit, fan out events to subscribers + nudge next owner.
 
+import { existsSync, realpathSync } from "node:fs";
+import { isAbsolute, relative, resolve as resolvePath } from "node:path";
 import { workflowPlanningContext } from "./workflow-planning-context.js";
 import type Database from "better-sqlite3";
 import type { EventBus } from "./event-bus.js";
@@ -179,6 +181,52 @@ export class WorkflowProjectorError extends Error {
   }
 }
 
+/**
+ * RIG-91: a gate's evidence_ref that names a workspace file must exist when
+ * the gate item is projected (merge_prep writes the evidence BEFORE handing
+ * off to the gate). Non-file refs (URL schemes, `rig ` commands) and an
+ * unknown workspace root skip the check. The ref is confined to the
+ * workspace root: absolute paths, `..` escapes and symlink escapes throw
+ * gate_evidence_outside_workspace without revealing whether the target exists.
+ * Sync stat only (<1ms); safe inside the projection transaction.
+ */
+export function checkGateEvidence(
+  evidenceRef: string | null | undefined,
+  workspaceRoot: string | null | undefined,
+  ctx: { stepId: string },
+): void {
+  const ref = evidenceRef?.trim();
+  if (!ref || !workspaceRoot) return;
+  if (ref.includes("://") || ref.startsWith("rig ")) return;
+  const outside = () =>
+    new WorkflowProjectorError(
+      "gate_evidence_outside_workspace",
+      `step "${ctx.stepId}" gate evidence_ref "${ref}" must be a relative path inside the workspace root.`,
+      { stepId: ctx.stepId, evidenceRef: ref },
+    );
+  if (isAbsolute(ref)) throw outside();
+  const resolved = resolvePath(workspaceRoot, ref);
+  const rel = relative(workspaceRoot, resolved);
+  if (rel === ".." || rel.startsWith(`..${"/"}`) || rel.startsWith("..\\") || isAbsolute(rel)) throw outside();
+  if (!existsSync(resolved)) {
+    throw new WorkflowProjectorError(
+      "gate_evidence_missing",
+      `step "${ctx.stepId}" gate evidence_ref "${ref}" does not exist under the workspace root. Write the evidence file before handing off to the gated step.`,
+      { stepId: ctx.stepId, evidenceRef: ref },
+    );
+  }
+  let realRoot: string;
+  let real: string;
+  try {
+    realRoot = realpathSync(workspaceRoot);
+    real = realpathSync(resolved);
+  } catch {
+    throw outside();
+  }
+  const realRel = relative(realRoot, real);
+  if (realRel === ".." || realRel.startsWith(`..${"/"}`) || realRel.startsWith("..\\") || isAbsolute(realRel)) throw outside();
+}
+
 export interface ProjectStepInput {
   instanceId: string;
   /** The qitem being closed (must be in instance.currentFrontier). */
@@ -247,6 +295,8 @@ export class WorkflowProjector {
       humanFallbackSeat: WorkflowHumanDestination;
     },
     private readonly guidanceLibrary?: GuidanceInput["library"],
+    /** RIG-91: live workspace.root getter for the gate evidence-file check. Absent/null = skip. */
+    private readonly workspaceRoot?: () => string | null | undefined,
   ) {}
 
   private nodeRuntimeOf(session: string): string | null {
@@ -545,6 +595,7 @@ export class WorkflowProjector {
         }
         if (nextStep.gate) {
           gateCompile = compileGate(spec, nextStep, (s) => this.nodeRuntimeOf(s), roleCtx);
+          checkGateEvidence(gateCompile.evidenceRef, this.workspaceRoot?.(), { stepId: nextStep.id });
           resolvedNextOwner = gateCompile.destinationSession;
         } else if (input.nextOwnerSession) {
           reconcileExplicitOwnerHarness(nextStep, input.nextOwnerSession, (s) =>
@@ -1138,6 +1189,7 @@ export class WorkflowProjector {
         const gate = step.gate
           ? compileGate(spec, step, (session) => this.nodeRuntimeOf(session), roleResolutionContext(this.db, instance.boundRig))
           : null;
+        if (gate) checkGateEvidence(gate.evidenceRef, this.workspaceRoot?.(), { stepId: step.id });
         const owner = gate?.destinationSession ?? resolveDefaultOwner(spec, step, (session) => this.nodeRuntimeOf(session), roleResolutionContext(this.db, instance.boundRig));
         if (!owner) {
           throw new WorkflowProjectorError("next_owner_unresolved", `cannot resolve next owner for dependency step "${step.id}"`, { instanceId: instance.instanceId, stepId: step.id });

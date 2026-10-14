@@ -1509,6 +1509,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // OPR.0.4.6.WF1 FR-3: instantiate/handoff auto-arm the
       // per-instance workflow-keepalive job in-txn; terminal disarms.
       watchdogJobsRepo: watchdogJobsRepoInstance,
+      // RIG-91: gate evidence files resolve against the workspace root.
+      workspaceRoot: () => healthSettingsStore.resolveOne("workspace.root").value as string,
       // OPR.0.4.6.WF5 FR-2: the maturity dial — host default read LIVE
       // per exception from the settings twin (dial flips affect future
       // items only, never retroactive re-routing).
