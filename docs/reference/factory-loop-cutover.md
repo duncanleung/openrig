@@ -9,8 +9,12 @@ double-dispatch, no lost work, and a rollback path.
   (`startup.ts`). You can rehearse the cutover and roll it back now. The daemon cannot admit real
   tickets until real adapters land (not scheduled).
 - The daemon cannot observe or stop the skill. "Legacy producer disabled" is an operator
-  attestation. The tripwire (below) is a second check; the daemon does not wire a queue probe yet,
-  so `POST /cutover/tripwire` returns an empty result until a probe is injected.
+  attestation. The tripwire (below) is a second check. `startup.ts` wires a read-only queue probe: it
+  lists factory-loop tagged queue items in `pending`, `in-progress` or `blocked` that were created at
+  or after the cutover time (the cutover row `updated_at` while the phase is `daemon`), and returns
+  their `ticket:<ID>` tags. If the queue read fails, the tripwire logs a warning, returns
+  `probeUnavailable: true` and does not pause. Known gap: an item that was already active before the
+  cutover, for a ticket the reconcile did not announce, is not flagged.
 - The skill lives outside this repo (`~/.claude/skills/factory-loop/SKILL.md`). This repo does not
   edit it. Apply `docs/reference/factory-loop-cutover-skill.diff` by hand:
   `cd ~/.claude/skills && patch -p1 < <repo>/docs/reference/factory-loop-cutover-skill.diff`.

@@ -6,6 +6,7 @@
 
 import type Database from "better-sqlite3";
 import type { TicketFactoryController } from "./ticket-factory-controller.js";
+import type { QueueRepository } from "./queue-repository.js";
 
 export type CutoverPhase = "legacy" | "reconciled" | "daemon" | "rolled-back";
 export type Fact = boolean | null;
@@ -52,14 +53,17 @@ export interface CompletionRow {
   workflowCompleted: Fact; prMerged: Fact; ticketResolved: Fact; prNumber: number | null;
 }
 
-export interface TripwireResult { unexpected: string[]; doubleDispatch: string[]; paused: boolean }
+export interface TripwireResult { unexpected: string[]; doubleDispatch: string[]; paused: boolean; /** Set only when the probe threw: the tripwire failed open (warning logged, no pause). */ probeUnavailable?: true }
 
 export interface CutoverDeps {
   db: Database.Database;
   controller: Pick<TicketFactoryController, "enable" | "pause">;
   now?: () => Date;
-  /** Ticket ids of factory-loop tagged queue items that are active right now. Injected. */
-  probeLegacyQueue?: () => Promise<string[]>;
+  /**
+   * Ticket ids of factory-loop tagged queue items that are active right now and were created at or
+   * after `sinceIso` (the cutover time; null when unknown). Injected. Must be read-only.
+   */
+  probeLegacyQueue?: (sinceIso: string | null) => Promise<string[]>;
 }
 
 export class CutoverError extends Error {}
@@ -241,7 +245,15 @@ export class TicketFactoryCutoverService {
   async tripwire(): Promise<TripwireResult> {
     const none: TripwireResult = { unexpected: [], doubleDispatch: [], paused: false };
     if (this.phase() !== "daemon" || !this.deps.probeLegacyQueue) return none;
-    const active = await this.deps.probeLegacyQueue();
+    const since = (this.deps.db.prepare(`SELECT updated_at FROM ticket_factory_cutover WHERE id = 1`).get() as { updated_at: string } | undefined)?.updated_at ?? null;
+    let active: string[];
+    try {
+      active = await this.deps.probeLegacyQueue(since);
+    } catch (err) {
+      // Fail open: an unreadable queue must not drain the factory.
+      console.warn(`ticket-factory tripwire: legacy queue probe unavailable: ${err instanceof Error ? err.message : String(err)}`);
+      return { ...none, probeUnavailable: true };
+    }
     const held = new Set(this.legacyClaims().filter((c) => !c.released).map((c) => c.ticketId));
     const live = new Set((this.deps.db.prepare(
       `SELECT ticket_id FROM ticket_admissions WHERE state IN ('pending','active','reconciling')`,
@@ -274,5 +286,22 @@ function rowToCompletion(r: Record<string, unknown>): CompletionRow {
     ticketId: r.ticket_id as string, admissionId: (r.admission_id as string | null) ?? null,
     workflowCompleted: f(r.workflow_completed), prMerged: f(r.pr_merged), ticketResolved: f(r.ticket_resolved),
     prNumber: (r.pr_number as number | null) ?? null,
+  };
+}
+
+const ACTIVE_LEGACY_STATES = ["pending", "in-progress", "blocked"] as const;
+
+/**
+ * Read-only probe over the OpenRig queue: ids of active factory-loop items created at or after
+ * the cutover time. Uses only `list` (a SELECT); never mutates queue state.
+ */
+export function createLegacyQueueProbe(queue: Pick<QueueRepository, "list">): (sinceIso: string | null) => Promise<string[]> {
+  return async (sinceIso) => {
+    const sinceMs = sinceIso ? Date.parse(sinceIso) : Number.NEGATIVE_INFINITY;
+    const items = queue.list({ tag: "factory-loop", state: [...ACTIVE_LEGACY_STATES], limit: 1000 });
+    const ids = items
+      .filter((i) => !(Date.parse(i.tsCreated) < sinceMs))
+      .map((i) => (i.tags ?? []).find((t) => t.startsWith("ticket:"))?.slice("ticket:".length) ?? i.qitemId);
+    return [...new Set(ids)];
   };
 }

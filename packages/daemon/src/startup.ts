@@ -2394,7 +2394,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           (db.prepare("SELECT capacity, cooldown_s FROM ticket_factory_control WHERE id = 1").get() as { capacity: number; cooldown_s: number } | undefined)
           ?? { capacity: factorySettings.capacity, cooldown_s: factorySettings.cooldownSeconds };
         // RIG-89: the cutover service owns the legacy fence; the controller is attached below.
-        const { TicketFactoryCutoverService } = await import("./domain/ticket-factory-cutover.js");
+        const { TicketFactoryCutoverService, createLegacyQueueProbe } = await import("./domain/ticket-factory-cutover.js");
         const cutoverRef: { svc?: InstanceType<typeof TicketFactoryCutoverService> } = {};
         const admissions = new TicketAdmissionService({
           db,
@@ -2415,7 +2415,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         factoryController.seed(factorySettings);
         lateTicketFactory.controller = factoryController;
         deps.ticketFactory = factoryController;
-        cutoverRef.svc = new TicketFactoryCutoverService({ db, controller: factoryController });
+        cutoverRef.svc = new TicketFactoryCutoverService({ db, controller: factoryController, probeLegacyQueue: createLegacyQueueProbe(queueRepoInstance) });
         deps.ticketFactoryCutover = cutoverRef.svc;
         // The job only wakes the controller; cadence, pause and backoff live in the control row.
         watchdogJobsRepoInstance.ensureAutoRegistration({
