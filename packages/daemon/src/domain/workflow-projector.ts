@@ -142,7 +142,9 @@ export function gateParkWake(input: {
   if (after === undefined) return {};
   return {
     wakeAfterSeconds: after,
-    wakeMaxSeconds: input.step.re_present_max_seconds,
+    // The queue repository arms a repeating wait only when both bounds are
+    // set; with after alone the park timer fires once and goes terminal.
+    wakeMaxSeconds: input.step.re_present_max_seconds ?? after,
     wakeMessage: workflowWaitWakeMessage(input),
   };
 }
@@ -348,18 +350,22 @@ export class WorkflowProjector {
 
     // RIG-90: a human gate packet is parked blocked on the human seat until
     // `rig queue resolve` unparks it. Closing it with done|handoff while the
-    // park still holds would record an approval nobody gave. failed and
-    // waiting stay allowed (they claim no approval).
+    // park still holds would record an approval nobody gave. waiting is also
+    // rejected: it rewrites blockedOn (default external-gate), which would
+    // clear this check for a later done, and the packet is already parked.
+    // failed stays allowed (it claims no approval).
     if (
       currentStep.gate &&
       isHumanSeatSession(currentStep.gate.target) &&
-      (input.exit === "done" || input.exit === "handoff") &&
+      (input.exit === "done" || input.exit === "handoff" || input.exit === "waiting") &&
       currentPacket.state === "blocked" &&
       isHumanSeatSession(currentPacket.blockedOn)
     ) {
       throw new WorkflowProjectorError(
         "gate_unresolved",
-        `step "${currentStep.id}" is held at a human gate and packet ${input.currentPacketId} is still blocked on ${currentPacket.blockedOn}; resolve the gate (rig queue resolve) before closing with "${input.exit}".`,
+        input.exit === "waiting"
+          ? `step "${currentStep.id}" is held at a human gate and packet ${input.currentPacketId} is already parked on ${currentPacket.blockedOn}; waiting would move the park off the human. Wait for the human to resolve (rig queue resolve), or close with "failed".`
+          : `step "${currentStep.id}" is held at a human gate and packet ${input.currentPacketId} is still blocked on ${currentPacket.blockedOn}; resolve the gate (rig queue resolve) before closing with "${input.exit}".`,
         {
           instanceId: instance.instanceId,
           stepId: currentStep.id,

@@ -54,8 +54,10 @@ describe("workflow gate hardening (RIG-90)", () => {
       actionLog: new MissionControlActionLog(db),
     }).act({ verb: "resolve", qitemId, actorSession: "human@kernel", decision });
 
-  const project = (instanceId: string, packetId: string, exit: "handoff" | "failed" | "done", closureEvidence?: Record<string, unknown>) =>
-    runtime.project({ instanceId, currentPacketId: packetId, exit, actorSession: ORCH, closureEvidence });
+  const project = (instanceId: string, packetId: string, exit: "handoff" | "failed" | "done" | "waiting", closureEvidence?: Record<string, unknown>, blockedOn?: string) =>
+    runtime.project({ instanceId, currentPacketId: packetId, exit, actorSession: ORCH, closureEvidence, blockedOn });
+
+  const wakeJobsAll = () => db.prepare(`SELECT target_session FROM watchdog_jobs WHERE policy = 'periodic-reminder'`).all();
 
   /** Drive a ticket-factory instance to the parked merge_disposition gate packet. */
   async function driveToGate() {
@@ -90,12 +92,20 @@ describe("workflow gate hardening (RIG-90)", () => {
       expect(runtime.instanceStore.getById(id)?.status).toBe("completed");
     });
 
-    it("still allows failed and waiting while the gate is unresolved", async () => {
+    it("still allows failed while the gate is unresolved", async () => {
       const { id, gatePacket } = await driveToGate();
-      const waiting = await project(id, gatePacket, "waiting");
-      expect(waiting.closureReason).toBe("waiting");
       const failed = await project(id, gatePacket, "failed");
       expect(failed.nextStepId).toBe("implement");
+    });
+
+    it("rejects waiting at an unresolved gate, so waiting-then-done cannot bypass", async () => {
+      const { id, gatePacket } = await driveToGate();
+      for (const blockedOn of [undefined, "external-gate", "human@kernel"]) {
+        await expect(project(id, gatePacket, "waiting", undefined, blockedOn)).rejects.toMatchObject({ code: "gate_unresolved" });
+      }
+      expect(queueRepo.getById(gatePacket)?.blockedOn).toBe("human@kernel");
+      expect(wakeJobsAll()).toHaveLength(1);
+      await expect(project(id, gatePacket, "done")).rejects.toMatchObject({ code: "gate_unresolved" });
     });
   });
 
@@ -129,6 +139,8 @@ describe("workflow gate hardening (RIG-90)", () => {
       const jobs = wakeJobs();
       expect(jobs).toHaveLength(1);
       expect(jobs[0]!.interval_seconds).toBe(86400);
+      // Repeating, not one-shot: both bounds are armed (max defaults to after).
+      expect(jobs[0]!.spec_yaml).toMatch(/max_?seconds\D+86400/i);
       expect(jobs[0]!.target_session).toBe(parked.destinationSession);
       expect(jobs[0]!.target_session).toBe(ORCH);
       expect(jobs[0]!.target_session).not.toBe("human@kernel");
