@@ -51,6 +51,10 @@ function posInt(v: unknown, fallback: number): number {
   return typeof v === "number" && Number.isFinite(v) && v > 0 ? Math.floor(v) : fallback;
 }
 
+function nonNegInt(v: unknown, fallback: number): number {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : fallback;
+}
+
 export function parseFactorySettings(text: string): FactorySettings {
   const doc = (parseYaml(text) ?? {}) as Record<string, any>;
   const budget = (doc.budget ?? {}) as Record<string, unknown>;
@@ -63,7 +67,7 @@ export function parseFactorySettings(text: string): FactorySettings {
     maxTicketsPerRun: posInt(budget.max_tickets_per_run, d.maxTicketsPerRun),
     wallClockPerTicketSeconds: typeof budget.wall_clock_per_ticket_min === "number" && budget.wall_clock_per_ticket_min > 0
       ? Math.floor(budget.wall_clock_per_ticket_min * 60) : d.wallClockPerTicketSeconds,
-    cooldownSeconds: posInt(sched.cooldown_seconds, d.cooldownSeconds),
+    cooldownSeconds: nonNegInt(sched.cooldown_seconds, d.cooldownSeconds),
     mergeGate: typeof approval.merge_gate === "string" ? approval.merge_gate : d.mergeGate,
     mergePolicy: typeof doc.merge_policy === "string" ? doc.merge_policy : d.mergePolicy,
     tokenCapPerTicket: typeof budget.token_cap_per_ticket === "number" ? budget.token_cap_per_ticket : null,

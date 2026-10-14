@@ -420,6 +420,11 @@ describe("ticket-factory recurring operation (RIG-88)", () => {
       expect(parseFactorySettings("scheduler:\n  capacity: -4\n").capacity).toBe(1);
     });
 
+    it("cooldown_seconds 0 disables the cooldown and a negative value falls back", () => {
+      expect(parseFactorySettings("scheduler:\n  cooldown_seconds: 0\n").cooldownSeconds).toBe(0);
+      expect(parseFactorySettings("scheduler:\n  cooldown_seconds: -5\n").cooldownSeconds).toBe(3600);
+    });
+
     it("status reports the effective merge policy from the stored settings", () => {
       const { controller } = boot({ mergeGate: "all", mergePolicy: "auto-low-risk" });
       expect(controller.status().merge).toMatchObject({ effective: "human-approval", gate: "all", policy: "auto-low-risk" });

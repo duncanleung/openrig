@@ -1,7 +1,7 @@
 // RIG-87 — durable ticket admission: identity, dedup, capacity, restart recovery,
 // external-state reconciliation, immutable evidence.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -152,6 +152,18 @@ describe("ticket admission service (RIG-87)", () => {
     const svc = boot(); seedRig();
     await svc.admit("RIG-90");
     await svc.reconcile("RIG-90", "closed");
+    expect((await svc.admit("RIG-90")).admitted).toBe(true);
+  });
+
+  it("rejects the pending row, frees capacity and skips the cooldown when the workflow start rejects", async () => {
+    const svc = boot(); seedRig();
+    const spy = vi.spyOn(runtime, "instantiate").mockRejectedValueOnce(new Error("boom"));
+    await expect(svc.admit("RIG-90")).rejects.toThrow("boom");
+    spy.mockRestore();
+    expect(svc.liveAdmissionCount()).toBe(0);
+    const row = db.prepare(`SELECT state, state_reason FROM ticket_admissions WHERE ticket_id = 'RIG-90'`).get() as { state: string; state_reason: string };
+    expect(row.state).toBe("rejected");
+    expect(row.state_reason).toContain("workflow start failed: boom");
     expect((await svc.admit("RIG-90")).admitted).toBe(true);
   });
 

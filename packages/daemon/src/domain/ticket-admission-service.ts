@@ -108,7 +108,22 @@ export class TicketAdmissionService {
       throw err;
     }
     if (!ready) return { admitted: false, reason: "not-ready", admission: this.getById(id) };
-    await this.startInstance(id);
+    try {
+      await this.startInstance(id);
+    } catch (err) {
+      // instantiate() can reject after it committed the instance (e.g. a nudge failure): adopt it, as boot recovery does.
+      const orphan = this.findOrphanInstance(this.deps.db.prepare(`SELECT * FROM ticket_admissions WHERE id = ?`).get(id) as Raw);
+      if (orphan) {
+        this.setActive(id, orphan);
+        return { admitted: true, admission: this.getById(id)! };
+      }
+      // A rejected start must not leave a pending row holding a capacity slot until the next boot.
+      // "rejected" (not "closed") so a transient failure does not start the closed-ticket cooldown.
+      try {
+        this.setState(id, "rejected", `workflow start failed: ${err instanceof Error ? err.message : String(err)}`);
+      } catch { /* keep the original error; the row stays pending and boot recovery retries it */ }
+      throw err;
+    }
     return { admitted: true, admission: this.getById(id)! };
   }
 
