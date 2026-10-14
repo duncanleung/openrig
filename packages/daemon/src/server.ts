@@ -241,6 +241,8 @@ export interface AppDeps {
   workflowRuntime?: WorkflowRuntime;
   /** RIG-88: recurring ticket-factory controller; routes answer 503 when absent. */
   ticketFactory?: import("./domain/ticket-factory-controller.js").TicketFactoryController;
+  /** RIG-89: cutover from the /factory-loop skill; routes answer 503 when absent. */
+  ticketFactoryCutover?: import("./domain/ticket-factory-cutover.js").TicketFactoryCutoverService;
   /**
    * Absolute path to the daemon's bundled built-in workflow-specs
    * directory. Used by `GET /api/workflow/specs` to
@@ -580,6 +582,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("watchdogScheduler" as never, deps.watchdogScheduler);
     c.set("workflowRuntime" as never, deps.workflowRuntime);
     c.set("ticketFactory" as never, deps.ticketFactory);
+    c.set("ticketFactoryCutover" as never, deps.ticketFactoryCutover);
     c.set("workflowBuiltinSpecsDir" as never, deps.workflowBuiltinSpecsDir);
     c.set("workflowsFolderDir" as never, deps.workflowsFolderDir);
     c.set("workflowSpecCache" as never, deps.workflowSpecCache);

@@ -35,7 +35,7 @@ export interface AdmissionRow {
 
 export type AdmissionResult =
   | { admitted: true; admission: AdmissionRow }
-  | { admitted: false; reason: "duplicate" | "capacity" | "cooldown" | "not-ready"; admission: AdmissionRow | null };
+  | { admitted: false; reason: "duplicate" | "capacity" | "cooldown" | "not-ready" | "legacy-held" | "already-resolved"; admission: AdmissionRow | null };
 
 const TERMINAL_INSTANCE = new Set(["completed", "failed", "aborted"]);
 
@@ -51,6 +51,10 @@ export interface TicketAdmissionDeps {
   capacity?: number | (() => number);
   /** A ticket closed less than this many seconds ago is not re-admitted (RIG-88). 0 disables. */
   cooldownSeconds?: number | (() => number);
+  /** RIG-89: true while the legacy /factory-loop skill still owns the ticket. The fence against double-dispatch. */
+  isLegacyHeld?: (ticketId: string) => boolean;
+  /** RIG-89: true when the tracker already resolved the ticket (recorded completion fact). */
+  isResolved?: (ticketId: string) => boolean;
 }
 
 interface Raw {
@@ -84,6 +88,8 @@ export class TicketAdmissionService {
     if (live) return { admitted: false, reason: "duplicate", admission: live };
     if (this.liveCount() >= this.capacityOf()) return { admitted: false, reason: "capacity", admission: null };
     if (this.inCooldown(ticketId)) return { admitted: false, reason: "cooldown", admission: null };
+    if (this.deps.isLegacyHeld?.(ticketId)) return { admitted: false, reason: "legacy-held", admission: null };
+    if (this.deps.isResolved?.(ticketId)) return { admitted: false, reason: "already-resolved", admission: null };
 
     const evidence = await this.deps.runChecks(ticketId);
     const ready = evidence.disposition === "ready";
@@ -94,6 +100,8 @@ export class TicketAdmissionService {
       this.deps.db.transaction(() => {
         // Capacity re-check inside the write transaction (counts live rows only; non-ready rows are terminal).
         if (ready && this.liveCount() >= this.capacityOf()) throw new CapacityError();
+        // The legacy fence is re-checked in the same transaction as the insert.
+        if (this.deps.isLegacyHeld?.(ticketId)) throw new LegacyHeldError();
         this.deps.db.prepare(
           `INSERT INTO ticket_admissions (id, ticket_id, instance_key, state, disposition, evidence_json, state_reason, created_at, updated_at, run_id)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -102,6 +110,7 @@ export class TicketAdmissionService {
       })();
     } catch (err) {
       if (err instanceof CapacityError) return { admitted: false, reason: "capacity", admission: null };
+      if (err instanceof LegacyHeldError) return { admitted: false, reason: "legacy-held", admission: null };
       if (err instanceof Error && /UNIQUE constraint failed/.test(err.message)) {
         return { admitted: false, reason: "duplicate", admission: this.liveRowFor(ticketId) };
       }
@@ -299,6 +308,7 @@ export class TicketAdmissionService {
 }
 
 class CapacityError extends Error {}
+class LegacyHeldError extends Error {}
 
 function rootObjectiveFor(ticketId: string, instanceKey: string): string {
   return `${ticketId} [admission ${instanceKey}]`;
