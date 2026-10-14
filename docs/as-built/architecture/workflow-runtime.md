@@ -75,6 +75,16 @@ reminder with backoff (`workflow-projector.ts:534`–`549`); a step that cannot
 reach `waiting`, or that maps `waiting` to a branch, fails validation
 (`waiting_re_presentation_unreachable`).
 
+`acceptance_bypass_possible` is a validator warning (RIG-92; never fails
+validation). A step with an `acceptance` contract gates only the transition out
+of that step. A backward `next_hop.on` edge `Y -> Z` (Z declared before Y) that
+sits downstream of the gated step X and closes a loop without passing X again
+lets a later step change the validated artifact while the remediation loop skips
+validation. The warning reads `step 'X' has acceptance gate, but remediation
+edge 'Y -> Z' bypasses it`. `ticket-factory` raises it for `qa_check`,
+`review` and `merge_disposition` -> `implement`; this is the known, documented
+limit of the acceptance contract, not an engine check.
+
 `WorkflowSpecCache.readThrough` parses the source file, hashes it, and
 updates the `(name, version)` cache row. Full `spec_json` preserves fields
 that the older scalar columns cannot represent. A same-name/same-version
