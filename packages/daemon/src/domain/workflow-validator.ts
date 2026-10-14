@@ -444,6 +444,83 @@ export class WorkflowValidator {
       }
     }
 
+    // RIG-92: acceptance-bypass advisory (static analysis, warning only).
+    // An `acceptance` contract gates ONE transition (out of step X). A
+    // remediation edge Y -> Z (a next_hop.on branch edge) BYPASSES X when
+    //   - it routes BACKWARD (Z is declared before Y in steps[]; forward
+    //     branch edges such as review -> merge_prep are not remediation),
+    //   - Y != X and Z != X,
+    //   - Y and Z are both reachable from X (the loop lives downstream of
+    //     the gate, where the validated artifact can still change), and
+    //   - Z can reach Y in the successor graph with X removed, i.e. the edge
+    //     closes a loop that never passes through X again, and
+    //   - Z can reach a finishing step (allows `done`, or has no successor)
+    //     with X removed, so a loop wholly upstream of X, which can only
+    //     leave through X, is not flagged.
+    // Known conservative limits (not flagged): self-loops, remediation that
+    // routes only via suggested_roles, and a remediation target declared
+    // after its source.
+    // Edges out of X itself (validate -> plan) are the gated transition and
+    // are not flagged. Advisory only: it never changes ok/pass-fail. The
+    // engine does not re-bind the acceptance verdict to later artifact
+    // changes (see the acceptance comment in ticket-factory.yaml).
+    if (spec.steps.length > 0 && spec.steps.every((s) => s.id)) {
+      const byId = new Map(spec.steps.map((s) => [s.id, s]));
+      const succ = (step: WorkflowStepSpec): string[] => {
+        const out: string[] = [];
+        if (dependencyGraph) {
+          for (const c of spec.steps) if ((c.depends_on ?? []).includes(step.id)) out.push(c.id);
+        } else {
+          const structural = resolveNextStep(spec, step);
+          if (structural) out.push(structural.id);
+        }
+        for (const t of Object.values(step.next_hop?.on ?? {})) {
+          if (t && byId.has(t) && !out.includes(t)) out.push(t);
+        }
+        return out;
+      };
+      const reach = (from: string, blocked?: string): Set<string> => {
+        const seen = new Set<string>();
+        const stack = [from];
+        while (stack.length > 0) {
+          const id = stack.pop()!;
+          if (seen.has(id) || id === blocked) continue;
+          seen.add(id);
+          const st = byId.get(id);
+          if (st) stack.push(...succ(st));
+        }
+        return seen;
+      };
+      const finishes = (id: string): boolean => {
+        const st = byId.get(id);
+        return !!st && (st.allowed_exits?.includes("done") === true || succ(st).length === 0);
+      };
+      for (const gated of spec.steps) {
+        if (!gated.acceptance) continue;
+        const downstream = reach(gated.id);
+        const order = new Map(spec.steps.map((st, i) => [st.id, i]));
+        for (const from of spec.steps) {
+          if (from.id === gated.id || !downstream.has(from.id)) continue;
+          const fromIdx = spec.steps.indexOf(from);
+          const flagged = new Set<string>();
+          for (const [exitKey, targetId] of Object.entries(from.next_hop?.on ?? {})) {
+            if (!targetId || targetId === gated.id || !downstream.has(targetId)) continue;
+            if ((order.get(targetId) ?? 0) >= (order.get(from.id) ?? 0)) continue;
+            const avoiding = reach(targetId, gated.id);
+            if (!avoiding.has(from.id) || ![...avoiding].some(finishes)) continue;
+            if (flagged.has(targetId)) continue;
+            flagged.add(targetId);
+            issues.push({
+              code: "acceptance_bypass_possible",
+              message: `step '${gated.id}' has acceptance gate, but remediation edge '${from.id} -> ${targetId}' bypasses it`,
+              field: `workflow.steps[${fromIdx}].next_hop.on.${exitKey}`,
+              severity: "warning",
+            });
+          }
+        }
+      }
+    }
+
     if (seatLivenessCheck) {
       // Probe each role's preferred_targets[]. A role with no live
       // preferred target produces a warning (not an error) — agents
