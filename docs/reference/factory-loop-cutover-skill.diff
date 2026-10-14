@@ -1,0 +1,31 @@
+--- a/factory-loop/SKILL.md	2026-10-14 09:09:39
++++ b/factory-loop/SKILL.md	2026-10-14 09:09:39
+@@ -368,6 +368,28 @@
+ 
+ Before starting the loop, verify every dependency. A missing dependency stops the run with a
+ specific message — do not proceed with a partial setup.
++
++### 0. Daemon workflow cutover check (RIG-89)
++
++The daemon can run the ticket factory as a workflow. Both producers must never admit the same
++ticket, so check the daemon before anything else.
++
++```bash
++curl -sf "${RIG_DAEMON_URL:-http://127.0.0.1:7433}/api/ticket-factory/cutover" || echo "daemon-unavailable"
++```
++
++| Result | Action |
++|--------|--------|
++| `daemon-unavailable`, 503, or no `phase` field | Fall back: continue as before. Print "daemon workflow not available; running skill-based factory-loop". |
++| `phase` is `legacy`, `reconciled`, or `rolled-back` | Continue. This skill owns admission. Tickets in `daemonAdmitted` are still skipped (see claim fence). |
++| `phase` is `daemon` | WARN: "daemon workflow owns admission. This skill must not admit new tickets." Stop admitting. Only finish tickets that are already in flight here (restart reconciliation below). |
++
++**Claim fence.** Before claiming any ticket (Step 1 and `--ticket`), skip every ticket id listed in
++the endpoint's `daemonAdmitted` array and print why. If the endpoint is unreachable, claim as before.
++
++**Rollback.** If the daemon workflow fails: run `POST /api/ticket-factory/cutover/rollback`
++(drains the daemon; its active tickets keep running and stay listed in `daemonAdmitted`), confirm
++`phase` is `rolled-back`, then run this skill as usual. See `docs/reference/factory-loop-cutover.md`.
+ 
+ ### 1. Linear CLI
+ 

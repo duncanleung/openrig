@@ -8,6 +8,8 @@ import { randomUUID } from "node:crypto";
 import type { TicketAdmissionService } from "./ticket-admission-service.js";
 import { FACTORY_DEFAULTS, resolveMergePolicy, type FactorySettings } from "./ticket-factory-config.js";
 
+export class CutoverGateError extends Error {}
+
 export type FactoryState = "disabled" | "running" | "paused";
 
 export interface FactoryStatus {
@@ -85,9 +87,25 @@ export class TicketFactoryController {
   /** Enable (or re-enable) the factory: starts a new run and schedules an immediate poll. */
   enable(): FactoryStatus {
     this.seed();
+    // RIG-89: while a cutover is in progress, only the `daemon` phase may run the factory.
+    // No cutover row (or no cutover table) means no cutover is in progress.
+    const phase = this.cutoverPhase();
+    if (phase && phase !== "daemon") {
+      throw new CutoverGateError(`factory cannot be enabled while cutover phase is ${phase}; complete the cutover first`);
+    }
     if (!this.control().current_run_id) this.startRun();
     this.update({ state: "running", next_poll_at: null, fail_streak: 0, last_error: null });
     return this.status();
+  }
+
+  private cutoverPhase(): string | null {
+    try {
+      const row = this.deps.db.prepare(`SELECT phase FROM ticket_factory_cutover WHERE id = 1`).get() as { phase: string } | undefined;
+      return row?.phase ?? null;
+    } catch (err) {
+      if (err instanceof Error && /no such table/.test(err.message)) return null;
+      throw err;
+    }
   }
 
   disable(): FactoryStatus {
