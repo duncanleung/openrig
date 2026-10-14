@@ -33,7 +33,7 @@ import { FACTORY_DEFAULTS, parseFactorySettings, resolveMergePolicy, type Factor
 import { makeTicketFactoryPollPolicy } from "../src/domain/policies/ticket-factory-poll.js";
 import { ticketFactoryRoutes } from "../src/routes/ticket-factory.js";
 import { ticketFactoryCutoverSchema } from "../src/db/migrations/106_ticket_factory_cutover.js";
-import { TicketFactoryCutoverService, classify, CutoverError, type LegacySnapshot } from "../src/domain/ticket-factory-cutover.js";
+import { TicketFactoryCutoverService, classify, createLegacyQueueProbe, CutoverError, type LegacySnapshot } from "../src/domain/ticket-factory-cutover.js";
 import { CutoverGateError } from "../src/domain/ticket-factory-controller.js";
 
 // RIG-89 — cutover from the /factory-loop skill: reconciliation, the legacy fence
@@ -57,7 +57,7 @@ describe("ticket-factory cutover (RIG-89)", () => {
   let legacyQueue: string[];
   const now = () => new Date(t);
 
-  const boot = () => {
+  const boot = (opts: { realProbe?: boolean; probe?: (since: string | null) => Promise<string[]> } = {}) => {
     db = createDb(file);
     migrate(db, MIGRATIONS);
     const bus = new EventBus(db);
@@ -77,9 +77,9 @@ describe("ticket-factory cutover (RIG-89)", () => {
     });
     const controller = new TicketFactoryController({ db, admissions, listBacklog: () => backlog(), now });
     controller.seed(FACTORY_DEFAULTS);
-    const cutover = new TicketFactoryCutoverService({ db, controller, now, probeLegacyQueue: async () => legacyQueue });
+    const cutover = new TicketFactoryCutoverService({ db, controller, now, probeLegacyQueue: opts.probe ?? (opts.realProbe ? createLegacyQueueProbe(queue) : async () => legacyQueue) });
     ref.cutover = cutover;
-    return { admissions, controller, cutover };
+    return { admissions, controller, cutover, queue };
   };
 
   const snap = (over: Partial<LegacySnapshot> = {}): LegacySnapshot => ({ items: [], prs: [], tickets: {}, ...over });
@@ -309,6 +309,94 @@ describe("ticket-factory cutover (RIG-89)", () => {
       expect((await post("/cutover/rollback")).status).toBe(200);
       expect(controller.status().state).toBe("paused");
       expect((await post("/resume")).status).toBe(409);
+      expect(controller.status().state).toBe("paused");
+    });
+  });
+
+  describe("legacy queue probe wiring (RIG-93)", () => {
+    const seedLegacy = async (queue: QueueRepository, ticket: string, tsCreated: string, tags = ["factory-loop"], state?: string) => {
+      const item = await queue.create({
+        sourceSession: "orch-lead@openrig", destinationSession: "dev-impl@openrig",
+        body: `Factory loop processing ${ticket}`, tags: [...tags, `ticket:${ticket}`], nudge: false,
+      } as never);
+      db.prepare(`UPDATE queue_items SET ts_created = ?${state ? ", state = ?" : ""} WHERE qitem_id = ?`)
+        .run(...(state ? [tsCreated, state, item.qitemId] : [tsCreated, item.qitemId]));
+      return item.qitemId;
+    };
+    const afterCutover = () => new Date(t + 60_000).toISOString();
+    const beforeCutover = () => new Date(t - 60_000).toISOString();
+
+    it("overlap with a daemon admission pauses (drain) and keeps the admission running", async () => {
+      const { admissions, controller, cutover, queue } = boot({ realProbe: true });
+      cutover.reconcileLegacy(snap());
+      cutover.cutOver({ legacyProducerDisabled: true });
+      expect((await admissions.admit("A-1")).admitted).toBe(true);
+      await seedLegacy(queue, "A-1", afterCutover());
+      await seedLegacy(queue, "A-7", afterCutover());
+      const res = await cutover.tripwire();
+      expect(res).toEqual({ unexpected: ["A-7"], doubleDispatch: ["A-1"], paused: true });
+      expect(controller.status().state).toBe("paused");
+      expect(db.prepare(`SELECT state FROM ticket_admissions WHERE ticket_id = 'A-1'`).get()).toMatchObject({ state: expect.stringMatching(/pending|active|reconciling/) });
+    });
+
+    it("finds nothing relevant: no action", async () => {
+      const { controller, cutover, queue } = boot({ realProbe: true });
+      cutover.reconcileLegacy(snap());
+      cutover.cutOver({ legacyProducerDisabled: true });
+      await seedLegacy(queue, "B-1", beforeCutover());                       // created before cutover
+      await seedLegacy(queue, "B-2", afterCutover(), ["other"]);             // wrong tag
+      await seedLegacy(queue, "B-3", afterCutover(), ["factory-loop"], "done"); // terminal
+      expect(await cutover.tripwire()).toEqual({ unexpected: [], doubleDispatch: [], paused: false });
+      expect(controller.status().state).toBe("running");
+    });
+
+    it("probe unavailable: logs a warning, does not pause", async () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      try {
+        const { controller, cutover } = boot({ probe: async () => { throw new Error("queue offline"); } });
+        cutover.reconcileLegacy(snap());
+        cutover.cutOver({ legacyProducerDisabled: true });
+        expect(await cutover.tripwire()).toEqual({ unexpected: [], doubleDispatch: [], paused: false, probeUnavailable: true });
+        expect(controller.status().state).toBe("running");
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining("queue offline"));
+      } finally { warn.mockRestore(); }
+    });
+
+    it("the probe is read-only and receives the cutover time", async () => {
+      const { cutover, queue } = boot({ realProbe: true });
+      cutover.reconcileLegacy(snap());
+      cutover.cutOver({ legacyProducerDisabled: true });
+      await seedLegacy(queue, "C-1", afterCutover());
+      const dump = () => JSON.stringify([
+        db.prepare(`SELECT * FROM queue_items ORDER BY qitem_id`).all(),
+        db.prepare(`SELECT * FROM queue_transitions ORDER BY rowid`).all(),
+      ]);
+      const before = dump();
+      await createLegacyQueueProbe(queue)(new Date(t).toISOString());
+      await cutover.tripwire();
+      expect(dump()).toBe(before);
+    });
+
+    it("passes the cutover time to the probe", async () => {
+      const seen: Array<string | null> = [];
+      const { cutover } = boot({ probe: async (since) => { seen.push(since ?? null); return []; } });
+      cutover.reconcileLegacy(snap());
+      cutover.cutOver({ legacyProducerDisabled: true });
+      await cutover.tripwire();
+      expect(seen).toEqual([new Date(t).toISOString()]);
+    });
+
+    it("POST /cutover/tripwire returns the probe result and pauses on overlap", async () => {
+      const { controller, cutover, queue } = boot({ realProbe: true });
+      const app = new Hono();
+      app.use("*", async (c, next) => { c.set("ticketFactory" as never, controller); c.set("ticketFactoryCutover" as never, cutover); await next(); });
+      app.route("/api/ticket-factory", ticketFactoryRoutes());
+      const post = (p: string, body?: unknown) => app.request(`/api/ticket-factory${p}`, { method: "POST", body: body ? JSON.stringify(body) : undefined, headers: { "content-type": "application/json" } });
+      await post("/cutover/reconcile", snap());
+      await post("/cutover/start", { legacyProducerDisabled: true });
+      expect(await (await post("/cutover/tripwire")).json()).toEqual({ unexpected: [], doubleDispatch: [], paused: false });
+      await seedLegacy(queue, "D-9", afterCutover());
+      expect(await (await post("/cutover/tripwire")).json()).toEqual({ unexpected: ["D-9"], doubleDispatch: [], paused: true });
       expect(controller.status().state).toBe("paused");
     });
   });
