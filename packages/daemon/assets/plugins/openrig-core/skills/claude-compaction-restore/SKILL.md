@@ -156,7 +156,7 @@ and consume the current topology and work trace that actually arrived with the
 restore request; do not rerun Python merely to duplicate it. If no current trace
 arrived, name that delivery gap. A packet pointer, compact summary or truncated
 extract is not a full source read. Read required notes and full sources separately
-and complete the restore steps and read-depth audit below; partial reading does
+and complete the restore steps below; partial reading does
 not establish completed restoration. The earlier acknowledgement-only boundary
 is not a restore request.
 
@@ -195,29 +195,13 @@ is not a restore request.
    `restored from packet at <path>; resumed at step <X>`, naming the map you used. When no packet exists, give
    the map's path as `<path>` and say that you restored from the map.
 
-## Required Read-Depth Audit
+## Required Reconnect Note
 
-The audit message asks for a read-depth table and tells you not to conserve tokens. Do both in this form:
-
-1. **List every item** you were asked to read (request, instruction files, packet, map, and the sources the
-   map marks required) with `FULL`, `PARTIAL` or `NOT_READ`, the ranges you actually read, and a reason.
-   Mark `FULL` only for content you read after this compaction; content carried in through the summary is
-   inherited, not read, and a file the harness re-attached after compaction is
-   `PARTIAL (injected)`, not `FULL`, until you read it.
-2. **Read in full now** every required item that is not yet `FULL`. "Required" means the ranked entries
-   above your class's tier line, in the exact parts they name. Everything else is lookup-only: **every file in the restore packet**
-   (`touched-files.md`, `restore-instructions.md`, `transcript.md`, `transcript-latest.md`, `restore-summary.json`),
-   the session JSONL and archives. Those stay
-   `NOT_READ` with the reason "lookup only", unless a human or the owning seat releases them. The audit
-   message's "do not optimize for token conservation" applies to required items: read those fully rather
-   than skimming them. It does not turn lookups into reading lists. In an early run of this skill, reading
-   the packet transcripts during the audit cost a default seat about 75k, more than the restore itself.
-3. **Reconnect, in writing.** In the same reply, and in a short `RESTORED-<UTC yyyymmdd-hhmm>.md` beside the
-   map:
-   - where you are in time: what earlier windows established, what the last window did, what is true now;
-   - the connections you have rebuilt, in a few lines;
-   - the connections you could not rebuild, and where you would look;
-   - the next authorized step and who authorizes it. If a hold stands, the next step is waiting.
+After reading down the map's ranked list, write a short `RESTORED-<UTC yyyymmdd-hhmm>.md` beside the map:
+- where you are in time: what earlier windows established, what the last window did, what is true now;
+- the connections you have rebuilt, in a few lines;
+- the connections you could not rebuild, and where you would look;
+- the next authorized step and who authorizes it. If a hold stands, the next step is waiting.
 
 The next restore map links this note, which keeps the chain unbroken.
 
@@ -228,9 +212,7 @@ The next restore map links this note, which keeps the chain unbroken.
 - Continue from the map and the files, not from the summary's "next step" alone: a hold placed after the
   summary was written still binds.
 - Do not launch a fresh session in place of restoring.
-- An honest `PARTIAL` with its reason is a correct outcome. Claiming coverage you did not reach is the
-  failure.
-- Do not resume task work until the read-depth table and the reconnect note exist.
+- Do not resume task work until the reconnect note exists.
 
 ## Failure modes
 

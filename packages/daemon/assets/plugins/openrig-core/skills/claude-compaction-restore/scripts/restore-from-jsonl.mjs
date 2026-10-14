@@ -393,7 +393,7 @@ function restoreInstructions(summary, outputPaths) {
   lines.push(`- The full transcript is ~${summary.transcriptTokens ?? "?"} tokens. **Reading it front-to-back can consume the window the restore exists to rebuild.**`);
   lines.push(`- Default order: read the **narrative companion first** (~${summary.narrativeTokens ?? "?"} tokens — message turns + decisions), tail-first (most recent first).`);
   lines.push("- Drop to the full transcript only for a specific question the narrative can't answer. File bodies inside tool-results are pointers now — **read the live file, not the transcript snapshot.**");
-  lines.push("- Read to a budget with a stopping rule; report depth honestly (an honest PARTIAL beats a false completion). See the skill's *Required Read-Depth Audit*.");
+  lines.push("- Read to a budget with a stopping rule; report depth honestly (an honest PARTIAL beats a false completion).");
   lines.push("");
   lines.push("## Required Sequence");
   lines.push("");
