@@ -14,6 +14,7 @@ import { eventsSchema } from "../src/db/migrations/003_events.js";
 import { queueItemsSchema } from "../src/db/migrations/024_queue_items.js";
 import { queueTransitionsSchema } from "../src/db/migrations/025_queue_transitions.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
+import { watchdogJobsSchema } from "../src/db/migrations/031_watchdog_jobs.js";
 import { workflowSpecsSchema } from "../src/db/migrations/033_workflow_specs.js";
 import { workflowInstancesSchema } from "../src/db/migrations/034_workflow_instances.js";
 import { workflowStepTrailsSchema } from "../src/db/migrations/035_workflow_step_trails.js";
@@ -57,6 +58,7 @@ describe("ticket-factory workflow (RIG-86)", () => {
     eventsSchema,
     queueItemsSchema,
     queueTransitionsSchema,
+    watchdogJobsSchema,
     workflowSpecsSchema,
     workflowInstancesSchema,
     workflowStepTrailsSchema,

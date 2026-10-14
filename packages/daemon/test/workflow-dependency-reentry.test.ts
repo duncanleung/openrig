@@ -9,6 +9,8 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { WorkflowRuntime } from "../src/domain/workflow-runtime.js";
+import { MissionControlActionLog } from "../src/domain/mission-control/mission-control-action-log.js";
+import { MissionControlWriteContract } from "../src/domain/mission-control/mission-control-write-contract.js";
 
 const BUILD = `workflow:
   id: build-with-signoff
@@ -71,6 +73,7 @@ const STRAIGHT = `workflow:
 describe("dependency graph re-entry through a routed exit", () => {
   let db: ReturnType<typeof createDb>;
   let runtime: WorkflowRuntime;
+  let resolveGate: (qitemId: string) => unknown;
   let dir: string;
   // Unset means real time. A test sets it to move the workflow clock by hand.
   let clock: Date | undefined;
@@ -82,6 +85,9 @@ describe("dependency graph re-entry through a routed exit", () => {
       send: async () => ({ ok: false, reason: "controlled terminal is stopped" }),
     } });
     queue.attachOutbox(new OutboxHandler(db));
+    // RIG-90: a human gate packet must be resolved before the owner closes it.
+    resolveGate = (qitemId) => new MissionControlWriteContract({ db, eventBus: bus, queueRepo: queue, actionLog: new MissionControlActionLog(db) })
+      .act({ verb: "resolve", qitemId, actorSession: "human@host", decision: "approved" });
     clock = undefined;
     runtime = new WorkflowRuntime({ db, eventBus: bus, queueRepo: queue, now: () => clock ?? new Date() });
     dir = mkdtempSync(join(tmpdir(), "dependency-reentry-"));
@@ -119,6 +125,7 @@ describe("dependency graph re-entry through a routed exit", () => {
     expect(claudeAgain.nextStepIds).toEqual(["ship_signoff"]);
     expect(claudeAgain.instance.status).toBe("waiting");
 
+    await resolveGate(packetFor(claudeAgain, "ship_signoff"));
     const shipped = await project(run.id, packetFor(claudeAgain, "ship_signoff"), "done");
     expect(shipped.instance.status).toBe("completed");
     expect(runtime.trailLog.listForInstance(run.id).map((entry) => entry.stepId).reverse()).toEqual([
@@ -132,6 +139,7 @@ describe("dependency graph re-entry through a routed exit", () => {
     const implemented = await project(run.id, run.entry, "handoff");
     await project(run.id, packetFor(implemented, "code_review_codex"), "handoff");
     const reviewed = await project(run.id, packetFor(implemented, "code_review_claude"), "handoff");
+    await resolveGate(packetFor(reviewed, "ship_signoff"));
     const shipped = await project(run.id, packetFor(reviewed, "ship_signoff"), "done");
     expect(shipped.nextStepIds).toEqual([]);
     expect(shipped.instance.status).toBe("completed");

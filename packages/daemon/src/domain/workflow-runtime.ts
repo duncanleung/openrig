@@ -37,6 +37,7 @@ import {
   resolveDefaultOwner,
   withWorkflowContinuation,
   workflowWaitWakeMessage,
+  gateParkWake,
   type GateCompileResult,
   type ProjectStepInput,
   type ProjectStepResult,
@@ -816,6 +817,13 @@ export class WorkflowRuntime {
           closureTarget: entryGate.parkOn,
           blockedOn: entryGate.parkOn,
           transitionNote: `workflow gate: parked on ${entryGate.parkOn} pending sign-off`,
+          ...gateParkWake({
+            spec: specRow.spec,
+            instance,
+            step: entryStep,
+            packetId: created.qitemId,
+            ownerSession: created.destinationSession,
+          }),
         });
         register(parked.persistedEvent);
       }

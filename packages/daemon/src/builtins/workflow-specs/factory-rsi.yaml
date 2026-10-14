@@ -125,6 +125,8 @@ workflow:
         already prepared in release_prep. Approval lets the human proceed to
         publish; nothing is published automatically.
       allowed_exits: [done, waiting, failed]
+      # RIG-90: re-present the parked gate to the step owner every 24h.
+      re_present_after_seconds: 86400
       gate:
         target: human@kernel
         summary: "RSI cycle clean; release artifacts prepared — sign off to publish (publish is a human act)."
