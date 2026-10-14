@@ -125,6 +125,29 @@ export function workflowWaitWakeMessage(input: {
 }
 
 /**
+ * RIG-90: wake arguments for a HUMAN gate park. A gated step that declares
+ * `re_present_after_seconds` arms a periodic reminder on the parked packet.
+ * The queue repository targets the packet's destination session, which for a
+ * human gate is the step OWNER (the seat that resumes after resolve), not the
+ * human the packet is blocked on. Steps without the field park with no wake.
+ */
+export function gateParkWake(input: {
+  spec: WorkflowSpec;
+  instance: WorkflowInstance;
+  step: WorkflowStepSpec;
+  packetId: string;
+  ownerSession: string;
+}): { wakeAfterSeconds?: number; wakeMaxSeconds?: number; wakeMessage?: string } {
+  const after = input.step.re_present_after_seconds;
+  if (after === undefined) return {};
+  return {
+    wakeAfterSeconds: after,
+    wakeMaxSeconds: input.step.re_present_max_seconds,
+    wakeMessage: workflowWaitWakeMessage(input),
+  };
+}
+
+/**
  * OPR.0.4.6.WF2 FR-2: canonical-session → node runtime column lookup
  * (the harness-pin reconciliation source). Latest session row wins
  * (the node-inventory join discipline). null = not a managed node.
@@ -322,6 +345,30 @@ export class WorkflowProjector {
     }
 
     validateAcceptance(currentStep, input, instance);
+
+    // RIG-90: a human gate packet is parked blocked on the human seat until
+    // `rig queue resolve` unparks it. Closing it with done|handoff while the
+    // park still holds would record an approval nobody gave. failed and
+    // waiting stay allowed (they claim no approval).
+    if (
+      currentStep.gate &&
+      isHumanSeatSession(currentStep.gate.target) &&
+      (input.exit === "done" || input.exit === "handoff") &&
+      currentPacket.state === "blocked" &&
+      isHumanSeatSession(currentPacket.blockedOn)
+    ) {
+      throw new WorkflowProjectorError(
+        "gate_unresolved",
+        `step "${currentStep.id}" is held at a human gate and packet ${input.currentPacketId} is still blocked on ${currentPacket.blockedOn}; resolve the gate (rig queue resolve) before closing with "${input.exit}".`,
+        {
+          instanceId: instance.instanceId,
+          stepId: currentStep.id,
+          packetId: input.currentPacketId,
+          blockedOn: currentPacket.blockedOn,
+          attemptedExit: input.exit,
+        },
+      );
+    }
 
     // A declared dependency graph opts into the S06 packet-addressed
     // executor. Legacy specs keep the mature serial scribe below exactly.
@@ -657,6 +704,13 @@ export class WorkflowProjector {
             closureTarget: gateCompile.parkOn,
             blockedOn: gateCompile.parkOn,
             transitionNote: `workflow gate: parked on ${gateCompile.parkOn} pending sign-off`,
+            ...gateParkWake({
+              spec,
+              instance,
+              step: nextStep!,
+              packetId: createdNext.qitemId,
+              ownerSession: createdNext.destinationSession,
+            }),
           });
           registerEvent(parked.persistedEvent);
         }
@@ -1173,6 +1227,13 @@ export class WorkflowProjector {
             closureTarget: plan.gate.parkOn,
             blockedOn: plan.gate.parkOn,
             transitionNote: `workflow gate: parked on ${plan.gate.parkOn} pending sign-off`,
+            ...gateParkWake({
+              spec,
+              instance,
+              step: plan.step,
+              packetId: created.qitemId,
+              ownerSession: created.destinationSession,
+            }),
           });
           addEvent(parked.persistedEvent);
         }

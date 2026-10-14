@@ -20,6 +20,9 @@ workflow:
       harness: codex
     - id: ship-signoff
       actor_role: prover
+      # RIG-90: re-present the parked gate to the step owner every 24h so an
+      # unresolved sign-off does not block the instance silently.
+      re_present_after_seconds: 86400
       gate:
         target: human@kernel
         summary: "Release candidate proven; sign off to ship"
