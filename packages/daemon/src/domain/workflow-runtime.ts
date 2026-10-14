@@ -91,6 +91,8 @@ export interface WorkflowRuntimeDeps {
    * per exception; absent = the orchestrator-first engine default with
    * registered-human selection when no agent route resolves.
    */
+  /** RIG-91: live workspace.root getter; gate evidence files resolve against it. Absent = no check. */
+  workspaceRoot?: () => string | null | undefined;
   exceptionDial?: {
     hostDefault: () => "orchestrator" | "human_only" | null;
     humanFallbackSeat: WorkflowHumanDestination;
@@ -183,6 +185,7 @@ export class WorkflowRuntime {
       this.watchdogJobsRepo,
       deps.exceptionDial,
       deps.guidanceLibrary,
+      deps.workspaceRoot,
     );
     this.queueRepo.attachWorkflowGuidance(packetId => {
       const packet = this.queueRepo.getById(packetId);
