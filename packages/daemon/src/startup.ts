@@ -2371,6 +2371,26 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       }
     }
 
+    // RIG-87: finish ticket admissions a crash left half-done and close admissions whose
+    // workflow already ended. Recovery needs no tracker access; admit() needs the real check
+    // adapters (a later slice), so runChecks refuses until they are wired.
+    if (workflowRuntime) {
+      try {
+        const { TicketAdmissionService } = await import("./domain/ticket-admission-service.js");
+        const admissions = new TicketAdmissionService({
+          db,
+          runtime: workflowRuntime,
+          runChecks: async () => { throw new Error("ticket admission checks are not configured"); },
+          createdBySession: "orch-lead@openrig",
+        });
+        const recovered = await admissions.recoverPending();
+        const settled = admissions.settleFinished();
+        console.log(`ticket admission recovery: ${recovered.resumed} resumed, ${recovered.adopted} adopted, ${settled} settled`);
+      } catch (err) {
+        console.warn(`ticket admission recovery: failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     // W1 (transactional closure) FR — the wake-intent RECOVERY SWEEP. Deliver
     // any wake intents a crash left committed-but-undelivered (the terminal txn
     // committed, so the intent is durable, but the process died before the
