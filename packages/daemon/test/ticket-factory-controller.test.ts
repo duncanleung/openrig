@@ -251,6 +251,57 @@ describe("ticket-factory recurring operation (RIG-88)", () => {
     });
   });
 
+  describe("poll robustness", () => {
+    it("a pause that lands while the backlog is being read stops the admits", async () => {
+      const { controller, admissions } = boot({ capacity: 2, maxTicketsPerRun: 5, pollIntervalSeconds: 60 });
+      controller.enable();
+      backlog = async () => { controller.pause(); return ["RIG-90", "RIG-91"]; };
+      expect(await controller.pollOnce()).toMatchObject({ admitted: [], stopped: "interrupted" });
+      expect(admissions.liveAdmissionCount()).toBe(0);
+      expect(controller.status().state).toBe("paused");
+    });
+
+    it("a new run that starts mid-poll does not receive admits from the ended run", async () => {
+      const { controller, admissions } = boot({ capacity: 2, maxTicketsPerRun: 5, pollIntervalSeconds: 60 });
+      controller.enable();
+      const first = controller.status().run.runId!;
+      backlog = async () => { controller.newRun(); return ["RIG-90"]; };
+      expect(await controller.pollOnce()).toMatchObject({ admitted: [], stopped: "interrupted" });
+      expect(admissions.admittedInRun(first)).toBe(0);
+      expect(admissions.liveAdmissionCount()).toBe(0);
+    });
+
+    it("a housekeeping failure is recorded and backs off instead of escaping the poll", async () => {
+      const { controller, admissions } = boot({ pollIntervalSeconds: 60 });
+      controller.enable();
+      vi.spyOn(admissions, "expireOverBudget").mockRejectedValueOnce(new Error("abort exploded"));
+      const out = await controller.pollOnce();
+      expect(out.error).toBe("abort exploded");
+      expect(controller.status()).toMatchObject({ failStreak: 1, lastError: "abort exploded" });
+      expect(Date.parse(controller.status().nextPollAt!)).toBeGreaterThan(t);
+    });
+
+    it("one failing abort does not strand the other expired tickets, and the failed row stays live for retry", async () => {
+      backlog = async () => ["RIG-90", "RIG-91"];
+      const { controller, admissions } = boot({ capacity: 2, maxTicketsPerRun: 5, wallClockPerTicketSeconds: 1800, pollIntervalSeconds: 60 });
+      controller.enable();
+      await controller.pollOnce();
+      const [a] = runtime.instanceStore.listAll();
+      const realAbort = runtime.abort.bind(runtime);
+      vi.spyOn(runtime, "abort").mockImplementation(async (input) => {
+        if (input.instanceId === a!.instanceId) throw new Error("abort refused");
+        return realAbort(input);
+      });
+      t += 1801_000;
+      const out = await controller.pollOnce();
+      expect(out.error).toMatch(/abort refused/);
+      expect(admissions.liveAdmissionCount()).toBe(1);
+      expect(runtime.instanceStore.getById(a!.instanceId)?.status).toBe("active");
+      const other = runtime.instanceStore.listAll().find((i) => i.instanceId !== a!.instanceId)!;
+      expect(other.status).toBe("aborted");
+    });
+  });
+
   describe("backoff", () => {
     it("doubles the wait on each consecutive failure, caps it, and resets on success", async () => {
       let fail = true;

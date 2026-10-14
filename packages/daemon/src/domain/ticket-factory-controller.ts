@@ -30,7 +30,7 @@ export interface PollOutcome {
   ran: boolean;
   skipped?: "disabled" | "paused" | "not-due" | "in-flight";
   admitted: string[];
-  stopped?: "capacity" | "run-budget" | "empty";
+  stopped?: "capacity" | "run-budget" | "empty" | "interrupted";
   expired: string[];
   error?: string;
 }
@@ -146,7 +146,7 @@ export class TicketFactoryController {
 
   /** Scheduler entry point: start the worker and return at once. Never throws, never blocks. */
   triggerPoll(): void {
-    void this.pollOnce().catch(() => { /* recorded in last_error by pollOnce */ });
+    void this.pollOnce().catch(() => { /* run() records every failure in last_error */ });
   }
 
   /** One poll cycle. Single-flight: a second call while one runs returns `in-flight`. */
@@ -161,20 +161,24 @@ export class TicketFactoryController {
     const c = this.control();
     const out: PollOutcome = { ran: false, admitted: [], expired: [] };
     if (c.state === "disabled") return { ...out, skipped: "disabled" };
-    // Housekeeping runs even while paused so finished tickets free capacity during a drain.
-    this.deps.admissions.settleFinished();
-    out.expired = await this.deps.admissions.expireOverBudget(c.wall_clock_per_ticket_s);
-    if (c.state === "paused") return { ...out, skipped: "paused" };
-    const nowMs = this.now().getTime();
-    if (c.next_poll_at && nowMs < Date.parse(c.next_poll_at)) return { ...out, skipped: "not-due" };
-
-    out.ran = true;
-    const runId = c.current_run_id ?? this.startRun();
+    // Housekeeping, the backlog read and admission all sit in one boundary, so any failure is recorded and backs off.
     try {
-      const outcome = await this.admitFromBacklog(runId, c);
+      // Housekeeping runs even while paused so finished tickets free capacity during a drain.
+      this.deps.admissions.settleFinished();
+      out.expired = await this.deps.admissions.expireOverBudget(c.wall_clock_per_ticket_s);
+      if (c.state === "paused") return { ...out, skipped: "paused" };
+      const nowMs = this.now().getTime();
+      if (c.next_poll_at && nowMs < Date.parse(c.next_poll_at)) return { ...out, skipped: "not-due" };
+
+      out.ran = true;
+      const runId = c.current_run_id ?? this.startRun();
+      const outcome = await this.admitFromBacklog(runId);
       out.admitted = outcome.admitted;
       out.stopped = outcome.stopped;
-      this.update({ fail_streak: 0, last_error: null, last_poll_at: this.now().toISOString(), next_poll_at: this.afterSeconds(c.poll_interval_s) });
+      // An operator verb changed the factory mid-poll; that verb owns the schedule, so leave it alone.
+      if (outcome.stopped !== "interrupted") {
+        this.update({ fail_streak: 0, last_error: null, last_poll_at: this.now().toISOString(), next_poll_at: this.afterSeconds(c.poll_interval_s) });
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       const streak = c.fail_streak + 1;
@@ -188,13 +192,23 @@ export class TicketFactoryController {
     return out;
   }
 
-  private async admitFromBacklog(runId: string, c: ControlRow): Promise<{ admitted: string[]; stopped?: PollOutcome["stopped"] }> {
+  /** True when pause, disable or a new run landed while this poll was awaiting. */
+  private changedSince(runId: string): ControlRow | null {
+    const cur = this.control();
+    return cur.state !== "running" || cur.current_run_id !== runId ? cur : null;
+  }
+
+  private async admitFromBacklog(runId: string): Promise<{ admitted: string[]; stopped?: PollOutcome["stopped"] }> {
     const admitted: string[] = [];
+    // Limits come from the live row each time, so a settings reload applies inside a running poll.
+    let c = this.control();
     if (this.deps.admissions.admittedInRun(runId) >= c.max_tickets_per_run) return { admitted, stopped: "run-budget" };
     if (this.deps.admissions.liveAdmissionCount() >= c.capacity) return { admitted, stopped: "capacity" };
     const backlog = await withTimeout(this.deps.listBacklog(), this.deps.pollTimeoutMs ?? 60_000, "backlog poll timed out");
     if (backlog.length === 0) return { admitted, stopped: "empty" };
     for (const ticketId of backlog) {
+      if (this.changedSince(runId)) return { admitted, stopped: "interrupted" };
+      c = this.control();
       if (this.deps.admissions.admittedInRun(runId) >= c.max_tickets_per_run) return { admitted, stopped: "run-budget" };
       if (this.deps.admissions.liveAdmissionCount() >= c.capacity) return { admitted, stopped: "capacity" };
       const result = await this.deps.admissions.admit(ticketId, { runId });

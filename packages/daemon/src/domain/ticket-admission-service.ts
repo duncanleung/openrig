@@ -189,18 +189,25 @@ export class TicketAdmissionService {
       `SELECT * FROM ticket_admissions WHERE state IN ('active','reconciling') AND created_at < ?`,
     ).all(cutoff) as Raw[];
     const expired: string[] = [];
+    const failed: string[] = [];
     for (const raw of rows) {
-      const inst = raw.instance_id ? this.deps.runtime.instanceStore.getById(raw.instance_id) : null;
-      if (inst && (inst.status === "active" || inst.status === "waiting")) {
-        await this.deps.runtime.abort({
-          instanceId: raw.instance_id!,
-          reason: `ticket ${raw.ticket_id} exceeded its wall-clock budget`,
-          actorSession: this.deps.createdBySession,
-        });
+      try {
+        const inst = raw.instance_id ? this.deps.runtime.instanceStore.getById(raw.instance_id) : null;
+        if (inst && (inst.status === "active" || inst.status === "waiting")) {
+          await this.deps.runtime.abort({
+            instanceId: raw.instance_id!,
+            reason: `ticket ${raw.ticket_id} exceeded its wall-clock budget`,
+            actorSession: this.deps.createdBySession,
+          });
+        }
+        this.setState(raw.id, "closed", `wall-clock budget exceeded (${maxAgeSeconds}s)`);
+        expired.push(raw.ticket_id);
+      } catch (err) {
+        // The row stays live and is retried next poll; one bad abort must not strand the other rows.
+        failed.push(`${raw.ticket_id}: ${err instanceof Error ? err.message : String(err)}`);
       }
-      this.setState(raw.id, "closed", `wall-clock budget exceeded (${maxAgeSeconds}s)`);
-      expired.push(raw.ticket_id);
     }
+    if (failed.length > 0) throw new Error(`wall-clock expiry failed for ${failed.join("; ")}`);
     return expired;
   }
 
