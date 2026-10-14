@@ -87,15 +87,22 @@ export class TicketFactoryController {
   /** Enable (or re-enable) the factory: starts a new run and schedules an immediate poll. */
   enable(): FactoryStatus {
     this.seed();
-    // RIG-89: while a cutover is in progress, only the `daemon` phase may run the factory.
-    // No cutover row (or no cutover table) means no cutover is in progress.
-    const phase = this.cutoverPhase();
-    if (phase && phase !== "daemon") {
-      throw new CutoverGateError(`factory cannot be enabled while cutover phase is ${phase}; complete the cutover first`);
-    }
+    this.assertRunnablePhase("enabled");
     if (!this.control().current_run_id) this.startRun();
     this.update({ state: "running", next_poll_at: null, fail_streak: 0, last_error: null });
     return this.status();
+  }
+
+  /**
+   * RIG-89: while a cutover is in progress, only the `daemon` phase may run the factory.
+   * No cutover row (or no cutover table) means no cutover is in progress. Every path into
+   * `running` (enable and resume) must call this, or a rollback can be undone by a resume.
+   */
+  private assertRunnablePhase(verb: "enabled" | "resumed"): void {
+    const phase = this.cutoverPhase();
+    if (phase && phase !== "daemon") {
+      throw new CutoverGateError(`factory cannot be ${verb} while cutover phase is ${phase}; complete the cutover first`);
+    }
   }
 
   private cutoverPhase(): string | null {
@@ -125,7 +132,10 @@ export class TicketFactoryController {
   resume(): FactoryStatus {
     this.seed();
     const c = this.control();
-    if (c.state === "paused") this.update({ state: "running", next_poll_at: null });
+    if (c.state === "paused") {
+      this.assertRunnablePhase("resumed");
+      this.update({ state: "running", next_poll_at: null });
+    }
     return this.status();
   }
 

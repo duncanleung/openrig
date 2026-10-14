@@ -227,6 +227,27 @@ describe("ticket-factory cutover (RIG-89)", () => {
       expect(() => controller.enable()).toThrow(CutoverGateError);
     });
 
+    it("refuses to resume a paused factory outside the daemon phase, so a rollback cannot be undone", async () => {
+      const { controller, cutover } = boot();
+      cutover.reconcileLegacy(snap());
+      cutover.cutOver({ legacyProducerDisabled: true });
+      cutover.rollback("daemon failed");
+      expect(controller.status().state).toBe("paused");
+      expect(() => controller.resume()).toThrow(CutoverGateError);
+      expect(controller.status().state).toBe("paused");
+    });
+
+    it("still resumes a paused factory in the daemon phase and when no cutover row exists", () => {
+      const noCutover = boot();
+      noCutover.controller.enable();
+      noCutover.controller.pause();
+      expect(noCutover.controller.resume().state).toBe("running");
+      noCutover.cutover.reconcileLegacy(snap());
+      noCutover.cutover.cutOver({ legacyProducerDisabled: true });
+      noCutover.controller.pause();
+      expect(noCutover.controller.resume().state).toBe("running");
+    });
+
     it("refuses cutover before a reconcile or without the legacy-disabled attestation", () => {
       const { cutover, controller } = boot();
       expect(() => cutover.cutOver({ legacyProducerDisabled: true })).toThrow(CutoverError);
@@ -286,6 +307,8 @@ describe("ticket-factory cutover (RIG-89)", () => {
       expect((await post("/cutover/start", { legacyProducerDisabled: true })).status).toBe(200);
       expect(((await (await app.request("/api/ticket-factory/cutover")).json()) as { phase: string }).phase).toBe("daemon");
       expect((await post("/cutover/rollback")).status).toBe(200);
+      expect(controller.status().state).toBe("paused");
+      expect((await post("/resume")).status).toBe(409);
       expect(controller.status().state).toBe("paused");
     });
   });
