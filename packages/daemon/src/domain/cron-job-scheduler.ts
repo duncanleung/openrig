@@ -105,7 +105,7 @@ export class CronJobScheduler {
   private timer: NodeJS.Timeout | null = null;
   private inflight: Promise<void> | null = null;
   private executing: Promise<CronRunResult> | null = null;
-  private child: { proc: ChildProcess; killReason: "timeout" | "shutdown" | null } | null = null;
+  private child: { proc: ChildProcess; killReason: "timeout" | "shutdown" | null; escalation: Promise<void> | null } | null = null;
   private shuttingDown = false;
   private started = false;
   private stopPromise: Promise<void> | null = null;
@@ -189,20 +189,26 @@ export class CronJobScheduler {
     this.timer.unref?.();
   }
 
+  private isDue(job: CronJob): boolean {
+    const slotMs = previousSlot(job.schedule, this.now()).getTime();
+    const lastMs = job.lastRunAt ? Date.parse(job.lastRunAt) : Number.NEGATIVE_INFINITY;
+    return slotMs > lastMs && this.now().getTime() - slotMs <= job.catchupWindowSeconds * 1000;
+  }
+
   private async tick(): Promise<void> {
     if (this.shuttingDown) return;
-    for (const job of this.repo.list()) {
+    for (const snapshot of this.repo.list()) {
       if (this.shuttingDown) return;
-      if (!job.enabled) continue;
+      if (!snapshot.enabled) continue;
       try {
-        const slot = previousSlot(job.schedule, this.now());
-        const slotMs = slot.getTime();
-        const lastMs = job.lastRunAt ? Date.parse(job.lastRunAt) : Number.NEGATIVE_INFINITY;
-        if (!(slotMs > lastMs)) continue;
-        if (this.now().getTime() - slotMs > job.catchupWindowSeconds * 1000) continue;
-        // A manual run owns the single child slot until it finishes.
+        if (!this.isDue(snapshot)) continue;
+        // Earlier jobs and manual runs own the single child slot until they finish.
         while (this.executing) await this.executing.catch(() => undefined);
         if (this.shuttingDown) return;
+        // The snapshot may be stale after that wait: re-read, and use the fresh row throughout.
+        const job = this.repo.get(snapshot.name);
+        if (!job || !job.enabled || !this.isDue(job)) continue;
+        const slot = previousSlot(job.schedule, this.now());
         // Claim before the child starts (see the class comment). False: another writer took the slot.
         if (!this.repo.claim(job.name, slot.toISOString())) continue;
         await this.runJob(job, "scheduled");
@@ -344,8 +350,16 @@ export class CronJobScheduler {
     if (!current || current.killReason) return;
     current.killReason = reason;
     this.signalGroup(current.proc, "SIGTERM");
-    const escalate = setTimeout(() => this.signalGroup(current.proc, "SIGKILL"), this.killGraceMs);
-    current.proc.once("exit", () => clearTimeout(escalate));
+    // The group SIGKILL is NOT cancelled when the leader exits: a descendant in the same group
+    // may have ignored SIGTERM. execute() awaits this before it releases the child slot, so a
+    // survivor is always killed before the next run or the end of shutdown.
+    current.escalation = new Promise<void>((resolve) => {
+      const escalate = setTimeout(() => {
+        this.signalGroup(current.proc, "SIGKILL");
+        resolve();
+      }, this.killGraceMs);
+      escalate.unref?.();
+    });
   }
 
   private signalGroup(proc: ChildProcess, signal: NodeJS.Signals): void {
@@ -376,7 +390,7 @@ export class CronJobScheduler {
         cwd: fs.existsSync(this.openrigHome) ? this.openrigHome : undefined,
         env: { PATH: CRON_CHILD_PATH, HOME: this.home, OPENRIG_HOME: this.openrigHome },
       });
-      const current = { proc, killReason: null as "timeout" | "shutdown" | null };
+      const current = { proc, killReason: null as "timeout" | "shutdown" | null, escalation: null as Promise<void> | null };
       this.child = current;
       proc.stdout?.on("data", (chunk: Buffer) => { stdout = keep(stdout, chunk); });
       proc.stderr?.on("data", (chunk: Buffer) => { stderr = keep(stderr, chunk); });
@@ -396,6 +410,8 @@ export class CronJobScheduler {
         }
       } finally {
         clearTimeout(timeout);
+        // A kill was requested: wait for the final group SIGKILL before freeing the slot.
+        if (current.escalation) await current.escalation;
         this.child = null;
       }
       const { exitCode, error } = outcome;

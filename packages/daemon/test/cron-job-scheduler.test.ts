@@ -224,6 +224,63 @@ describe("CronJobScheduler (RIG-84)", () => {
     });
   });
 
+  describe("process-group kill (M1)", () => {
+    // Leader exits on SIGTERM; a same-group grandchild ignores it. Only the group SIGKILL ends it.
+    const stubbornTree = (pidFile: string) =>
+      // macOS bash 3.2 has no BASHPID, so the grandchild is a fresh bash whose $$ is its own pid.
+      `bash -c 'trap "" TERM; echo $$ > "${pidFile}"; while true; do sleep 1; done' &\nwhile [ ! -s "${pidFile}" ]; do sleep 0.05; done\nsleep 30`;
+
+    it("timeout: the SIGKILL still reaches a SIGTERM-ignoring grandchild after the leader exits", async () => {
+      const gpid = path.join(home, "gpid.txt");
+      const sched = make({ killGraceMs: 400 });
+      register(sched, "tree", script("tree.sh", stubbornTree(gpid)), { timeoutSeconds: 1 });
+      await sched.runTickNow();
+      expect(row("tree")["last_status"]).toBe("timeout");
+      await waitFor(() => !alive(Number(fs.readFileSync(gpid, "utf8"))), 2000);
+    });
+
+    it("shutdown: stop() does not return while a SIGTERM-ignoring grandchild survives", async () => {
+      const gpid = path.join(home, "gpid.txt");
+      const sched = make({ killGraceMs: 400 });
+      register(sched, "tree", script("tree.sh", stubbornTree(gpid)));
+      sched.start();
+      timers[0]!.cb();
+      await waitFor(() => fs.existsSync(gpid) && fs.readFileSync(gpid, "utf8").trim() !== "");
+      await sched.stop();
+      expect(alive(Number(fs.readFileSync(gpid, "utf8")))).toBe(false);
+      expect(row("tree")["last_status"]).toBe("interrupted");
+    });
+  });
+
+  describe("stale job snapshot (S1)", () => {
+    it("a job disabled while an earlier job holds the slot does not run", async () => {
+      const counter = path.join(home, "count.txt");
+      const sched = make();
+      register(sched, "a-slow", script("slow.sh", "sleep 1"));
+      register(sched, "b-victim", script("victim.sh", `echo x >> "${counter}"`));
+      const tick = sched.runTickNow();
+      await waitFor(() => row("a-slow")["last_status"] === "running");
+      sched.patch("b-victim", { enabled: false });
+      await tick;
+      expect(countLines(counter)).toBe(0);
+      expect(row("b-victim")["last_run_at"]).toBeNull();
+    });
+
+    it("a job whose command is edited while waiting runs the new command", async () => {
+      const oldOut = path.join(home, "old.txt");
+      const newOut = path.join(home, "new.txt");
+      const sched = make();
+      register(sched, "a-slow", script("slow.sh", "sleep 1"));
+      register(sched, "b-edit", script("old.sh", `echo x >> "${oldOut}"`));
+      const tick = sched.runTickNow();
+      await waitFor(() => row("a-slow")["last_status"] === "running");
+      register(sched, "b-edit", script("new.sh", `echo x >> "${newOut}"`));
+      await tick;
+      expect(countLines(oldOut)).toBe(0);
+      expect(countLines(newOut)).toBe(1);
+    });
+  });
+
   describe("concurrency", () => {
     it("overlapping ticks run a job once, and a manual run during a run is refused", async () => {
       const counter = path.join(home, "count.txt");
