@@ -465,7 +465,7 @@ describe("FleetIngestionService — skill_invocations", () => {
 
   it("truncates args to 200 characters", async () => {
     const got = await ingest("skills-long-bbbb-cccc-dddddddddddd", [
-      skillCall("m1", { skill: "orchestrate", args: "x".repeat(500) }),
+      skillCall("m1", { skill: "orchestrate", args: "ab ".repeat(200) }),
     ]);
     expect(got[0].args).toHaveLength(200);
   });
@@ -966,5 +966,149 @@ describe("resolveFleetReconcileIntervalMs — env var validation", () => {
 
   it("returns default for floating point values", () => {
     expect(resolveFleetReconcileIntervalMs("1500.7")).toBe(5 * 60 * 1000);
+  });
+});
+
+// ── Digest redaction (RIG-60) ───────────────────────────────────────────────
+
+describe("FleetIngestionService — digest redaction", () => {
+  const SK = "sk-abcdefghijklmnopqrstuvwx";
+  const GHP = "ghp_abcdefghijklmnopqrstuvwxyz0123";
+  const BEARER = "abcdefghijklmnopqrstuvwxyz.0123456789";
+  const CLI_TOKEN = "hunter2-cli-token";
+  const EXPORT_KEY = "export-key-value-123";
+  const URL_PASS = "p4ssw0rd-in-url";
+  const RAW_SECRETS = [SK, GHP, BEARER, CLI_TOKEN, EXPORT_KEY, URL_PASS];
+
+  let db: Database;
+  let tmpDir: string;
+  let reducerPath: string;
+  const sessionId = "cccccccc-dddd-eeee-ffff-000000000000";
+
+  function writeReducer(version = ""): void {
+    writeFileSync(reducerPath, `
+      const output = {
+        seat: "redact-seat",
+        totalTurns: 9,
+        conversationTurns: 4,
+        toolCalls: { Bash: 2 },
+        repeatedReads: [{ path: "/tmp/a.txt", count: 3 }],
+        reviewFindings: ["leaked ${SK} in config"],
+        handoffEvents: [
+          { type: "send", to: "orch-lead@openrig", message: "use ${GHP} for push" },
+          { type: "queue", operation: "create", command: "rig queue create --token ${CLI_TOKEN}" },
+        ],
+        skillInvocations: [{ skill: "code-review-dual", args: "--api-key ${CLI_TOKEN} 42", turn: 5 }],
+        claudeMdLoaded: [],
+        errors: [{ tool: "Bash", message: "curl -H 'Authorization: Bearer ${BEARER}' failed", turn: 7 }],
+        irreversibleActions: [
+          { command: "export API_KEY=${EXPORT_KEY} && git push https://bob:${URL_PASS}@github.com/x/y.git", kind: "git-push", turn: 8 },
+        ],
+        compactionBoundaries: [],
+        compactionLosses: [],
+        turnTokenUsage: [{ turn: 1, input_tokens: 1, output_tokens: 2, cache_creation_input_tokens: 3, cache_read_input_tokens: 4 }],
+        tokenTotals: { input_tokens: 1, output_tokens: 2, cache_creation_input_tokens: 3, cache_read_input_tokens: 4 },
+      };
+      process.stdout.write(JSON.stringify(output));
+      // ${version}
+    `);
+  }
+
+  beforeEach(() => {
+    db = freshDb();
+    tmpDir = mkdtempSync(join(tmpdir(), "fleet-redact-"));
+    reducerPath = join(tmpDir, "reducer.mjs");
+    writeReducer();
+    const projectsDir = join(tmpDir, ".claude", "projects", "test-project");
+    mkdirSync(projectsDir, { recursive: true });
+    writeFileSync(join(projectsDir, `${sessionId}.jsonl`), '{"type":"test"}\n');
+  });
+
+  function readRow(): Record<string, string | number | null> {
+    return db.prepare("SELECT * FROM session_digests WHERE native_session_id = ?").get(sessionId) as Record<string, string | number | null>;
+  }
+
+  it("redacts secrets in all five text-bearing fields and keeps the rest intact", async () => {
+    const result = await makeService(db, tmpDir, reducerPath).reconcileDigests();
+    expect(result.ingested).toBe(1);
+
+    const row = readRow();
+    const texts = [row.review_findings, row.handoff_events, row.skill_invocations, row.errors, row.irreversible_actions] as string[];
+    for (const text of texts) {
+      for (const secret of RAW_SECRETS) expect(text).not.toContain(secret);
+      expect(() => JSON.parse(text)).not.toThrow();
+    }
+    for (const text of texts) expect(text).toContain("[REDACTED]");
+
+    const errors = JSON.parse(row.errors as string);
+    expect(errors).toEqual([{ tool: "Bash", message: "curl -H 'Authorization: [REDACTED]' failed", turn: 7 }]);
+
+    const irreversible = JSON.parse(row.irreversible_actions as string);
+    expect(irreversible[0].kind).toBe("git-push");
+    expect(irreversible[0].turn).toBe(8);
+    expect(irreversible[0].command).toContain("export API_KEY=[REDACTED]");
+    expect(irreversible[0].command).toContain("https://bob:[REDACTED]@github.com/x/y.git");
+
+    const handoffs = JSON.parse(row.handoff_events as string);
+    expect(handoffs[0]).toEqual({ type: "send", to: "orch-lead@openrig", message: "use [REDACTED] for push" });
+    expect(handoffs[1]).toEqual({ type: "queue", operation: "create", command: "rig queue create --token [REDACTED]" });
+
+    expect(JSON.parse(row.skill_invocations as string)).toEqual([
+      { skill: "code-review-dual", args: "--api-key [REDACTED] 42", turn: 5 },
+    ]);
+    expect(JSON.parse(row.review_findings as string)).toEqual(["leaked [REDACTED] in config"]);
+
+    // Out-of-scope fields are untouched.
+    expect(JSON.parse(row.tool_calls as string)).toEqual({ Bash: 2 });
+    expect(JSON.parse(row.repeated_reads as string)).toEqual([{ path: "/tmp/a.txt", count: 3 }]);
+    expect(row.total_turns).toBe(9);
+    expect(JSON.parse(row.token_usage as string)[0].turn).toBe(1);
+  });
+
+  it("re-ingests and redacts an unchanged transcript stored under an older PARSER_VERSION", async () => {
+    const svc = makeService(db, tmpDir, reducerPath);
+    await svc.reconcileDigests();
+    // Simulate a pre-redaction row: identity present, same source hash, old parser, raw secret stored.
+    db.prepare(
+      "UPDATE session_digests SET rig_name = 'r', parser_version = 'reduce-transcript.mjs@5', errors = ? WHERE native_session_id = ?",
+    ).run(JSON.stringify([{ tool: "Bash", message: `raw ${SK}`, turn: 7 }]), sessionId);
+
+    const result = await svc.reconcileDigests();
+    expect(result.ingested).toBe(1);
+    expect(result.skipped).toBe(0);
+    const row = readRow();
+    expect(row.errors).not.toContain(SK);
+    expect(row.errors).toContain("[REDACTED]");
+    expect(row.parser_version).not.toBe("reduce-transcript.mjs@5");
+
+    // Control: with the current version and identity, the next pass skips.
+    db.prepare("UPDATE session_digests SET rig_name = 'r' WHERE native_session_id = ?").run(sessionId);
+    const again = await svc.reconcileDigests();
+    expect(again.skipped).toBe(1);
+  });
+});
+
+describe("redactDigestValue", () => {
+  it("redacts each key=value shape, keeps names, and leaves normal names alone", async () => {
+    const { redactDigestValue } = await import("../src/domain/digest-redaction.js");
+    expect(redactDigestValue("tool --password s3cret --verbose")).toBe("tool --password [REDACTED] --verbose");
+    expect(redactDigestValue("tool --token=abc123")).toBe("tool --token=[REDACTED]");
+    expect(redactDigestValue("export GITHUB_TOKEN='a b' && ls")).toBe("export GITHUB_TOKEN=[REDACTED] && ls");
+    expect(redactDigestValue("PASSWORD=hunter2 run")).toBe("PASSWORD=[REDACTED] run");
+    expect(redactDigestValue("postgres://user:pw@db:5432/x")).toBe("postgres://user:[REDACTED]@db:5432/x");
+    expect(redactDigestValue("Authorization: Basic dXNlcjpwdw==")).toBe("Authorization: [REDACTED]");
+    expect(redactDigestValue("redis://:secret@h:6379")).toBe("redis://:[REDACTED]@h:6379");
+    expect(redactDigestValue("amqp://guest:pw@mq:5672/v")).toBe("amqp://guest:[REDACTED]@mq:5672/v");
+    expect(redactDigestValue("http://host:8080/path")).toBe("http://host:8080/path");
+    expect(redactDigestValue("redis://h:6379")).toBe("redis://h:6379");
+    expect(redactDigestValue('Authorization: "s3cret"')).toBe("Authorization: [REDACTED]");
+    expect(redactDigestValue("Authorization: 's3cret' next")).toBe("Authorization: [REDACTED] next");
+    expect(redactDigestValue('{"Authorization":"Basic dXNlcjpwdw=="}')).toBe('{"Authorization":[REDACTED]}');
+    expect(redactDigestValue("curl -H 'Authorization: Bearer abc' x")).toBe("curl -H 'Authorization: [REDACTED]' x");
+    expect(redactDigestValue({ skill: "code-review-dual", to: "orch-lead@openrig", turn: 3, n: null, ok: true })).toEqual({
+      skill: "code-review-dual", to: "orch-lead@openrig", turn: 3, n: null, ok: true,
+    });
+    expect(redactDigestValue("git push origin main --force-with-lease")).toBe("git push origin main --force-with-lease");
+    expect(redactDigestValue("ls --token-count")).toBe("ls --token-count");
   });
 });
