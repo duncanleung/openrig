@@ -48,3 +48,9 @@ merge_policy: auto-low-risk
 approval_batching:
   plan_gate: escalate-only
   merge_gate: all
+
+# RIG-97: shadow-mode classifier settings. Read only when merge_policy is auto-jev,
+# which never gates a merge (ADR-0008).
+jev:
+  threshold: 0.8
+  model: "jev-1.13"

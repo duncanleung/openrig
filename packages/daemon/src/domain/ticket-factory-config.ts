@@ -15,7 +15,16 @@ export interface FactorySettings {
   mergePolicy: string;
   /** Advisory only: no session-level token attribution exists yet. */
   tokenCapPerTicket: number | null;
+  /** RIG-97: Jev classifier settings. Read from the file only; not stored in the control row. */
+  jev?: JevSettings;
 }
+
+export interface JevSettings {
+  threshold: number;
+  model: string;
+}
+
+export const JEV_DEFAULTS: JevSettings = { threshold: 0.8, model: "jev-1.13" };
 
 export const FACTORY_DEFAULTS: FactorySettings = {
   pollIntervalSeconds: 300,
@@ -43,6 +52,8 @@ export function resolveMergePolicy(mergeGate: string, mergePolicy: string): { ef
         : "merge_gate: all requires human approval for every merge",
     };
   }
+  // RIG-97 shadow mode (ADR-0008): auto-jev is accepted but never gates or auto-merges.
+  if (mergePolicy === "auto-jev") return { effective: "human-approval", reason: "auto-jev: shadow mode" };
   if (mergePolicy === "auto-low-risk") return { effective: "auto-low-risk", reason: `merge_gate: ${mergeGate} allows auto-low-risk` };
   return { effective: "human-approval", reason: `merge_policy: ${mergePolicy} requires human approval` };
 }
@@ -53,6 +64,15 @@ function posInt(v: unknown, fallback: number): number {
 
 function nonNegInt(v: unknown, fallback: number): number {
   return typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.floor(v) : fallback;
+}
+
+function parseJev(raw: unknown): JevSettings {
+  const j = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  return {
+    threshold: typeof j.threshold === "number" && Number.isFinite(j.threshold) && j.threshold >= 0 && j.threshold <= 1
+      ? j.threshold : JEV_DEFAULTS.threshold,
+    model: typeof j.model === "string" && j.model.trim() !== "" ? j.model.trim() : JEV_DEFAULTS.model,
+  };
 }
 
 export function parseFactorySettings(text: string): FactorySettings {
@@ -71,6 +91,7 @@ export function parseFactorySettings(text: string): FactorySettings {
     mergeGate: typeof approval.merge_gate === "string" ? approval.merge_gate : d.mergeGate,
     mergePolicy: typeof doc.merge_policy === "string" ? doc.merge_policy : d.mergePolicy,
     tokenCapPerTicket: typeof budget.token_cap_per_ticket === "number" ? budget.token_cap_per_ticket : null,
+    jev: parseJev(doc.jev),
   };
 }
 

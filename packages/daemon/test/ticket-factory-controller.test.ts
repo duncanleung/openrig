@@ -406,6 +406,54 @@ describe("ticket-factory recurring operation (RIG-88)", () => {
       expect(resolveMergePolicy("escalate-only", "human").effective).toBe("human-approval");
     });
 
+    it("auto-jev is shadow mode: it never becomes auto-merge", () => {
+      expect(resolveMergePolicy("all", "auto-jev")).toEqual({
+        effective: "human-approval",
+        reason: "merge_gate: all requires human approval for every merge",
+      });
+      expect(resolveMergePolicy("escalate-only", "auto-jev")).toEqual({ effective: "human-approval", reason: "auto-jev: shadow mode" });
+      expect(resolveMergePolicy("none", "auto-jev").effective).toBe("human-approval");
+    });
+
+    it("unknown merge_policy still falls back to human-approval", () => {
+      expect(resolveMergePolicy("escalate-only", "auto-yolo")).toMatchObject({
+        effective: "human-approval", reason: expect.stringContaining("requires human approval"),
+      });
+    });
+
+    it("status reports auto-jev as human-approval", () => {
+      const { controller } = boot({ mergeGate: "escalate-only", mergePolicy: "auto-jev" });
+      expect(controller.status().merge).toMatchObject({ effective: "human-approval", policy: "auto-jev", reason: "auto-jev: shadow mode" });
+    });
+
+    it("jev settings default and validate", () => {
+      expect(parseFactorySettings("").jev).toEqual({ threshold: 0.8, model: "jev-1.13" });
+      const th = (v: string) => parseFactorySettings(`jev:\n  threshold: ${v}\n`).jev!.threshold;
+      expect(th("0")).toBe(0);
+      expect(th("1")).toBe(1);
+      expect(th("0.8")).toBe(0.8);
+      expect(th("0.65")).toBe(0.65);
+      expect(th("-0.1")).toBe(0.8);
+      expect(th("1.1")).toBe(0.8);
+      expect(th('"x"')).toBe(0.8);
+      expect(th(".nan")).toBe(0.8);
+      expect(th(".inf")).toBe(0.8);
+      expect(parseFactorySettings("jev: nope\n").jev).toEqual({ threshold: 0.8, model: "jev-1.13" });
+    });
+
+    it("jev model must be a non-empty string", () => {
+      expect(parseFactorySettings('jev:\n  model: "jev-latest"\n').jev!.model).toBe("jev-latest");
+      expect(parseFactorySettings('jev:\n  model: ""\n').jev!.model).toBe("jev-1.13");
+      expect(parseFactorySettings("jev:\n  model: 5\n").jev!.model).toBe("jev-1.13");
+    });
+
+    it("the repo .factory.yml jev block parses and leaves merge_policy unchanged", () => {
+      const text = readFileSync(resolve(import.meta.dirname, "../../../.factory.yml"), "utf8");
+      const s = parseFactorySettings(text);
+      expect(s.jev).toEqual({ threshold: 0.8, model: "jev-1.13" });
+      expect(s.mergePolicy).toBe("auto-low-risk");
+    });
+
     it("maps the project's .factory.yml onto settings", () => {
       const text = readFileSync(resolve(import.meta.dirname, "../../../.factory.yml"), "utf8");
       expect(parseFactorySettings(text)).toMatchObject({
