@@ -160,6 +160,11 @@ export function applyDbRename(
   assertSchema(db);
   const run = db.transaction((): DbRenameResult => {
     if (opts.recheckQuiescence) {
+      // The pre-check awaits (tmux probes), so another rig may have taken the new name since.
+      // rigs.name has no UNIQUE constraint; this is the check that makes the name exclusive.
+      if (rigsNamed(db, to).length > 0 || existingReferences(db, to).length > 0) {
+        throw new RigRenameDbError("name_taken", `the name "${to}" was taken during the rename; nothing was changed`);
+      }
       const blockers = readDbBlockers(db, from);
       if (hasDbBlockers(blockers)) {
         throw new RigRenameDbError("not_quiescent", "the rig became active during the rename; nothing was changed");
@@ -209,6 +214,11 @@ export function rigsNamed(db: Database.Database, name: string): Array<{ id: stri
 }
 
 /** Session names of the rig(s) named `name`, from the sessions table. Used for the tmux liveness probe. */
+/** Names of all rigs other than `except`, for file-name disambiguation. */
+export function otherRigNames(db: Database.Database, except: string): string[] {
+  return (db.prepare("SELECT DISTINCT name FROM rigs WHERE name != ?").all(except) as Array<{ name: string }>).map((r) => r.name);
+}
+
 export function sessionNamesOfRig(db: Database.Database, name: string): string[] {
   return (db.prepare(
     `SELECT DISTINCT s.session_name AS n FROM sessions s JOIN nodes nd ON nd.id = s.node_id JOIN rigs r ON r.id = nd.rig_id

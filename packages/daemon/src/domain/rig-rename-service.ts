@@ -15,6 +15,7 @@ import { randomUUID } from "node:crypto";
 import {
   applyDbRename,
   existingReferences,
+  otherRigNames,
   planDbRename,
   readDbBlockers,
   rigsNamed,
@@ -40,6 +41,7 @@ import {
   type RenameFs,
   type ResidueHit,
 } from "./rig-rename-files.js";
+import type { SessionProbe } from "../adapters/tmux.js";
 import { validateNewRigName } from "./rig-rename-manifest.js";
 
 export type BlockerCode =
@@ -50,6 +52,7 @@ export type BlockerCode =
   | "new_name_in_history"
   | "live_sessions"
   | "live_tmux_sessions"
+  | "tmux_unconfirmed"
   | "active_workflows"
   | "open_queue_items"
   | "active_watchdog_jobs";
@@ -97,8 +100,8 @@ export interface RigRenameDeps {
   specRoots?: string[];
   /** Directories the rename must never edit (built-in specs shipped with the daemon). */
   protectedRoots?: string[];
-  /** True when a tmux session with this name exists. Absent: the stored session status is the only liveness check. */
-  isTmuxSessionAlive?: (sessionName: string) => Promise<boolean>;
+  /** tmux probe (TmuxAdapter.probeSession). Absence must be proven: a probe error or an unconfirmed answer blocks the rename. */
+  probeSession?: (sessionName: string) => Promise<SessionProbe>;
   fs?: RenameFs;
   /** Test seam: runs right after the database transaction commits and before any file changes. */
   hooks?: { afterDbCommit?: () => void };
@@ -168,6 +171,7 @@ export class RigRenameService {
       specRoots: this.specRoots,
       protectedRoots: this.protectedRoots,
       workflowSourcePaths: rows.map((r) => r.p).filter((p) => nodePath.isAbsolute(p)),
+      otherRigNames: otherRigNames(db, oldName),
       from: oldName,
       to: newName,
     };
@@ -195,7 +199,7 @@ export class RigRenameService {
         items: brief(history.map((h) => `${h.table}.${h.column}: ${h.rows} row(s)`)),
       });
     }
-    const artifacts = findNameArtifacts(this.fs, { home: openrigHome, specRoots: this.specRoots, protectedRoots: this.protectedRoots, workflowSourcePaths: [], name: newName });
+    const artifacts = findNameArtifacts(this.fs, { home: openrigHome, specRoots: this.specRoots, protectedRoots: this.protectedRoots, workflowSourcePaths: [], otherRigNames: otherRigNames(db, newName), name: newName });
     if (artifacts.length > 0) {
       blockers.push({
         code: "name_collision_files",
@@ -212,16 +216,31 @@ export class RigRenameService {
         items: brief(q.liveSessions.map((s) => `${s.sessionName} (${s.status})`)),
       });
     }
-    if (this.deps.isTmuxSessionAlive) {
+    if (this.deps.probeSession) {
       const alive: string[] = [];
+      const unconfirmed: string[] = [];
       for (const name of sessionNamesOfRig(db, oldName)) {
-        if (await this.deps.isTmuxSessionAlive(name).catch(() => false)) alive.push(name);
+        try {
+          const probe = await this.deps.probeSession(name);
+          if (probe.state === "present") alive.push(name);
+          // No tmux server proves no session exists; any other transport trouble proves nothing.
+          else if (probe.state === "transport_unavailable" && !/no server running/i.test(probe.cause)) unconfirmed.push(`${name}: ${probe.cause}`);
+        } catch (err) {
+          unconfirmed.push(`${name}: ${errMessage(err)}`);
+        }
       }
       if (alive.length > 0) {
         blockers.push({
           code: "live_tmux_sessions",
           message: `tmux sessions of the rig still exist. Stop them first with 'rig down ${oldName}'.`,
           items: brief(alive),
+        });
+      }
+      if (unconfirmed.length > 0) {
+        blockers.push({
+          code: "tmux_unconfirmed",
+          message: "Could not confirm that the rig's tmux sessions are gone. Fix tmux access and retry.",
+          items: brief(unconfirmed),
         });
       }
     }

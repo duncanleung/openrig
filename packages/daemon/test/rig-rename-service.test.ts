@@ -394,7 +394,7 @@ describe("rig rename: pre-check blockers (RIG-61)", () => {
 
   it("refuses when tmux still has a session of the rig, even if the stored status says exited", async () => {
     seedRig(OLD, { sessionStatus: "exited" });
-    const report = await makeService({ isTmuxSessionAlive: async (n) => n === `orch-lead@${OLD}` }).rename(OLD, NEW, { dryRun: true });
+    const report = await makeService({ probeSession: async (n) => ({ state: n === `orch-lead@${OLD}` ? "present" : "absent" }) }).rename(OLD, NEW, { dryRun: true });
     expect(report.blockers.map((b) => b.code)).toEqual(["live_tmux_sessions"]);
   });
 
@@ -661,12 +661,77 @@ describe("rig rename: failure injection (RIG-61)", () => {
   });
 });
 
+describe("rig rename: review fixes (RIG-61)", () => {
+  it("F2: a rig that takes the new name during the tmux probe fails the rename and leaves the DB unchanged", async () => {
+    seedRig(OLD);
+    seedFiles();
+    const service = makeService({
+      probeSession: async () => {
+        // Another writer creates a rig with the new name while the pre-check awaits.
+        db.prepare("INSERT INTO rigs (id, name) VALUES ('late', ?)").run(NEW);
+        return { state: "absent" as const };
+      },
+    });
+    const beforeTree = snapshotTree();
+    const err = await service.rename(OLD, NEW, { dryRun: false }).catch((e) => e);
+    expect(err).toBeInstanceOf(RigRenameRolledBackError);
+    expect((err as RigRenameRolledBackError).stage).toBe("db");
+    expect(err.message).toContain("was taken");
+    expect((db.prepare("SELECT COUNT(*) AS n FROM rigs WHERE name = ?").get(OLD) as { n: number }).n).toBe(1);
+    expect((db.prepare("SELECT COUNT(*) AS n FROM rigs WHERE name = ?").get(NEW) as { n: number }).n).toBe(1);
+    expect(snapshotTree()).toEqual(beforeTree);
+  });
+
+  it("F10: a probe that throws blocks the rename instead of counting as absent", async () => {
+    seedRig(OLD);
+    const report = await makeService({ probeSession: async () => { throw new Error("EPERM tmux socket"); } }).rename(OLD, NEW, { dryRun: false });
+    expect(report.applied).toBe(false);
+    const blocker = report.blockers.find((b) => b.code === "tmux_unconfirmed");
+    expect(blocker?.items?.join(" ")).toContain("EPERM tmux socket");
+    expect((db.prepare("SELECT COUNT(*) AS n FROM rigs WHERE name = ?").get(OLD) as { n: number }).n).toBe(1);
+  });
+
+  it("F10: transport trouble other than 'no server running' blocks; 'no server running' proves absence", async () => {
+    seedRig(OLD);
+    const blocked = await makeService({ probeSession: async () => ({ state: "transport_unavailable" as const, cause: "permission denied on socket" }) }).rename(OLD, NEW, { dryRun: true });
+    expect(blocked.blockers.map((b) => b.code)).toEqual(["tmux_unconfirmed"]);
+    const ok = await makeService({ probeSession: async () => ({ state: "transport_unavailable" as const, cause: "no server running on /tmp/tmux-1/default" }) }).rename(OLD, NEW, { dryRun: true });
+    expect(ok.blockers).toEqual([]);
+  });
+
+  it("F1: renaming rig v1 does not touch files of rig v1.2", async () => {
+    seedRig("v1");
+    seedRig("v1.2");
+    write("state/provider-usage/lead@v1.json", JSON.stringify({ s: "lead@v1" }));
+    write("state/provider-usage/lead@v1.2.json", JSON.stringify({ s: "lead@v1.2" }));
+    write("logs/lead@v1.2.log", "x");
+    write("logs/lead@v1.log", "x");
+    await makeService().rename("v1", "v9", { dryRun: false });
+    expect(exists("state/provider-usage/lead@v9.json")).toBe(true);
+    expect(exists("state/provider-usage/lead@v1.2.json")).toBe(true);
+    expect(read("state/provider-usage/lead@v1.2.json")).toContain("lead@v1.2");
+    expect(exists("logs/lead@v9.log")).toBe(true);
+    expect(exists("logs/lead@v1.2.log")).toBe(true);
+    expect(exists("logs/lead@v9.2.log")).toBe(false);
+  });
+
+  it("F1: renaming rig old does not rename the file of a rig called old.json", async () => {
+    seedRig("old");
+    seedRig("old.json");
+    write("logs/lead@old.json.log", "x");
+    write("logs/lead@old.log", "x");
+    await makeService().rename("old", "fresh", { dryRun: false });
+    expect(exists("logs/lead@old.json.log")).toBe(true);
+    expect(exists("logs/lead@fresh.log")).toBe(true);
+  });
+});
+
 describe("rig rename: single flight (RIG-61)", () => {
   it("a second rename started while one is running is refused", async () => {
     seedRig(OLD);
     let release!: () => void;
     const gate = new Promise<void>((r) => { release = r; });
-    const service = makeService({ isTmuxSessionAlive: async () => { await gate; return false; } });
+    const service = makeService({ probeSession: async () => { await gate; return { state: "absent" as const }; } });
 
     const first = service.rename(OLD, NEW, { dryRun: false });
     expect(service.isRunning()).toBe(true);

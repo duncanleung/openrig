@@ -2559,9 +2559,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     deps.rigRenameService = new RigRenameService({
       db,
       openrigHome: OPENRIG_HOME,
-      specRoots: [userSpecLibraryRoot],
+      specRoots: [...new Set([userSpecLibraryRoot, compatibleSpecLibraryRoot])],
       protectedRoots: [nodePath.resolve(import.meta.dirname, "../specs"), nodePath.resolve(import.meta.dirname, "builtins")],
-      isTmuxSessionAlive: (sessionName) => tmuxAdapter.hasSession(sessionName),
+      probeSession: (sessionName) => tmuxAdapter.probeSession(sessionName),
     });
   }
 

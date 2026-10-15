@@ -76,6 +76,8 @@ export interface PlanContext {
   protectedRoots: string[];
   /** workflow_specs.source_path of cached rows that reference the old rig. */
   workflowSourcePaths: string[];
+  /** Names of the other rigs in the database. A file that belongs to a longer name is not renamed. */
+  otherRigNames?: string[];
   from: string;
   to: string;
 }
@@ -90,11 +92,13 @@ const SKIP_DIRS = new Set([".worktrees", "node_modules", ".git", "dist", "build"
 const FILE_TAIL = /^(?:\.(?:json|jsonl|log|md|txt|yaml|yml|lock|pid|tmp|bak|gz|zst|old|\d+))*$/;
 
 /** `seat@old.json` -> `seat@new.json`. The rig must be followed by nothing or by a known file extension. */
-export function renamedFileName(name: string, from: string, to: string): string | null {
+export function renamedFileName(name: string, from: string, to: string, otherRigs: readonly string[] = []): string | null {
   const at = name.indexOf("@");
   if (at < 1) return null;
   const rest = name.slice(at + 1);
   if (!rest.startsWith(from)) return null;
+  // "." and "-" can be part of a rig name: `seat@v1.2.json` belongs to rig "v1.2", not to rig "v1".
+  if (otherRigs.some((other) => other.length > from.length && other.startsWith(from) && rest.startsWith(other))) return null;
   const tail = rest.slice(from.length);
   return FILE_TAIL.test(tail) ? `${name.slice(0, at + 1)}${to}${tail}` : null;
 }
@@ -216,7 +220,7 @@ class Planner {
         if (!entry.isFile) continue;
         if (opts.content !== null && (opts.exts ? opts.exts.test(entry.name) : true)) this.rewriteFile(surface, full, opts.content);
         if (opts.names) {
-          const renamed = renamedFileName(entry.name, this.from, this.to);
+          const renamed = renamedFileName(entry.name, this.from, this.to, this.ctx.otherRigNames);
           if (renamed) this.addRename(surface, full, join(current, renamed), false);
         }
       }
