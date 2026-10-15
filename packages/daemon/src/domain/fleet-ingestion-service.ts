@@ -10,6 +10,7 @@ import {
   type ReviewRunInput,
   type ReviewFindingInput,
 } from "./fleet-store.js";
+import { redactDigestValue } from "./digest-redaction.js";
 
 export interface FleetIngestionServiceDeps {
   db: Database;
@@ -46,7 +47,7 @@ export interface SnapshotRollupResult {
   snapshotsUpserted: number;
 }
 
-const PARSER_VERSION = "reduce-transcript.mjs@5";
+const PARSER_VERSION = "reduce-transcript.mjs@6";
 const MAX_CONCURRENT_REDUCERS = 3;
 
 function sha256Hex(data: Buffer | string): string {
@@ -224,6 +225,9 @@ function adaptDigest(
     return JSON.stringify(v ?? []);
   };
 
+  // Fields that carry raw command / tool-result text are redacted before storage.
+  const redactedStr = (v: unknown): string => str(redactDigestValue(v));
+
   const numField = (obj: unknown, key: string): number => {
     if (obj && typeof obj === "object") {
       const v = (obj as Record<string, unknown>)[key];
@@ -255,12 +259,12 @@ function adaptDigest(
     conversationTurns: typeof reducerOutput.conversationTurns === "number" ? reducerOutput.conversationTurns : 0,
     toolCalls: str(reducerOutput.toolCalls),
     repeatedReads: str(reducerOutput.repeatedReads),
-    reviewFindings: str(reducerOutput.reviewFindings),
-    handoffEvents: str(reducerOutput.handoffEvents),
-    skillInvocations: str(reducerOutput.skillInvocations),
+    reviewFindings: redactedStr(reducerOutput.reviewFindings),
+    handoffEvents: redactedStr(reducerOutput.handoffEvents),
+    skillInvocations: redactedStr(reducerOutput.skillInvocations),
     claudeMdLoaded: str(reducerOutput.claudeMdLoaded),
-    errors: str(reducerOutput.errors),
-    irreversibleActions: str(reducerOutput.irreversibleActions),
+    errors: redactedStr(reducerOutput.errors),
+    irreversibleActions: redactedStr(reducerOutput.irreversibleActions),
     compactionBoundaries: str(reducerOutput.compactionBoundaries),
     compactionLosses: str(reducerOutput.compactionLosses),
     tokenUsage: str(reducerOutput.turnTokenUsage),
