@@ -103,6 +103,7 @@ import { watchdogRoutes } from "./routes/watchdog.js";
 import { workflowRoutes } from "./routes/workflow.js";
 import { ticketFactoryRoutes } from "./routes/ticket-factory.js";
 import { cronRoutes } from "./routes/cron.js";
+import { rigRenameRoutes } from "./routes/rig-rename.js";
 import { missionControlRoutes } from "./routes/mission-control.js";
 import { slicesRoutes } from "./routes/slices.js";
 import { reviewRoutes } from "./routes/review.js";
@@ -241,6 +242,8 @@ export interface AppDeps {
   periodicSnapshotScheduler?: import("./domain/periodic-snapshot-scheduler.js").PeriodicSnapshotScheduler;
   /** RIG-84: daemon cron for orchestration-layer shell jobs; routes answer 503 when absent. */
   cronJobScheduler?: import("./domain/cron-job-scheduler.js").CronJobScheduler;
+  /** RIG-61: `rig rename`; routes answer 503 when absent. */
+  rigRenameService?: import("./domain/rig-rename-service.js").RigRenameService;
   workflowRuntime?: WorkflowRuntime;
   /** RIG-88: recurring ticket-factory controller; routes answer 503 when absent. */
   ticketFactory?: import("./domain/ticket-factory-controller.js").TicketFactoryController;
@@ -585,6 +588,7 @@ export function createApp(deps: AppDeps): Hono {
     c.set("watchdogScheduler" as never, deps.watchdogScheduler);
     c.set("workflowRuntime" as never, deps.workflowRuntime);
     c.set("cronJobScheduler" as never, deps.cronJobScheduler);
+    c.set("rigRenameService" as never, deps.rigRenameService);
     c.set("ticketFactory" as never, deps.ticketFactory);
     c.set("ticketFactoryCutover" as never, deps.ticketFactoryCutover);
     c.set("workflowBuiltinSpecsDir" as never, deps.workflowBuiltinSpecsDir);
@@ -807,6 +811,7 @@ export function createApp(deps: AppDeps): Hono {
   app.route("/api/workflow", workflowRoutes());
   app.route("/api/ticket-factory", ticketFactoryRoutes());
   app.route("/api/cron", cronRoutes());
+  app.route("/api", rigRenameRoutes());
   app.route(
     "/api/mission-control",
     missionControlRoutes({ bearerToken: deps.missionControlBearerToken ?? null }),

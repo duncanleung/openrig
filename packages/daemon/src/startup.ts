@@ -2552,6 +2552,19 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     deps.cronJobScheduler = cronJobScheduler;
   }
 
+  // RIG-61: `rig rename`. DB and OPENRIG_HOME file renames in one service. The built-in spec
+  // directories are protected: a workflow cached from a built-in spec is never edited on disk.
+  {
+    const { RigRenameService } = await import("./domain/rig-rename-service.js");
+    deps.rigRenameService = new RigRenameService({
+      db,
+      openrigHome: OPENRIG_HOME,
+      specRoots: [...new Set([userSpecLibraryRoot, compatibleSpecLibraryRoot])],
+      protectedRoots: [nodePath.resolve(import.meta.dirname, "../specs"), nodePath.resolve(import.meta.dirname, "builtins")],
+      probeSession: (sessionName) => tmuxAdapter.probeSession(sessionName),
+    });
+  }
+
   // OPR.0.4.3.21 — daemon event-loop health instrumentation. Constructed once
   // per daemon and wired into deps so `/healthz` can surface wedge evidence
   // (loop lag / last-tick age) and the expensive topology routes are timed.

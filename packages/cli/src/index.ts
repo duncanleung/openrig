@@ -90,6 +90,7 @@ import { seatCommand, handoverCommand, type SeatDeps } from "./commands/seat.js"
 import { rigModeCommand, type RigModeDeps } from "./commands/rig-mode.js";
 import { policyCommand } from "./commands/policy.js";
 import { ticketFactoryCommand } from "./commands/ticket-factory.js";
+import { renameCommand } from "./commands/rename.js";
 import { startupProofCommand, type StartupProofDeps } from "./commands/startup-proof.js";
 import { escalateCommand } from "./commands/escalate.js";
 import type { LifecycleDeps } from "./daemon-lifecycle.js";
@@ -202,6 +203,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   // OPR.0.3.3.19 - rig archive affordance (soft, reversible; NOT a delete).
   program.addCommand(archiveCommand(depsOverride?.archiveDeps));
   program.addCommand(unarchiveCommand(depsOverride?.unarchiveDeps));
+  program.addCommand(renameCommand());
   program.addCommand(hostCommand());
   program.addCommand(psCommand(depsOverride?.psDeps));
   program.addCommand(rosterCommand());
