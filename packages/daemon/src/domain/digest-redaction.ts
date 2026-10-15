@@ -16,11 +16,12 @@ const KEY_VALUE_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   // --token X, --password=X, --api-key X, --client-secret X
   [new RegExp(`(--(?:[a-z]+-)*(?:token|password|passwd|api-?key|secret)(?:=|\\s+))(?:${VALUE})`, "gi"), `$1${REDACTED}`],
   // Authorization: Bearer X / Basic X / raw value (to end of line or quote)
-  [/(\bAuthorization:\s*)[^\r\n"']+/gi, `$1${REDACTED}`],
+  // Also handles a quoted value and the JSON key form "Authorization":"Basic X".
+  [/(\bAuthorization"?\s*:\s*)(?:(["'])[^"']*\2|[^\r\n"']+)/gi, `$1${REDACTED}`],
   // export FOO_KEY=..., FOO_TOKEN=..., FOO_SECRET=..., PASSWORD=...
   [new RegExp(`(\\b[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD)\\s*=\\s*)(?:${VALUE})`, "g"), `$1${REDACTED}`],
   // scheme://user:pass@host
-  [/(\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)[^\s@/]+(@)/gi, `$1${REDACTED}$2`],
+  [/(\b[a-z][a-z0-9+.-]*:\/\/[^\s/:@]*:)[^\s@/]+(@)/gi, `$1${REDACTED}$2`],
 ];
 
 export function redactDigestString(text: string): string {

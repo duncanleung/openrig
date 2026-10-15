@@ -1097,6 +1097,14 @@ describe("redactDigestValue", () => {
     expect(redactDigestValue("PASSWORD=hunter2 run")).toBe("PASSWORD=[REDACTED] run");
     expect(redactDigestValue("postgres://user:pw@db:5432/x")).toBe("postgres://user:[REDACTED]@db:5432/x");
     expect(redactDigestValue("Authorization: Basic dXNlcjpwdw==")).toBe("Authorization: [REDACTED]");
+    expect(redactDigestValue("redis://:secret@h:6379")).toBe("redis://:[REDACTED]@h:6379");
+    expect(redactDigestValue("amqp://guest:pw@mq:5672/v")).toBe("amqp://guest:[REDACTED]@mq:5672/v");
+    expect(redactDigestValue("http://host:8080/path")).toBe("http://host:8080/path");
+    expect(redactDigestValue("redis://h:6379")).toBe("redis://h:6379");
+    expect(redactDigestValue('Authorization: "s3cret"')).toBe("Authorization: [REDACTED]");
+    expect(redactDigestValue("Authorization: 's3cret' next")).toBe("Authorization: [REDACTED] next");
+    expect(redactDigestValue('{"Authorization":"Basic dXNlcjpwdw=="}')).toBe('{"Authorization":[REDACTED]}');
+    expect(redactDigestValue("curl -H 'Authorization: Bearer abc' x")).toBe("curl -H 'Authorization: [REDACTED]' x");
     expect(redactDigestValue({ skill: "code-review-dual", to: "orch-lead@openrig", turn: 3, n: null, ok: true })).toEqual({
       skill: "code-review-dual", to: "orch-lead@openrig", turn: 3, n: null, ok: true,
     });
