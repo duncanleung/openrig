@@ -87,7 +87,7 @@ export interface FilePlan {
 
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const SKIP_DIRS = new Set([".worktrees", "node_modules", ".git", "dist", "build", ".turbo", ".next"]);
-const FILE_TAIL = /^(?:\.(?:json|jsonl|log|md|txt|yaml|yml|lock|pid|tmp|bak|\d+))*$/;
+const FILE_TAIL = /^(?:\.(?:json|jsonl|log|md|txt|yaml|yml|lock|pid|tmp|bak|gz|zst|old|\d+))*$/;
 
 /** `seat@old.json` -> `seat@new.json`. The rig must be followed by nothing or by a known file extension. */
 export function renamedFileName(name: string, from: string, to: string): string | null {
@@ -239,7 +239,7 @@ class Planner {
       if (this.protectedPath(file)) return;
       const text = this.readable(file);
       if (text === null) return;
-      const rigSpec = topLevelName(text) === this.from && /^pods:/m.test(text);
+      const rigSpec = topLevelName(text) === this.from && /^(pods|nodes):/m.test(text);
       const workflow = /^workflow:/m.test(text);
       const next = rewriteYamlText(text, this.from, this.to, { rigSpecName: rigSpec, workflowRigKeys: workflow });
       if (next.count > 0 && next.text !== text) this.addWrite(surface, file, next.text, next.count);
@@ -347,7 +347,7 @@ export function findNameArtifacts(fs: RenameFs, ctx: Omit<PlanContext, "from" | 
           if (!st || st.size > MAX_TEXT_BYTES) continue;
           try {
             const text = fs.readText(full);
-            if (topLevelName(text) === ctx.name && /^pods:/m.test(text)) hits.push(full);
+            if (topLevelName(text) === ctx.name && /^(pods|nodes):/m.test(text)) hits.push(full);
           } catch { /* unreadable: ignore */ }
         }
       }
