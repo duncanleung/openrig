@@ -109,6 +109,9 @@ export interface RigRenameDeps {
   newId?: () => string;
 }
 
+/** tmux answers that prove no server, so no session, exists. Anything else (permission denied, ...) proves nothing. */
+const TMUX_NO_SERVER = /no server running|error connecting to .*\((No such file or directory|Connection refused)\)/i;
+
 const LIST_LIMIT = 20;
 const brief = (items: string[]): string[] =>
   items.length > LIST_LIMIT ? [...items.slice(0, LIST_LIMIT), `... and ${items.length - LIST_LIMIT} more`] : items;
@@ -224,7 +227,7 @@ export class RigRenameService {
           const probe = await this.deps.probeSession(name);
           if (probe.state === "present") alive.push(name);
           // No tmux server proves no session exists; any other transport trouble proves nothing.
-          else if (probe.state === "transport_unavailable" && !/no server running/i.test(probe.cause)) unconfirmed.push(`${name}: ${probe.cause}`);
+          else if (probe.state === "transport_unavailable" && !TMUX_NO_SERVER.test(probe.cause)) unconfirmed.push(`${name}: ${probe.cause}`);
         } catch (err) {
           unconfirmed.push(`${name}: ${errMessage(err)}`);
         }

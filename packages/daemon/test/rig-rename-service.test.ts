@@ -699,6 +699,21 @@ describe("rig rename: review fixes (RIG-61)", () => {
     expect(ok.blockers).toEqual([]);
   });
 
+  it.each([
+    "error connecting to /private/tmp/tmux-501/default (No such file or directory)",
+    "error connecting to /private/tmp/tmux-501/default (Connection refused)",
+  ])("F10-v2: tmux cause %j proves absence", async (cause) => {
+    seedRig(OLD);
+    const report = await makeService({ probeSession: async () => ({ state: "transport_unavailable" as const, cause }) }).rename(OLD, NEW, { dryRun: true });
+    expect(report.blockers).toEqual([]);
+  });
+
+  it("F10-v2: a permission-denied connect error still blocks", async () => {
+    seedRig(OLD);
+    const report = await makeService({ probeSession: async () => ({ state: "transport_unavailable" as const, cause: "error connecting to /private/tmp/tmux-501/default (Permission denied)" }) }).rename(OLD, NEW, { dryRun: true });
+    expect(report.blockers.map((b) => b.code)).toEqual(["tmux_unconfirmed"]);
+  });
+
   it("F1: renaming rig v1 does not touch files of rig v1.2", async () => {
     seedRig("v1");
     seedRig("v1.2");
