@@ -110,6 +110,7 @@ import { digestSkillInvocationsSchema } from "./migrations/103_digest_skill_invo
 import { ticketAdmissionsSchema } from "./migrations/104_ticket_admissions.js";
 import { ticketFactoryControlSchema } from "./migrations/105_ticket_factory_control.js";
 import { ticketFactoryCutoverSchema } from "./migrations/106_ticket_factory_cutover.js";
+import { cronJobsSchema } from "./migrations/107_cron_jobs.js";
 import type { Migration } from "./migrate.js";
 
 import { rigInstallRootSchema } from "./migrations/096_rig_install_root.js";
@@ -232,4 +233,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   ticketAdmissionsSchema,
   ticketFactoryControlSchema,
   ticketFactoryCutoverSchema,
+  cronJobsSchema,
 ];

@@ -2538,6 +2538,20 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   deps.periodicSnapshotScheduler = periodicSnapshotScheduler;
 
+  // RIG-84: daemon cron for orchestration-layer shell jobs. Constructed here, started post-bind
+  // by index.ts (watchdog pattern), stopped in the "cron" shutdown phase. Seeding is opt-in.
+  {
+    const { CronJobScheduler } = await import("./domain/cron-job-scheduler.js");
+    const { seedDefaultCronJobs } = await import("./domain/cron-default-jobs.js");
+    const cronJobScheduler = new CronJobScheduler({
+      db,
+      openrigHome: OPENRIG_HOME,
+      extraAllowedDirs: (process.env["OPENRIG_CRON_ALLOWED_DIRS"] ?? "").split(nodePath.delimiter).filter((dir) => nodePath.isAbsolute(dir)),
+    });
+    seedDefaultCronJobs(cronJobScheduler, OPENRIG_HOME);
+    deps.cronJobScheduler = cronJobScheduler;
+  }
+
   // OPR.0.4.3.21 — daemon event-loop health instrumentation. Constructed once
   // per daemon and wired into deps so `/healthz` can surface wedge evidence
   // (loop lag / last-tick age) and the expensive topology routes are timed.
