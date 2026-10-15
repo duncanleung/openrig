@@ -25,13 +25,13 @@ by hand. Skip the first command if RIG-95 is already applied.
 
 | Skill section | Change |
 |---------------|--------|
-| Pre-flight 1 | `source: jira` needs the Atlassian MCP connected, `backlog.project` (validated against `^[A-Z][A-Z0-9_]*$`), and a cloud ID (config, or auto-detected when the account has exactly one site). |
-| Step 0 (R2, R3) | Reconcile with `getJiraIssue` (status, labels, resolution, assignee). Moved to a `done`-category status → `abandoned`. Back in a `new`-category status after a terminal state → re-enters the backlog. Reassignment is reported, not acted on. |
+| Pre-flight 1 | `source: jira` needs the Atlassian MCP connected, `backlog.project` (validated against `^[A-Z][A-Z0-9_]*$`), a cloud ID (config, or auto-detected when the account has exactly one site), and an input scope: `trusted_reporters` or `label_filter` (see Security). |
+| Step 0 (R2, R3) | Reconcile with `getJiraIssue` (status, labels, resolution, assignee). Moved to a `done`-category status → `abandoned`, with labels removed and no Jira transition attempted. A `getJiraIssue` failure stops the run. Back in a `new`-category status after a terminal state → re-enters the backlog. Reassignment is reported, not acted on. |
 | Step 1 | JQL search by project, extra filter in parentheses, excluding issues labelled `factory:*`. Jira priority maps to Urgent / High / Medium / Low / None. Sorted by priority then oldest. Ticket ID is the Jira key. |
-| Transitions | `claimed` moves to In Progress and adds `factory:in-progress`. `blocked` adds `factory:blocked`. `merged` moves to Done. `abandoned` moves to Won't Do, Cancelled or Closed. A comment is added at claim, PR open, block, merge and abandon. Both `factory:*` labels are removed on merge, abandon, stale claim, and external close or reopen. |
+| Transitions | `claimed` moves to In Progress and adds `factory:in-progress`. `blocked` adds `factory:blocked`. `merged` moves to Done. `abandoned` moves to Won't Do, Cancelled or Closed (skipped when the issue is already done). A comment is added at claim, PR open, block, merge and abandon. Both `factory:*` labels are removed on merge, abandon, stale claim, and external close or reopen. |
 | Advisor prompts (2e) | `TICKET_VIEW_CMD` gains a Jira form (`getJiraIssue`), output wrapped in `<untrusted_data>`. |
-| Config | `project` (required), `cloud_id`, `query_filter`, `trusted_reporters`. |
-| Failure handling | MCP failure on fetch stops the run. A missing transition, comment or label failure warns, retries once, and continues. |
+| Config | `project` (required), `cloud_id`, `query_filter` (must be valid JQL), `label_filter`, `trusted_reporters`. One of `label_filter` or `trusted_reporters` is required. |
+| Failure handling | MCP failure on the backlog fetch, or `getJiraIssue` failure during reconcile, stops the run. A missing transition, comment or label failure warns, retries once, and continues. A missing transition on an already-done issue is a no-op. |
 
 ## Config
 
@@ -40,9 +40,10 @@ backlog:
   source: jira
   project: PROJ
   cloud_id: example.atlassian.net      # optional if the account has one site
-  query_filter: 'status = "Backlog"'   # optional, trusted config
+  query_filter: 'status = "Backlog"'   # optional; must be valid JQL, not Linear syntax
   priority_floor: low
-  trusted_reporters: []                # optional account-ID allow-list
+  label_filter: "factory-ready"        # required unless trusted_reporters is set
+  trusted_reporters: ["<accountId>"]   # required unless label_filter is set
 ```
 
 ## Design notes
@@ -51,6 +52,7 @@ backlog:
   `getTransitionsForJiraIssue` each time and matches by target status name, then by status
   category. With no match it does not guess: it logs the options and continues without the status
   change. This is the same discover-never-hardcode rule as the `/ticket-loop` tracker adapter.
+- **External close is label cleanup only.** An issue already in a `done`-category status may have no outgoing transition, so reconcile removes both `factory:*` labels and closes the queue item without calling `transitionJiraIssue`.
 - **Labels are read-modify-write.** `editJiraIssue` replaces the `labels` field. The skill reads
   the current labels, then writes back the full list with one change.
 - **JQL scope.** The project key is validated, `query_filter` comes from the config file, and it
@@ -63,10 +65,12 @@ backlog:
 
 Jira summaries, descriptions and comments are written by anyone with access to the project. Text
 that reaches an advisor prompt goes inside `<untrusted_data>` tags with an instruction to treat it
-as a description of the work only. `backlog.trusted_reporters` limits the backlog to named
-reporters; it is optional here because Jira projects are normally access-controlled, unlike a
-public GitHub repo. Set it when the project accepts tickets from outside the team (for example a
-service desk or a form integration). The tags reduce the risk. They do not remove it.
+as a description of the work only. Pre-flight requires an input scope: a non-empty `backlog.trusted_reporters` allow-list, or a
+`backlog.label_filter`, or both. With neither, the run stops. There is no unscoped backlog.
+`query_filter` does not count, because its default is only a status filter. `trusted_reporters`
+also applies to `--ticket` issues. A label filter limits who can queue work only as far as label
+rights in the project are restricted, so prefer `trusted_reporters` when the project accepts tickets
+from outside the team. The tags reduce the risk. They do not remove it.
 
 ## RIG-82 overlap
 
