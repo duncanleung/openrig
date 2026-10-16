@@ -1,0 +1,603 @@
+--- a/code-review-validate-findings/SKILL.md	2026-10-16 11:19:47
++++ b/code-review-validate-findings/SKILL.md	2026-10-16 11:21:30
+@@ -249,7 +249,34 @@
+    If this fails (no PR for the current branch), the launch summary's PR row says so explicitly and
+    Step 3.75 (reply and resolve threads) will be skipped — note that up front rather than discovering
+    it after the fixes are already pushed.
++
++## Step 1.5 — Deterministic pre-check (RIG-10)
++
++Run the deterministic checker BEFORE the Workflow. The Workflow script cannot start processes, so
++this step runs in your session. It tells the Workflow which findings a compiler, test runner, or
++linter can settle without LLM validators. Design: `docs/reference/deterministic-validators.md` in
++the openrig repo.
++
++1. Write the standard-track findings to a temp JSON file and the diff file list (Step 1, item 5) to another.
++   Do NOT put finding text on a command line.
++   ```bash
++   CK=$(mktemp -d "${TMPDIR:-/tmp}/cr-det-XXXX")
++   # write $CK/findings.json (array of finding objects) and $CK/diff-files.json (array of paths)
++   node ~/.claude/skills/code-review-validate-findings/deterministic-check.mjs \
++     --repo "$(git rev-parse --show-toplevel)" --head-sha "$(git rev-parse HEAD)" \
++     --findings "$CK/findings.json" --diff-files "$CK/diff-files.json" --out "$CK/results.json"
++   ```
++2. The checker only runs on a clean checkout whose HEAD equals the PR head SHA (Step 0). On any
++   other state it returns `inconclusive` for every finding.
++3. For each result, copy it onto the matching finding as `deterministic`:
++   `{ "verdict": "confirmed|refuted|inconclusive", "method": "tsc|vitest|eslint", "reason": "...", "evidence": "..." }`.
++   Findings with no result get no `deterministic` field. Pass the findings in Step 2 as usual.
++4. If the checker fails to start or exits non-zero, continue without it. Print one line saying so.
++   A missing pre-check never blocks validation.
+ 
++The Workflow skips the LLM validators for `confirmed` and `refuted` findings and records
++`validator_calls_saved` in `metrics.json`. `inconclusive` findings run the normal panel.
++
+ ## Step 2 — Launch the Workflow
+ 
+ Invoke the Workflow tool with the script at `<base-directory>/workflow.js` where `<base-directory>`
+@@ -377,6 +404,9 @@
+ |---|-------|------|-------|----------|---------------------|
+ | 1 | <description> | <file> | <lines> | <pairYes>/3 | <approach> |
+ 
++A finding with `mode: "deterministic"` has no Pair-YES count. Show `tsc`, `vitest`, or `eslint`
++(its `deterministic_method`) in that column and quote the `evidence`.
++
+ For each must-fix issue, show:
+ - Validator reasoning (the YES verdicts' key evidence)
+ - If adjudicated contradictions: note which perspectives were disputed and how resolved
+@@ -552,6 +582,8 @@
+ 
+ If `budgetSkips` is non-empty, say so in the report — that is work the agent cap dropped.
+ 
++Report `metrics.validator_calls_saved` and the `metrics.deterministic` counts when they are non-zero.
++
+ Then clean up the Codex context bundle:
+ ```bash
+ rm -rf "${TMPDIR:-/tmp}"/cr-validate-*
+--- a/code-review-validate-findings/workflow.js	2026-10-16 11:19:47
++++ b/code-review-validate-findings/workflow.js	2026-10-16 11:20:51
+@@ -101,6 +101,40 @@
+ // Per-finding worst case: standard = 10 (6 validators + 3 adj + 1 solution), DR = 4 (2+1+1).
+ const maxAgents = _args.maxAgents || 100
+ 
++// ── Deterministic pre-validation (RIG-10) ───────────────────────────────────
++// The invoking session runs deterministic-check.mjs before this Workflow starts (this script
++// cannot start processes) and passes each result on the finding as finding.deterministic =
++// { verdict, method, reason, evidence }. A conclusive verdict (confirmed or refuted) replaces
++// the LLM validators for that finding. Inconclusive, missing, or malformed input changes nothing.
++const DETERMINISTIC_VERDICTS = ['confirmed', 'refuted', 'inconclusive']
++const DETERMINISTIC_METHODS = ['tsc', 'vitest', 'eslint']
++
++function deterministicOf(finding) {
++  const d = finding && finding.deterministic
++  if (!d || !DETERMINISTIC_VERDICTS.includes(d.verdict) || !DETERMINISTIC_METHODS.includes(d.method)) return null
++  return d
++}
++
++function isConclusive(finding) {
++  const d = deterministicOf(finding)
++  return !!d && d.verdict !== 'inconclusive'
++}
++
++// Validator calls the skipped panel would have reserved up front: 6 in dual-stack, 3 in claude-only.
++// Mid-pipeline extras (adjudication, Opus fallback) are not counted because they are unknowable.
++let validatorCallsSaved = 0
++const deterministicSkipped = []
++
++// deterministic verdict wins; otherwise the LLM verdict; SUGGESTION and ESCALATED stay unlabeled.
++function outcomeFor(finding, llmVerdict) {
++  const d = deterministicOf(finding)
++  if (d && d.verdict === 'confirmed') return { outcome_label: 'true_positive', outcome_source: 'deterministic' }
++  if (d && d.verdict === 'refuted') return { outcome_label: 'false_positive', outcome_source: 'deterministic' }
++  if (llmVerdict === 'MUST_FIX') return { outcome_label: 'true_positive', outcome_source: 'llm_validator' }
++  if (llmVerdict === 'DISMISSED') return { outcome_label: 'false_positive', outcome_source: 'llm_validator' }
++  return { outcome_label: null, outcome_source: null }
++}
++
+ let agentsUsed = 0
+ let totalCodexFailures = 0
+ let totalOpusFallbacks = 0
+@@ -533,6 +567,14 @@
+   // Stage 1: Launch validators (3 Claude + 3 Codex, or 3 Claude-only)
+   // No admission gate — every finding must be validated.
+   (finding) => {
++    // Conclusive deterministic verdict: no validator is dispatched and no agent budget is spent.
++    if (isConclusive(finding)) {
++      const saved = dualStack ? 6 : 3
++      validatorCallsSaved += saved
++      deterministicSkipped.push(finding.id)
++      log(`F${finding.id}: deterministic ${finding.deterministic.method} verdict ${finding.deterministic.verdict} — skipped ${saved} validator call(s)`)
++      return { deterministicShortCircuit: true }
++    }
+     if (dualStack) {
+       if (!reserve(6, `validate F${finding.id} (${finding.file})`)) return null
+       return parallel([
+@@ -577,6 +619,24 @@
+   async (verdicts, finding) => {
+     if (!verdicts) return null
+ 
++    if (verdicts.deterministicShortCircuit) {
++      const d = finding.deterministic
++      const confirmed = d.verdict === 'confirmed'
++      const synthetic = {
++        needsFix: confirmed ? 'YES' : 'NO',
++        reasoning: `Deterministic ${d.method} check ${d.verdict}: ${d.reason || ''}${d.evidence ? ` — ${d.evidence}` : ''}`,
++        evidenceChain: confirmed ? `1. [VERIFIED] ${d.method} failed at the claimed location: ${d.evidence || d.reason || ''}` : '',
++        validatorStack: 'deterministic',
++      }
++      return {
++        classification: confirmed ? 'MUST_FIX' : 'DISMISSED',
++        pairYes: null,
++        pairNo: null,
++        allVerdicts: [synthetic],
++        mode: 'deterministic',
++      }
++    }
++
+     // Check for mid-pipeline reclassification: 2+ validators flag external knowledge
+     const allVerdicts = verdicts.filter(Boolean)
+     const extKnowledgeCount = allVerdicts.filter(v => v.needsExternalKnowledge).length
+@@ -954,11 +1014,47 @@
+   }
+ })
+ 
++// ── Outcome labels and deterministic counts (RIG-10) ────────────────────────
++// Every classified finding gets deterministic_verdict, deterministic_method, outcome_label and
++// outcome_source. A deterministic verdict takes precedence over the LLM verdict.
++const findingsOutcomes = []
++function stampOutcome(list, llmVerdict) {
++  for (const f of list) {
++    const d = deterministicOf(f)
++    Object.assign(f, {
++      deterministic_verdict: d ? d.verdict : null,
++      deterministic_method: d ? d.method : null,
++      ...outcomeFor(f, llmVerdict),
++    })
++    findingsOutcomes.push({
++      finding_id: f.id,
++      verdict: llmVerdict,
++      deterministic_verdict: f.deterministic_verdict,
++      deterministic_method: f.deterministic_method,
++      outcome_label: f.outcome_label,
++      outcome_source: f.outcome_source,
++    })
++  }
++}
++stampOutcome(mustFix, 'MUST_FIX')
++stampOutcome(suggestions, 'SUGGESTION')
++stampOutcome(dismissed, 'DISMISSED')
++stampOutcome(escalated, 'ESCALATED')
++
++const deterministicCounts = { confirmed: 0, refuted: 0, inconclusive: 0 }
++for (const f of findings) {
++  const d = deterministicOf(f)
++  if (d) deterministicCounts[d.verdict]++
++}
++
+ // ── Return ──────────────────────────────────────────────────────────────────
+ 
+ log(`Final: ${mustFix.length} must-fix, ${suggestions.length} suggestions, ${dismissed.length} dismissed, ${escalated.length} escalated, ${unreviewed.length} UNREVIEWED`)
+ if (unreviewed.length > 0) log(`WARNING: ${unreviewed.length} finding(s) were never judged — they are neither confirmed nor dismissed`)
+ log(`Agents used: ${agentsUsed}/${maxAgents} (${dualStack ? 'dual-stack' : 'claude-only'})`)
++if (validatorCallsSaved > 0) {
++  log(`Deterministic checks skipped ${deterministicSkipped.length} finding(s) and saved ${validatorCallsSaved} validator call(s)`)
++}
+ if (budgetSkips.length > 0) {
+   log(`AGENT CAP dropped ${budgetSkips.length} unit(s) of work: ${budgetSkips.join('; ')}`)
+ }
+@@ -1041,6 +1137,9 @@
+     codex_failures: { count: totalCodexFailures, possible: totalCodexPossible },
+     opus_fallback: { dispatched: totalOpusFallbacks, recovered: opusFallbackResults.length, must_fix: mustFix.filter(f => f.opusFallback).length },
+     agent_cap: { max: maxAgents, used: agentsUsed, skipped: budgetSkips },
++    validator_calls_saved: validatorCallsSaved,
++    deterministic: { ...deterministicCounts, skipped_finding_ids: deterministicSkipped },
++    findings_outcomes: findingsOutcomes,
+     user_feedback: null,
+   },
+   mode: dualStack ? (opusFallbackResults.length > 0 ? 'dual-model-fallback' : 'dual-stack') : 'claude-only',
+--- a/code-review-validate-findings/deterministic-check.mjs	2026-10-16 11:21:35
++++ b/code-review-validate-findings/deterministic-check.mjs	2026-10-16 11:20:26
+@@ -0,0 +1,403 @@
++#!/usr/bin/env node
++// Deterministic pre-validation checks for /code-review-validate-findings (RIG-10).
++//
++// The Workflow script cannot start processes (no Node API access), so the invoking session runs
++// this helper BEFORE it launches the Workflow and passes the verdicts in as args. Design doc:
++// docs/reference/deterministic-validators.md in the openrig repo.
++//
++// Usage:
++//   node deterministic-check.mjs --repo <root> --head-sha <sha> \
++//        --findings <findings.json> --diff-files <diff-files.json> [--out <results.json>]
++//
++// Finding text is untrusted. It is read from a JSON file, never from argv, and it never reaches a
++// process argument. Every command is an argv array run with shell:false from a fixed allowlist.
++
++import { execFile } from 'node:child_process'
++import { readFileSync, writeFileSync, realpathSync, statSync, existsSync } from 'node:fs'
++import { dirname, join, relative, resolve, sep, isAbsolute } from 'node:path'
++import { promisify } from 'node:util'
++
++const execFileP = promisify(execFile)
++
++export const TIMEOUT_MS = 180_000
++export const MAX_OUTPUT_BYTES = 8 * 1024 * 1024
++const EVIDENCE_CHARS = 600
++
++export const VERDICTS = ['confirmed', 'refuted', 'inconclusive']
++export const METHODS = ['tsc', 'vitest', 'eslint']
++
++const inconclusive = (method, reason) => ({ verdict: 'inconclusive', method, reason })
++
++// ── Classification ──────────────────────────────────────────────────────────
++
++const KIND_TO_METHOD = { 'type-error': 'tsc', 'test-failure': 'vitest', lint: 'eslint' }
++const TSC_RE = /\bTS\d{4}\b|\btype[- ]?errors?\b|\btypecheck(ing)?\b|\btype[- ]check(ing)?\b|\btsc\b|does not compile/i
++const VITEST_RE = /\bvitest\b|\b(failing|failed|broken)\s+tests?\b|\btests?\s+(is\s+|are\s+|will\s+)?(fail|failing|failure)/i
++const ESLINT_RE = /\beslint\b|\blint(er|ing)?\b/i
++
++// Structured field first (finding.deterministicKind). Keyword fallback only on category plus the
++// first 300 characters of the description. More than one match, or none, means no check.
++export function classifyFinding(finding) {
++  if (!finding || typeof finding !== 'object') return null
++  if (typeof finding.deterministicKind === 'string') {
++    return KIND_TO_METHOD[finding.deterministicKind] || null
++  }
++  const text = `${finding.category || ''} ${String(finding.description || '').slice(0, 300)}`
++  const hits = []
++  if (TSC_RE.test(text)) hits.push('tsc')
++  if (VITEST_RE.test(text)) hits.push('vitest')
++  if (ESLINT_RE.test(text)) hits.push('eslint')
++  return hits.length === 1 ? hits[0] : null
++}
++
++// "42", "42-50", "L42-L50", "42,50" -> {start, end}; anything else -> null (no line claimed).
++export function parseLines(lines) {
++  const m = String(lines == null ? '' : lines).match(/(\d+)\D+L?(\d+)|(\d+)/)
++  if (!m) return null
++  const a = Number(m[1] || m[3])
++  const b = Number(m[2] || m[3])
++  return { start: Math.min(a, b), end: Math.max(a, b) }
++}
++
++const inRange = (line, range) => !range || (line >= range.start && line <= range.end)
++
++// ── Path validation ─────────────────────────────────────────────────────────
++
++// Returns { ok: true, rel, real } or { ok: false, reason }. `rel` is repo-relative with forward
++// slashes and never starts with "-". `real` is the symlink-resolved absolute path.
++export function validateRepoPath(root, candidate) {
++  if (typeof candidate !== 'string' || candidate === '') return { ok: false, reason: 'empty-path' }
++  if (candidate.includes('\0')) return { ok: false, reason: 'nul-byte' }
++  if (candidate.startsWith('-')) return { ok: false, reason: 'leading-dash' }
++  if (candidate.split(/[\\/]/).includes('..')) return { ok: false, reason: 'parent-segment' }
++  let realRoot
++  try {
++    realRoot = realpathSync(root)
++  } catch {
++    return { ok: false, reason: 'root-missing' }
++  }
++  const abs = isAbsolute(candidate) ? candidate : resolve(realRoot, candidate)
++  let real
++  try {
++    real = realpathSync(abs)
++  } catch {
++    return { ok: false, reason: 'not-found' }
++  }
++  if (real !== realRoot && !real.startsWith(realRoot + sep)) return { ok: false, reason: 'outside-root' }
++  let st
++  try {
++    st = statSync(real)
++  } catch {
++    return { ok: false, reason: 'not-found' }
++  }
++  if (!st.isFile()) return { ok: false, reason: 'not-a-file' }
++  const rel = relative(realRoot, real).split(sep).join('/')
++  if (rel.startsWith('-') || rel.startsWith('..')) return { ok: false, reason: 'unsafe-relative-path' }
++  return { ok: true, rel, real }
++}
++
++// A path from the finding must be a file the PR changes. Test files are the one exception: the
++// finding may name a test file the PR does not touch, if it exists at the PR head.
++export function resolveClaimedPath(root, candidate, diffFiles, { allowNonDiff = false } = {}) {
++  const v = validateRepoPath(root, candidate)
++  if (!v.ok) return v
++  if (!allowNonDiff && !(diffFiles || []).includes(v.rel)) return { ok: false, reason: 'not-in-pr-diff' }
++  return v
++}
++
++const TEST_FILE_RE = /\.(test|spec)\.[cm]?[jt]sx?$/
++
++// Test file for a vitest check: the finding's own file if it is a test file, else the first
++// test-file path the description names that passes path validation.
++export function findTestFile(root, finding) {
++  const direct = String(finding.file || '')
++  if (TEST_FILE_RE.test(direct)) {
++    const v = validateRepoPath(root, direct)
++    if (v.ok) return v
++  }
++  const named = String(finding.description || '').match(/[\w@./-]+\.(?:test|spec)\.[cm]?[jt]sx?/g) || []
++  for (const n of named) {
++    const v = validateRepoPath(root, n)
++    if (v.ok) return v
++  }
++  return null
++}
++
++// Nearest tsconfig.json at or above the claimed file, never above the repo root.
++export function findTsconfig(root, fileReal) {
++  const realRoot = realpathSync(root)
++  let dir = dirname(fileReal)
++  while (dir === realRoot || dir.startsWith(realRoot + sep)) {
++    const candidate = join(dir, 'tsconfig.json')
++    if (existsSync(candidate)) return validateRepoPath(realRoot, candidate)
++    if (dir === realRoot) break
++    dir = dirname(dir)
++  }
++  return { ok: false, reason: 'no-tsconfig' }
++}
++
++// Local binary only. Never PATH, never npx.
++export function findLocalBin(root, name, fileReal) {
++  const realRoot = realpathSync(root)
++  let dir = dirname(fileReal)
++  while (dir === realRoot || dir.startsWith(realRoot + sep)) {
++    const candidate = join(dir, 'node_modules', '.bin', name)
++    if (existsSync(candidate)) {
++      const v = validateRepoPath(realRoot, candidate)
++      return v.ok ? v : { ok: false, reason: 'bin-outside-root' }
++    }
++    if (dir === realRoot) break
++    dir = dirname(dir)
++  }
++  return { ok: false, reason: 'tool-missing' }
++}
++
++// ── Runner ──────────────────────────────────────────────────────────────────
++
++// No secrets: PATH and a few inert variables only.
++export function scrubbedEnv() {
++  return { PATH: `${dirname(process.execPath)}:/usr/bin:/bin`, HOME: process.env.TMPDIR || '/tmp', CI: '1', NO_COLOR: '1' }
++}
++
++// Default runner. Resolves { code, stdout, stderr } or { error: 'timeout'|'output-cap'|'spawn-failed' }.
++export async function defaultRunner(bin, args, { cwd }) {
++  try {
++    const { stdout, stderr } = await execFileP(bin, args, {
++      cwd,
++      shell: false,
++      timeout: TIMEOUT_MS,
++      killSignal: 'SIGKILL',
++      maxBuffer: MAX_OUTPUT_BYTES,
++      env: scrubbedEnv(),
++      windowsHide: true,
++    })
++    return { code: 0, stdout, stderr }
++  } catch (e) {
++    if (e && e.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return { error: 'output-cap' }
++    if (e && e.killed) return { error: 'timeout' }
++    if (e && typeof e.code === 'number') return { code: e.code, stdout: e.stdout || '', stderr: e.stderr || '' }
++    return { error: 'spawn-failed' }
++  }
++}
++
++const clip = s => String(s || '').slice(0, EVIDENCE_CHARS)
++
++// ── Per-tool checks ─────────────────────────────────────────────────────────
++// Each returns { verdict, method, reason, evidence?, argv? }. `run` is injectable for tests.
++
++export async function checkTsc({ root, finding, diffFiles, run }) {
++  const file = resolveClaimedPath(root, finding.file, diffFiles)
++  if (!file.ok) return inconclusive('tsc', file.reason)
++  const cfg = findTsconfig(root, file.real)
++  if (!cfg.ok) return inconclusive('tsc', cfg.reason)
++  const bin = findLocalBin(root, 'tsc', file.real)
++  if (!bin.ok) return inconclusive('tsc', bin.reason)
++  const argv = ['--noEmit', '-p', cfg.rel, '--listFiles', '--pretty', 'false']
++  const r = await run(bin.real, argv, { cwd: realpathSync(root) })
++  if (r.error) return inconclusive('tsc', r.error)
++  const realRoot = realpathSync(root)
++  const range = parseLines(finding.lines)
++  const lines = String(r.stdout).split('\n')
++  if (r.code === 0) {
++    const listed = lines.some(l => {
++      const t = l.trim()
++      if (!t || t.includes('(') || !isAbsolute(t)) return false
++      try {
++        return realpathSync(t) === file.real
++      } catch {
++        return false
++      }
++    })
++    return listed
++      ? { verdict: 'refuted', method: 'tsc', reason: 'clean-run-file-covered', argv }
++      : inconclusive('tsc', 'file-not-in-program')
++  }
++  // Error lines: path(line,col): error TSnnnn: message
++  const hits = []
++  for (const l of lines) {
++    const m = l.match(/^(.+?)\((\d+),\d+\): error (TS\d+):/)
++    if (!m) continue
++    const p = isAbsolute(m[1]) ? m[1] : resolve(realRoot, m[1])
++    let real
++    try {
++      real = realpathSync(p)
++    } catch {
++      continue
++    }
++    if (real === file.real && inRange(Number(m[2]), range)) hits.push(l.trim())
++  }
++  return hits.length > 0
++    ? { verdict: 'confirmed', method: 'tsc', reason: 'tool-failed-at-claimed-location', evidence: clip(hits.join('\n')), argv }
++    : inconclusive('tsc', 'failure-not-at-claimed-location')
++}
++
++export async function checkVitest({ root, finding, run }) {
++  const test = findTestFile(root, finding)
++  if (!test) return inconclusive('vitest', 'no-test-file')
++  const bin = findLocalBin(root, 'vitest', test.real)
++  if (!bin.ok) return inconclusive('vitest', bin.reason)
++  const argv = ['run', '--reporter=json', '--coverage.enabled=false', test.rel]
++  const r = await run(bin.real, argv, { cwd: realpathSync(root) })
++  if (r.error) return inconclusive('vitest', r.error)
++  let report
++  try {
++    const out = String(r.stdout)
++    report = JSON.parse(out.slice(out.indexOf('{')))
++  } catch {
++    return inconclusive('vitest', 'unparseable-output')
++  }
++  let entry
++  for (const t of report.testResults || []) {
++    try {
++      if (realpathSync(t.name) === test.real) entry = t
++    } catch {
++      /* skip unresolvable names */
++    }
++  }
++  if (!entry) return inconclusive('vitest', 'file-did-not-run')
++  const results = entry.assertionResults || []
++  const failed = results.filter(a => a.status === 'failed')
++  const passed = results.filter(a => a.status === 'passed')
++  if (failed.length > 0) {
++    const evidence = clip(failed.map(a => `${a.fullName || a.title}: ${(a.failureMessages || [])[0] || ''}`).join('\n'))
++    return { verdict: 'confirmed', method: 'vitest', reason: 'test-failed-in-claimed-file', evidence, argv }
++  }
++  if (passed.length > 0 && r.code === 0) return { verdict: 'refuted', method: 'vitest', reason: 'tests-executed-and-passed', argv }
++  return inconclusive('vitest', 'no-tests-executed')
++}
++
++// Backticked tokens in the description that look like rule ids.
++export function namedRules(finding) {
++  const out = []
++  for (const m of String(finding.description || '').matchAll(/`((?:@[\w-]+\/)?[\w-]+(?:\/[\w-]+)?)`/g)) out.push(m[1])
++  return [...new Set(out)]
++}
++
++export async function checkEslint({ root, finding, diffFiles, run }) {
++  const file = resolveClaimedPath(root, finding.file, diffFiles)
++  if (!file.ok) return inconclusive('eslint', file.reason)
++  const bin = findLocalBin(root, 'eslint', file.real)
++  if (!bin.ok) return inconclusive('eslint', bin.reason)
++  const cwd = realpathSync(root)
++  const argv = ['--format', 'json', file.rel]
++  const r = await run(bin.real, argv, { cwd })
++  if (r.error) return inconclusive('eslint', r.error)
++  if (r.code !== 0 && r.code !== 1) return inconclusive('eslint', 'tool-crashed')
++  let results
++  try {
++    results = JSON.parse(r.stdout)
++  } catch {
++    return inconclusive('eslint', 'unparseable-output')
++  }
++  const entry = (results || []).find(x => {
++    try {
++      return realpathSync(x.filePath) === file.real
++    } catch {
++      return false
++    }
++  })
++  if (!entry) return inconclusive('eslint', 'file-not-linted')
++  const messages = entry.messages || []
++  if (messages.some(m => /ignored because of a matching ignore pattern/i.test(m.message || ''))) {
++    return inconclusive('eslint', 'file-ignored')
++  }
++  const range = parseLines(finding.lines)
++  const rules = namedRules(finding)
++  const errors = messages.filter(
++    m => m.severity === 2 && inRange(m.line, range) && (rules.length === 0 || rules.includes(m.ruleId)),
++  )
++  if (errors.length > 0) {
++    const evidence = clip(errors.map(m => `${entry.filePath}:${m.line}:${m.column} ${m.ruleId || ''} ${m.message}`).join('\n'))
++    return { verdict: 'confirmed', method: 'eslint', reason: 'tool-failed-at-claimed-location', evidence, argv }
++  }
++  if (r.code === 1) return inconclusive('eslint', 'failure-not-at-claimed-location')
++  // Clean file. That refutes only a NAMED rule that the config actually enables.
++  if (rules.length === 0) return inconclusive('eslint', 'clean-but-no-rule-named')
++  const cfgArgv = ['--print-config', file.rel]
++  const c = await run(bin.real, cfgArgv, { cwd })
++  if (c.error || c.code !== 0) return inconclusive('eslint', 'config-unreadable')
++  let cfg
++  try {
++    cfg = JSON.parse(c.stdout)
++  } catch {
++    return inconclusive('eslint', 'config-unreadable')
++  }
++  const on = v => {
++    const sev = Array.isArray(v) ? v[0] : v
++    return sev === 1 || sev === 2 || sev === 'warn' || sev === 'error'
++  }
++  const enabled = rules.filter(id => cfg.rules && on(cfg.rules[id]))
++  return enabled.length > 0
++    ? { verdict: 'refuted', method: 'eslint', reason: 'clean-run-rule-enabled', argv }
++    : inconclusive('eslint', 'named-rule-not-enabled')
++}
++
++// ── Orchestration ───────────────────────────────────────────────────────────
++
++async function gitOut(root, args, run) {
++  const r = await run('git', args, { cwd: root })
++  return r.error || r.code !== 0 ? null : String(r.stdout).trim()
++}
++
++// Verifies the checkout is the PR head and clean, runs each classifiable finding, and re-checks
++// the tree after every run. Returns one result per finding that has a deterministic check.
++export async function runChecks({ root, headSha, findings, diffFiles, run = defaultRunner }) {
++  const out = []
++  const head = await gitOut(root, ['rev-parse', 'HEAD'], run)
++  const dirty = await gitOut(root, ['status', '--porcelain'], run)
++  const blocked = head !== headSha ? 'head-mismatch' : dirty !== '' ? 'dirty-tree' : null
++  let mutated = false
++  for (const finding of findings) {
++    const method = classifyFinding(finding)
++    if (!method) continue
++    let res
++    if (blocked) res = inconclusive(method, blocked)
++    else if (mutated) res = inconclusive(method, 'tree-mutated')
++    else {
++      const ctx = { root, finding, diffFiles, run }
++      try {
++        res = method === 'tsc' ? await checkTsc(ctx) : method === 'vitest' ? await checkVitest(ctx) : await checkEslint(ctx)
++      } catch (e) {
++        res = inconclusive(method, 'check-threw')
++      }
++      const after = await gitOut(root, ['status', '--porcelain'], run)
++      if (after !== '') {
++        mutated = true
++        res = inconclusive(method, 'tree-mutated')
++      }
++    }
++    const { argv, ...rest } = res
++    out.push({ id: finding.id, ...rest, command: argv ? argv.join(' ') : undefined })
++  }
++  return out
++}
++
++function arg(name) {
++  const i = process.argv.indexOf(name)
++  return i >= 0 ? process.argv[i + 1] : undefined
++}
++
++async function main() {
++  const root = arg('--repo')
++  const headSha = arg('--head-sha')
++  const findingsPath = arg('--findings')
++  const diffPath = arg('--diff-files')
++  if (!root || !headSha || !findingsPath || !diffPath) {
++    console.error('usage: deterministic-check.mjs --repo <root> --head-sha <sha> --findings <file> --diff-files <file> [--out <file>]')
++    process.exit(2)
++  }
++  const findings = JSON.parse(readFileSync(findingsPath, 'utf8'))
++  const diffFiles = JSON.parse(readFileSync(diffPath, 'utf8'))
++  const results = await runChecks({ root, headSha, findings, diffFiles })
++  const json = JSON.stringify(results, null, 2)
++  const outPath = arg('--out')
++  if (outPath) writeFileSync(outPath, json)
++  else console.log(json)
++}
++
++if (import.meta.url === `file://${process.argv[1]}`) {
++  main().catch(e => {
++    console.error(String(e && e.message))
++    process.exit(1)
++  })
++}
