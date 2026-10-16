@@ -8,6 +8,7 @@ import { digestTokenUsageSchema } from "../src/db/migrations/100_digest_token_us
 import { digestEscalationCountSchema } from "../src/db/migrations/101_digest_escalation_count.js";
 import { digestSessionTimestampsSchema } from "../src/db/migrations/102_digest_session_timestamps.js";
 import { digestSkillInvocationsSchema } from "../src/db/migrations/103_digest_skill_invocations.js";
+import { digestStallPatternsSchema } from "../src/db/migrations/108_session_digest_stall_patterns.js";
 import { FleetStore } from "../src/domain/fleet-store.js";
 import { FleetIngestionService, resolveFleetReconcileIntervalMs } from "../src/domain/fleet-ingestion-service.js";
 import { mkdtempSync, writeFileSync, mkdirSync } from "node:fs";
@@ -65,6 +66,7 @@ function freshDb(): Database {
   db.exec(digestEscalationCountSchema.sql);
   db.exec(digestSessionTimestampsSchema.sql);
   db.exec(digestSkillInvocationsSchema.sql);
+  db.exec(digestStallPatternsSchema.sql);
   return db;
 }
 

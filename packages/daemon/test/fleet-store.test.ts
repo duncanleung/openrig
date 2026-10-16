@@ -8,6 +8,7 @@ import { digestTokenUsageSchema } from "../src/db/migrations/100_digest_token_us
 import { digestEscalationCountSchema } from "../src/db/migrations/101_digest_escalation_count.js";
 import { digestSessionTimestampsSchema } from "../src/db/migrations/102_digest_session_timestamps.js";
 import { digestSkillInvocationsSchema } from "../src/db/migrations/103_digest_skill_invocations.js";
+import { digestStallPatternsSchema } from "../src/db/migrations/108_session_digest_stall_patterns.js";
 import {
   FleetStore,
   type SessionDigestInput,
@@ -29,6 +30,7 @@ function freshDb(): Database {
   db.exec(digestEscalationCountSchema.sql);
   db.exec(digestSessionTimestampsSchema.sql);
   db.exec(digestSkillInvocationsSchema.sql);
+  db.exec(digestStallPatternsSchema.sql);
   return db;
 }
 
@@ -55,6 +57,7 @@ const digest = (over: Partial<SessionDigestInput> = {}): SessionDigestInput => (
   claudeMdLoaded: "[]",
   errors: "[]",
   irreversibleActions: "[]",
+  stallPatterns: "[]",
   compactionBoundaries: "[]",
   compactionLosses: "[]",
   tokenUsage: "[]",
@@ -174,6 +177,32 @@ describe("096 session_digests — upsert idempotence", () => {
     expect(JSON.parse(get())).toEqual([{ skill: "recap", args: null, turn: 1 }]);
     store.upsertDigest(digest());
     expect(get()).toBe("[]");
+  });
+
+  it("108: stall_patterns column exists with default '[]' for rows inserted without it", () => {
+    const cols = db.prepare("PRAGMA table_info(session_digests)").all() as Array<{ name: string; notnull: number; dflt_value: string | null }>;
+    const col = cols.find((c) => c.name === "stall_patterns");
+    expect(col).toBeDefined();
+    expect(col!.notnull).toBe(1);
+    expect(col!.dflt_value).toBe("'[]'");
+    db.prepare(
+      `INSERT INTO session_digests (seat_session, native_session_id, transcript_path, total_turns, conversation_turns,
+         tool_calls, repeated_reads, review_findings, handoff_events, claude_md_loaded, errors, irreversible_actions,
+         compaction_boundaries, compaction_losses)
+       VALUES ('s@r', 'legacy', '/t', 1, 1, '{}', '[]', '[]', '[]', '[]', '[]', '[]', '[]', '[]')`,
+    ).run();
+    const row = db.prepare("SELECT stall_patterns FROM session_digests WHERE native_session_id = 'legacy'").get() as { stall_patterns: string };
+    expect(row.stall_patterns).toBe("[]");
+  });
+
+  it("persists stall_patterns and updates it on re-upsert", () => {
+    const first = [{ type: "read-storm", turnRange: [1, 9], details: { path: "/a", count: 5, severity: "warn" } }];
+    store.upsertDigest(digest({ stallPatterns: JSON.stringify(first) }));
+    const get = () => (db.prepare("SELECT stall_patterns FROM session_digests WHERE native_session_id = 'sess-001'").get() as { stall_patterns: string }).stall_patterns;
+    expect(JSON.parse(get())).toEqual(first);
+    store.upsertDigest(digest({ stallPatterns: "[]" }));
+    expect(get()).toBe("[]");
+    expect(count()).toBe(1);
   });
 
   it("different native_session_ids create separate rows", () => {

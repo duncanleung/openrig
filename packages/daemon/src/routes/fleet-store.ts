@@ -84,6 +84,7 @@ function normalizeDigest(body: Record<string, unknown>): SessionDigestInput | st
     claudeMdLoaded: strOrDefault(body.claudeMdLoaded, "[]"),
     errors: strOrDefault(body.errors, "[]"),
     irreversibleActions: strOrDefault(body.irreversibleActions, "[]"),
+    stallPatterns: strOrDefault(body.stallPatterns, "[]"),
     compactionBoundaries: strOrDefault(body.compactionBoundaries, "[]"),
     compactionLosses: strOrDefault(body.compactionLosses, "[]"),
     tokenUsage: strOrDefault(body.tokenUsage, "[]"),

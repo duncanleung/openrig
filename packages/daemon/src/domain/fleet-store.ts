@@ -25,6 +25,7 @@ export interface SessionDigestInput {
   claudeMdLoaded: string;
   errors: string;
   irreversibleActions: string;
+  stallPatterns: string;
   compactionBoundaries: string;
   compactionLosses: string;
   tokenUsage: string;
@@ -213,7 +214,7 @@ export class FleetStore {
         transcript_path, transcript_bytes, transcript_modified_at,
         total_turns, conversation_turns,
         tool_calls, repeated_reads, review_findings, handoff_events, skill_invocations,
-        claude_md_loaded, errors, irreversible_actions,
+        claude_md_loaded, errors, irreversible_actions, stall_patterns,
         compaction_boundaries, compaction_losses,
         token_usage, total_input_tokens, total_output_tokens,
         total_cache_creation_tokens, total_cache_read_tokens,
@@ -226,7 +227,7 @@ export class FleetStore {
         @transcriptPath, @transcriptBytes, @transcriptModifiedAt,
         @totalTurns, @conversationTurns,
         @toolCalls, @repeatedReads, @reviewFindings, @handoffEvents, @skillInvocations,
-        @claudeMdLoaded, @errors, @irreversibleActions,
+        @claudeMdLoaded, @errors, @irreversibleActions, @stallPatterns,
         @compactionBoundaries, @compactionLosses,
         @tokenUsage, @totalInputTokens, @totalOutputTokens,
         @totalCacheCreationTokens, @totalCacheReadTokens,
@@ -256,6 +257,7 @@ export class FleetStore {
         claude_md_loaded = excluded.claude_md_loaded,
         errors = excluded.errors,
         irreversible_actions = excluded.irreversible_actions,
+        stall_patterns = excluded.stall_patterns,
         compaction_boundaries = excluded.compaction_boundaries,
         compaction_losses = excluded.compaction_losses,
         token_usage = excluded.token_usage,
