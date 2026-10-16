@@ -1,0 +1,141 @@
+--- a/factory-loop/SKILL.md
++++ b/factory-loop/SKILL.md
+@@ -1,7 +1,7 @@
+ ---
+ name: factory-loop
+ description: "Thin backlog scheduler: fetches backlog tickets (Linear by default; GitHub Issues, Jira, or Obsidian ticket CLI via backlog.source), dispatches each through /ticket-loop, then delegates the resulting PRs to /pr-review-lifecycle for merge. State lives in OpenRig queue. Budget-bounded. Composes existing skills — does not rewrite them."
+-argument-hint: "--ticket ID... [--dry-run] [--config PATH] [--merge-policy human|auto-low-risk|auto-after-advisor]"
++argument-hint: "--ticket ID... [--dry-run] [--config PATH] [--merge-policy human|auto-low-risk|auto-after-advisor|auto-jev]"
+ ---
+ 
+ # Factory Loop — Backlog Scheduler
+@@ -75,6 +75,7 @@
+ - `/factory-loop --ticket RIG-42 --config .factory.yml` — use a rig-specific configuration file
+ - `/factory-loop --ticket RIG-42 --merge-policy auto-low-risk` — auto-merge AUTO-classified tickets
+ - `/factory-loop --ticket RIG-42 --merge-policy auto-after-advisor` — auto-merge any ticket that passed advisor validation
++- `/factory-loop --ticket RIG-42 --merge-policy auto-jev` — shadow mode (ADR-0008): log a Jev risk verdict next to the rule bucket; every PR still needs human approval
+ 
+ **`--ticket` is required.** The factory-loop does not auto-discover tickets from the backlog.
+ The orchestrator curates the batch: query the backlog, research each ticket against the codebase,
+@@ -263,6 +264,14 @@
+   validator: </codex-second-opinion | /symmetric-debate | null>
+   gate_qitem: <qitem_id or null>
+   validated_at: <ISO timestamp or null>
++jev:                                  # only when merge_policy is auto-jev; shadow data, never read by a merge decision
++  rule_bucket: <AUTO | ADJUDICATE_LIGHT | ADJUDICATE_HEAVY | ESCALATE | null>
++  verdict: <available | unavailable | null>
++  risk_class: <AUTO | ADJUDICATE_LIGHT | ADJUDICATE_HEAVY | ESCALATE | null>
++  auto_merge_safe: <0..1 or null>
++  would_auto_merge: <true | false | null>
++  model: <string or null>
++  recorded_at: <ISO timestamp or null>
+ ---
+ ```
+ 
+@@ -1057,6 +1066,55 @@
+ Update the status file with idempotency keys: `pr`, `branch`, `base_sha`. Do not write
+ `pr_head_sha` yet — the Phase 1 SHA may be stale.
+ Run a heartbeat (extend lease by 60 minutes).
++
++#### 2d-jev — Jev shadow verdict (only when `merge_policy: auto-jev`)
++
++Skip this block for every other policy. It reports a third-party second opinion next to the
++rule-based bucket. It never changes the state machine, a gate or a merge (ADR-0008, shadow mode).
++
++1. **Take the rule bucket** from the `classification` field of the `TICKET_LOOP_RESULT` line. If it
++   is not exactly `AUTO`, `ADJUDICATE_LIGHT`, `ADJUDICATE_HEAVY` or `ESCALATE`, skip the call and
++   record `verdict: unavailable`. Never put any other text on the command line.
++2. **Call the verb.** `${PR_NUMBER}` must be a positive integer from the result line. `${GH_REPO}`
++   is the repo this run already uses. Pass `--threshold` and `--model` only when `.factory.yml` sets
++   `jev.threshold` or `jev.model`:
++
++   ```bash
++   JEV_JSON=$(rig ticket-factory jev-classify --pr "${PR_NUMBER}" --bucket "${RULE_BUCKET}" \
++     --repo "${GH_REPO}" --json 2>/dev/null)
++   JEV_EXIT=$?
++   ```
++
++   The verb sends changed-file paths and line counts to api.typesafe.ai. It sends no source text.
++   The key comes from `TYPESAFE_API_KEY` in the environment. A human provisions the key. Never print
++   it, log it or write it to a file.
++3. **Treat any failure as "no Jev verdict" and keep going.** That covers a non-zero `JEV_EXIT`
++   (unknown command on an older `rig`, daemon `dist` not built, `gh` failure), empty output, output
++   that is not JSON, and a `jev` field of `null`. Do not retry. Do not block. Do not change any state.
++   Record `verdict: unavailable` and print one line: "Jev verdict unavailable; continuing."
++   Otherwise read the fields (all of them stay `null` when `jq` fails):
++
++   ```bash
++   if [ "${JEV_EXIT}" -eq 0 ] && echo "${JEV_JSON}" | jq -e '.shadow == true and .jev != null' >/dev/null 2>&1; then
++     JEV_RISK_CLASS=$(echo "${JEV_JSON}" | jq -r '.jev.riskClass.choice')
++     JEV_SCORE=$(echo "${JEV_JSON}" | jq -r '.jev.autoMergeSafe')
++     JEV_WOULD=$(echo "${JEV_JSON}" | jq -r '.decision.wouldAutoMerge')
++     JEV_MODEL=$(echo "${JEV_JSON}" | jq -r '.model')
++   fi
++   ```
++4. **Apply the ESCALATE floor first.** If `RULE_BUCKET` is `ESCALATE`, record
++   `would_auto_merge: false`, whatever the verb printed. A Jev score never lowers a rule bucket. For
++   other buckets, take `would_auto_merge` from the verb's `decision.wouldAutoMerge`.
++5. **Record the verdict next to the bucket** in the status file `jev:` block and in the queue note:
++
++   ```bash
++   rig queue update ${QITEM_ID} \
++     --note "JEV (shadow): rule_bucket=${RULE_BUCKET}, jev=${JEV_RISK_CLASS:-none}, auto_merge_safe=${JEV_SCORE:-none}, would_auto_merge=${JEV_WOULD:-false}, effective_policy=human-approval"
++   ```
++
++   When the verdict is unavailable, write `jev=none, auto_merge_safe=none`.
++6. **Never read these fields in a merge decision.** `auto-jev` behaves as `human` (see
++   [Merge policy](#merge-policy)). Rail 7 and Gate 3 are unchanged.
+ 
+ ### 2e — Phase gate: post-implement validation (state: `validating`)
+ 
+@@ -1496,6 +1554,7 @@
+ **Why:** ${TICKET_DESCRIPTION_FIRST_SENTENCE}
+ **Scope:** ${FILES_CHANGED} files, +${ADDITIONS}/-${DELETIONS} lines across ${MODULES_LIST}
+ **Classification:** ${CLASSIFICATION} | Advisor: ${ADVISOR_OUTCOME}
++**Jev (shadow, `auto-jev` only):** ${JEV_SUMMARY_OR_UNAVAILABLE} — informational; it does not replace your approval
+ 
+ | Check | Status |
+ |-------|--------|
+@@ -1731,7 +1790,8 @@
+ conditions pass (dual+val at HEAD, CI green, no conflicts); ADJUDICATE and ESCALATE tickets still
+ require human approval.
+ 
+-In all three policies, the factory loop (not the lifecycle) runs `gh pr merge`. The classifier
++In all policies, the factory loop (not the lifecycle) runs `gh pr merge`. Under `auto-jev` it runs
++only after recorded human approval, as under `human`. The classifier
+ determines validation intensity; the advisor gate (Gate 2) validates the approach; the merge
+ policy determines merge authority.
+ 
+@@ -1819,8 +1879,10 @@
+   context_ceiling: 140000
+   max_review_rounds: 3
+ 
+-merge_policy: human                 # human | auto-low-risk | auto-after-advisor
++merge_policy: human                 # human | auto-low-risk | auto-after-advisor | auto-jev
+   # human: every PR requires recorded human approval (default)
++  # auto-jev: shadow mode (ADR-0008). Behaves as human. Step 2d-jev logs a Jev verdict next to the
++  #   rule bucket. Optional jev: { threshold: 0.8, model: jev-latest } sets the verb's flags.
+   # auto-low-risk: AUTO-classified tickets auto-merge after review passes;
+   #   ADJUDICATE and ESCALATE still require human approval
+   # auto-after-advisor: AUTO auto-merges; ADJUDICATE and ESCALATE auto-merge
+@@ -1919,13 +1981,19 @@
+ 
+ ### Merge policy
+ 
+-Three policies are supported. The policy determines what happens at the merge gate (Rail 7).
++Four policies are supported. The policy determines what happens at the merge gate (Rail 7).
+ 
+ | Policy | AUTO tickets | ADJUDICATE tickets | ESCALATE tickets |
+ |--------|-------------|-------------------|-----------------|
+ | `human` (default) | Human approval required | Human approval required | Human approval required |
+ | `auto-low-risk` | Auto-merge after review passes | Human approval required | Human approval required |
+ | `auto-after-advisor` | Auto-merge after review passes | Auto-merge after advisor approved + review passes | Auto-merge after advisor approved + review passes |
++| `auto-jev` (shadow) | Human approval required | Human approval required | Human approval required |
++
++`auto-jev` is shadow mode (ADR-0008). Its effective policy is `human`, with the reason
++"auto-jev: shadow mode". Step 2d-jev records a Jev verdict next to the rule bucket. No code path
++reads that verdict to merge, and a rule-based ESCALATE bucket always wins. Gating on the score needs
++a new ADR that supersedes ADR-0008.
+ 
+ `auto-low-risk` enables auto-merge **only** for tickets that the two-pass classifier classified as
+ AUTO (all peripheral files, no semantic-risk flag, no RESEARCH_FLAG). The merge gate conditions
