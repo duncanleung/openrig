@@ -993,6 +993,26 @@ export interface BroadcastResult {
   results: SendResult[];
 }
 
+// RIG-98: after a successful Enter, hold the seat for this long when another send is queued
+// behind it, so the TUI finishes processing the submit before the next paste lands.
+const DEFAULT_DELIVERY_GAP_MS = 500;
+const MAX_DELIVERY_GAP_MS = 10_000;
+
+/** Parse OPENRIG_SEND_DELIVERY_GAP_MS. Invalid input falls back to the default; 0 disables the gap. */
+export function parseDeliveryGapMs(raw: string | number | undefined | null): number {
+  if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) return DEFAULT_DELIVERY_GAP_MS;
+  const value = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(value) || value < 0) return DEFAULT_DELIVERY_GAP_MS;
+  return Math.min(value, MAX_DELIVERY_GAP_MS);
+}
+
+/** True when the result shows Enter was actually pressed: text and Enter both succeeded.
+ * Excludes failures, refusals, retained (no-write) results and an unverified prompt
+ * answer (which sends no trailing Enter). */
+function enterWasPressed(result: SendResult): boolean {
+  return result.ok && result.outcome !== "retained" && result.promptInteraction !== "unverified";
+}
+
 interface SessionTransportDeps {
   db: Database.Database;
   rigRepo: RigRepository;
@@ -1012,6 +1032,9 @@ interface SessionTransportDeps {
   /** S01/S02 P2: optional read-only capture observer. Absent by default (no activation). */
   captureObserver?: CaptureObserverSink;
   listProcesses?: NativeProcessLister;
+  /** RIG-98: post-Enter gap (ms) held only while another send to the same target is queued.
+   * Default: OPENRIG_SEND_DELIVERY_GAP_MS, else 500. 0 disables. Invalid values use the default. */
+  deliveryGapMs?: number;
 }
 
 interface SessionRow { node_id: string; session_name: string; }
@@ -1036,6 +1059,10 @@ export class SessionTransport {
   private activityEndpointFile: () => { baseUrl: string; token: string } | null;
   private captureObserver?: CaptureObserverSink;
   private listProcesses?: NativeProcessLister;
+  private deliveryGapMs: number;
+  /** RIG-98: per-session-name FIFO for sends with no delivery guard. `pending` counts the
+   * holder plus everyone queued behind it. Entries are removed when pending reaches zero. */
+  private unguardedChains = new Map<string, { tail: Promise<void>; pending: number }>();
 
   constructor(deps: SessionTransportDeps) {
     this.db = deps.db;
@@ -1052,6 +1079,7 @@ export class SessionTransport {
     this.activityEndpointFile = deps.activityEndpointFile ?? (() => null);
     this.captureObserver = deps.captureObserver;
     this.listProcesses = deps.listProcesses;
+    this.deliveryGapMs = parseDeliveryGapMs(deps.deliveryGapMs ?? process.env.OPENRIG_SEND_DELIVERY_GAP_MS);
   }
 
   /** Freeze the registration and binding before asking tmux about this name. */
@@ -1358,7 +1386,7 @@ export class SessionTransport {
    * agent input; a confirmed render does not prove agent consumption. */
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     const guard = this.tmuxAdapter.deliveryGuard;
-    if (!guard) return this.sendUnguarded(sessionName, text, opts);
+    if (!guard) return this.sendSerializedByName(sessionName, () => this.sendUnguarded(sessionName, text, opts));
     const outbox = new OutboxHandler(this.db);
     const ids = opts?.committedOutboxIds ?? [opts?.deliveryId ?? `guard-send-${randomUUID()}`];
     const retainedResult = (): SendResult => ({ ok: true, sessionName, outcome: "retained", sent: false, verified: false,
@@ -1420,7 +1448,12 @@ export class SessionTransport {
           sendOpts = { ...opts, preWaitedIdle: pre.evidence, preWaitBound: pre.bound };
         }
       }
-      return await guard.operation(sessionName, () => this.sendUnguarded(sessionName, text, sendOpts), async target => {
+      return await guard.operation(sessionName, async () => {
+        const result = await this.sendUnguarded(sessionName, text, sendOpts);
+        // RIG-98: keep the lease through the TUI's submit processing when a send is queued behind.
+        if (this.deliveryGapMs > 0 && enterWasPressed(result) && guard.hasWaiters(sessionName)) await this.sleep(this.deliveryGapMs);
+        return result;
+      }, async target => {
         if (opts?.submitOnly) return { ok: false, sessionName, sent: false, reason: "typing_guard_enabled", error: "Typing guard prevents submit-only; no Enter was sent." };
         this.db.transaction(() => {
           for (const id of ids) {
@@ -1450,6 +1483,31 @@ export class SessionTransport {
       });
     } catch (error) {
       return { ok: false, sessionName, sent: false, reason: (error as { code?: string }).code ?? "guard_unavailable", error: (error as Error).message };
+    }
+  }
+
+  /** RIG-98: FIFO per session name for targets with no delivery guard. Releases in finally, so a
+   * thrown error or failed result never wedges later sends. No timeout: releasing while the holder
+   * may still be writing would re-create the interleave. A hung tmux call blocks only this name. */
+  private async sendSerializedByName(sessionName: string, run: () => Promise<SendResult>): Promise<SendResult> {
+    const chain = this.unguardedChains.get(sessionName) ?? { tail: Promise.resolve(), pending: 0 };
+    this.unguardedChains.set(sessionName, chain);
+    const queued = chain.pending > 0;
+    chain.pending++;
+    const before = chain.tail;
+    let release!: () => void;
+    const done = new Promise<void>((resolve) => { release = resolve; });
+    chain.tail = before.then(() => done);
+    try {
+      // A lone send starts synchronously, exactly as before; only a queued send waits its turn.
+      if (queued) await before;
+      const result = await run();
+      if (this.deliveryGapMs > 0 && enterWasPressed(result) && chain.pending > 1) await this.sleep(this.deliveryGapMs);
+      return result;
+    } finally {
+      chain.pending--;
+      if (chain.pending === 0 && this.unguardedChains.get(sessionName) === chain) this.unguardedChains.delete(sessionName);
+      release();
     }
   }
 

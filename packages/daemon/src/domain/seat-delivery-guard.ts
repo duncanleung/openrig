@@ -38,6 +38,8 @@ export interface GuardPreference {
  */
 export class SeatDeliveryGuard {
   private readonly tails = new Map<string, Promise<void>>();
+  /** Callers inside serial() per node: the holder plus everyone queued behind it. */
+  private readonly pending = new Map<string, number>();
   private readonly scope = new AsyncLocalStorage<Map<string, Lease>>();
   private readonly humanLeases = new Set<Lease>();
 
@@ -80,9 +82,24 @@ export class SeatDeliveryGuard {
     const done = new Promise<void>(resolve => { release = resolve; });
     const tail = before.then(() => done);
     this.tails.set(nodeId, tail);
-    await before;
-    try { return await fn(); }
-    finally { release(); if (this.tails.get(nodeId) === tail) this.tails.delete(nodeId); }
+    this.pending.set(nodeId, (this.pending.get(nodeId) ?? 0) + 1);
+    try {
+      await before;
+      return await fn();
+    } finally {
+      const left = (this.pending.get(nodeId) ?? 1) - 1;
+      if (left > 0) this.pending.set(nodeId, left); else this.pending.delete(nodeId);
+      release();
+      if (this.tails.get(nodeId) === tail) this.tails.delete(nodeId);
+    }
+  }
+
+  /** Read-only probe: true when another serialized caller is queued behind the one
+   * currently holding the seat's lease. Call it from inside the lease; outside, a
+   * holder-less queue also reads as waiting only when two or more callers are pending. */
+  hasWaiters(name: string): boolean {
+    const target = this.resolve(name);
+    return target !== null && (this.pending.get(target.nodeId) ?? 0) > 1;
   }
 
   async set(nodeId: string, enabled: boolean, actor: string, reason: string, timeoutMs = 2000): Promise<GuardPreference> {

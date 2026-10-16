@@ -117,7 +117,13 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
    never enters a shell argument. A `--dangerously-interact` answer is pasted
    without `-p` (`session-transport.ts:1541`) and Enter is pressed only if the
    whole answer is still staged (`:1562`–`1570`). A successful paste proves
-   transport execution, not runtime consumption.
+   transport execution, not runtime consumption. **Post-Enter gap (RIG-98):**
+   after a successful Enter, a send holds its seat (the delivery lease, or a
+   per-session-name FIFO when no delivery guard is installed) for
+   `OPENRIG_SEND_DELIVERY_GAP_MS` (default 500, cap 10000, `0` disables, invalid
+   values use the default) only when another send to the same target is queued
+   behind it, so the next paste cannot land while the TUI processes the submit.
+   A lone send adds no latency. Back-to-back sends to one seat each take the gap.
 5. Optional `--verify`: capture the last 30 pane lines before and after the
    send (after a 500 ms wait, `:1597`) and count the message's first 40
    characters in each. A higher count after the send reports

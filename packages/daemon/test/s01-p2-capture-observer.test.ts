@@ -197,9 +197,15 @@ describe("S01/S02 P2 capture observer", () => {
       } });
       const o = new CaptureObserver();
       const tr = transport(t.adapter, o);
+      // RIG-98: sends to one unguarded name now serialize, so the out-of-order completion
+      // this test pins needs two seats (the capture sequencing logic is unchanged).
+      const other = rigRepo.addNode((db.prepare("SELECT id FROM rigs WHERE name = 'obs-rig'").get() as { id: string }).id, "dev.other", { role: "worker", runtime: "codex" });
+      const otherSession = sessions.registerSession(other.id, "dev-other@obs-rig");
+      sessions.updateStatus(otherSession.id, "running");
+      sessions.updateBinding(other.id, { tmuxSession: "dev-other@obs-rig", tmuxPane: "%8" });
       const first = tr.send("dev-impl@obs-rig", "first", { verify: true });
       await postStarted;
-      await tr.send("dev-impl@obs-rig", "second", { verify: true });
+      await tr.send("dev-other@obs-rig", "second", { verify: true });
       release();
       await first;
       const [second, earlier] = await sendObs(o);
