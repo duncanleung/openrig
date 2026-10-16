@@ -1114,3 +1114,95 @@ describe("redactDigestValue", () => {
     expect(redactDigestValue("ls --token-count")).toBe("ls --token-count");
   });
 });
+
+// ── stall_patterns (RIG-59) ───────────────────────────────────────────────────
+
+describe("FleetIngestionService — stall_patterns", () => {
+  let db: Database;
+  let tmpDir: string;
+  let reducerPath: string;
+  const sessionId = "dddddddd-eeee-ffff-0000-111111111111";
+
+  function writeReducer(extra: Record<string, unknown>): void {
+    const base = {
+      seat: "stall-seat",
+      totalTurns: 3,
+      conversationTurns: 1,
+      toolCalls: {},
+      repeatedReads: [],
+      reviewFindings: [],
+      handoffEvents: [],
+      skillInvocations: [],
+      claudeMdLoaded: [],
+      errors: [],
+      irreversibleActions: [],
+      compactionBoundaries: [],
+      compactionLosses: [],
+      turnTokenUsage: [],
+      tokenTotals: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    };
+    writeFileSync(reducerPath, `process.stdout.write(${JSON.stringify(JSON.stringify({ ...base, ...extra }))});`);
+  }
+
+  beforeEach(() => {
+    db = freshDb();
+    tmpDir = mkdtempSync(join(tmpdir(), "fleet-stall-"));
+    reducerPath = join(tmpDir, "reducer.mjs");
+    const projectsDir = join(tmpDir, ".claude", "projects", "test-project");
+    mkdirSync(projectsDir, { recursive: true });
+    writeFileSync(join(projectsDir, `${sessionId}.jsonl`), '{"type":"test"}\n');
+  });
+
+  const readStall = () =>
+    (db.prepare("SELECT stall_patterns, parser_version FROM session_digests WHERE native_session_id = ?").get(sessionId) as { stall_patterns: string; parser_version: string });
+
+  it("passes stallPatterns through to the column", async () => {
+    const patterns = [
+      { type: "retry-loop", turnRange: [1, 4], details: { tool: "Bash", command: "npm test", count: 3 } },
+      { type: "read-storm", turnRange: [2, 30], details: { path: "/a.ts", count: 10, severity: "high" } },
+      { type: "stall", turnRange: [5, 60], details: { turns: 56, mutationCount: 0 } },
+    ];
+    writeReducer({ stallPatterns: patterns });
+    const result = await makeService(db, tmpDir, reducerPath).reconcileDigests();
+    expect(result.ingested).toBe(1);
+    expect(JSON.parse(readStall().stall_patterns)).toEqual(patterns);
+  });
+
+  it("redacts secrets in command text", async () => {
+    writeReducer({
+      stallPatterns: [
+        { type: "retry-loop", turnRange: [1, 3], details: { tool: "Bash", command: "curl -H 'Authorization: Bearer abc123' https://x", count: 3 } },
+        { type: "retry-loop", turnRange: [4, 6], details: { tool: "Bash", command: "deploy --token hunter2supersecret", count: 3 } },
+      ],
+    });
+    await makeService(db, tmpDir, reducerPath).reconcileDigests();
+    const text = readStall().stall_patterns;
+    expect(text).not.toContain("abc123");
+    expect(text).not.toContain("hunter2supersecret");
+    expect(text).toContain("[REDACTED]");
+    const parsed = JSON.parse(text);
+    expect(parsed[0]).toMatchObject({ type: "retry-loop", turnRange: [1, 3], details: { tool: "Bash", count: 3 } });
+    expect(parsed[0].details.command).toContain("Authorization: [REDACTED]");
+  });
+
+  it("defaults to '[]' when the reducer output has no stallPatterns", async () => {
+    writeReducer({});
+    await makeService(db, tmpDir, reducerPath).reconcileDigests();
+    expect(readStall().stall_patterns).toBe("[]");
+  });
+
+  it("re-parses a row stored under reduce-transcript.mjs@6 and fills stall_patterns", async () => {
+    writeReducer({ stallPatterns: [] });
+    const svc = makeService(db, tmpDir, reducerPath);
+    await svc.reconcileDigests();
+    db.prepare("UPDATE session_digests SET rig_name = 'r', parser_version = 'reduce-transcript.mjs@6', stall_patterns = '[]' WHERE native_session_id = ?").run(sessionId);
+
+    const patterns = [{ type: "stall", turnRange: [1, 50], details: { turns: 50, mutationCount: 0 } }];
+    writeReducer({ stallPatterns: patterns });
+    const result = await svc.reconcileDigests();
+    expect(result.ingested).toBe(1);
+    const row = readStall();
+    expect(row.parser_version).toBe("reduce-transcript.mjs@7");
+    expect(JSON.parse(row.stall_patterns)).toEqual(patterns);
+  });
+});

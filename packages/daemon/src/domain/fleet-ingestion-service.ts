@@ -47,7 +47,7 @@ export interface SnapshotRollupResult {
   snapshotsUpserted: number;
 }
 
-const PARSER_VERSION = "reduce-transcript.mjs@6";
+const PARSER_VERSION = "reduce-transcript.mjs@7";
 const MAX_CONCURRENT_REDUCERS = 3;
 
 function sha256Hex(data: Buffer | string): string {
