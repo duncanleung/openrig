@@ -61,6 +61,131 @@ try {
   process.exit(1);
 }
 
+// ── Stall-pattern detection (RIG-59) ──────────────────────────────────────────
+// Fixed thresholds (no config). Output is informational only.
+//
+// Known limitation (accepted for v1): a seat that waits a long time on a human
+// gate (approval prompt, operator decision) produces many turns with no file
+// mutation and reads as a "stall". These are not filtered out.
+
+const RETRY_MIN_REPEATS = 3;      // same tool + identical input, 3+ times ...
+const RETRY_WINDOW_TURNS = 10;    // ... within a 10-turn window (inclusive)
+const READ_STORM_MIN_READS = 5;   // same file read 5+ times in the session
+const READ_STORM_HIGH_READS = 10; // 10+ reads is severity "high"
+const STALL_MIN_TURNS = 50;       // 50+ consecutive turns with zero mutations
+const STALL_COMMAND_MAX_CHARS = 200;
+
+const MUTATING_TOOLS = new Set(["Edit", "Write", "NotebookEdit", "MultiEdit"]);
+
+// A Bash command segment is read-only only if it starts with one of these.
+// Anything else counts as a mutation (conservative).
+const READ_ONLY_FIRST_WORDS = new Set(["ls", "cat", "grep", "rg", "head", "tail", "wc", "pwd", "echo", "jq", "sleep", "true", "cd"]);
+const READ_ONLY_PREFIXES = [
+  /^git\s+(status|log|diff|show)\b/,
+  /^rig\s+queue\s+show\b/,
+  /^rig\s+whoami\b/,
+  /^rig\s+capture\b/,
+  /^gh\s+pr\s+(view|list|checks)\b/,
+];
+
+function normalizedToolInput(toolName, input) {
+  if (toolName === "Bash" && typeof input.command === "string") return input.command.trim();
+  return JSON.stringify(input);
+}
+
+function isReadOnlyBash(command) {
+  // Output redirection, command substitution and backticks can write; treat as mutation.
+  const stripped = command.replace(/\d*>&\d+/g, "").replace(/\d*>\s*\/dev\/null/g, "");
+  if (/>|`|\$\(/.test(stripped)) return false;
+  const segments = stripped.split(/&&|\|\||;|\||\n/).map(x => x.trim()).filter(Boolean);
+  if (segments.length === 0) return false;
+  return segments.every(seg => {
+    const first = seg.split(/\s+/)[0];
+    return READ_ONLY_FIRST_WORDS.has(first) || READ_ONLY_PREFIXES.some(re => re.test(seg));
+  });
+}
+
+function isMutatingToolCall(toolName, input) {
+  if (MUTATING_TOOLS.has(toolName)) return true;
+  if (toolName === "Bash") {
+    return typeof input.command !== "string" || !isReadOnlyBash(input.command);
+  }
+  return false;
+}
+
+function detectRetryLoops(events) {
+  const byKey = new Map();
+  for (const e of events) {
+    const k = e.tool + "\u0000" + e.key;
+    if (!byKey.has(k)) byKey.set(k, { tool: e.tool, key: e.key, turns: [] });
+    byKey.get(k).turns.push(e.turn);
+  }
+  const out = [];
+  for (const { tool, key, turns } of byKey.values()) {
+    // Union of index ranges [i, j] where the window starting at call i holds 3+ calls.
+    const clusters = [];
+    for (let i = 0; i + RETRY_MIN_REPEATS - 1 < turns.length; i++) {
+      let j = i;
+      while (j + 1 < turns.length && turns[j + 1] - turns[i] < RETRY_WINDOW_TURNS) j++;
+      if (j - i + 1 < RETRY_MIN_REPEATS) continue;
+      const last = clusters[clusters.length - 1];
+      if (last && i <= last.end) last.end = Math.max(last.end, j);
+      else clusters.push({ start: i, end: j });
+    }
+    for (const { start, end } of clusters) {
+      out.push({
+        type: "retry-loop",
+        turnRange: [turns[start], turns[end]],
+        details: { tool, command: key.slice(0, STALL_COMMAND_MAX_CHARS), count: end - start + 1 },
+      });
+    }
+  }
+  return out;
+}
+
+function detectReadStorms(turnsByPath) {
+  const out = [];
+  for (const [path, turns] of Object.entries(turnsByPath)) {
+    if (turns.length < READ_STORM_MIN_READS) continue;
+    out.push({
+      type: "read-storm",
+      turnRange: [turns[0], turns[turns.length - 1]],
+      details: { path, count: turns.length, severity: turns.length >= READ_STORM_HIGH_READS ? "high" : "warn" },
+    });
+  }
+  return out;
+}
+
+function detectStalls(turnCount, mutations) {
+  const out = [];
+  let start = null;
+  for (let t = 1; t <= turnCount + 1; t++) {
+    const idle = t <= turnCount && !mutations.has(t);
+    if (idle) {
+      if (start === null) start = t;
+    } else if (start !== null) {
+      const len = t - start;
+      if (len >= STALL_MIN_TURNS) {
+        out.push({ type: "stall", turnRange: [start, t - 1], details: { turns: len, mutationCount: 0 } });
+      }
+      start = null;
+    }
+  }
+  return out;
+}
+
+function detectStallPatterns() {
+  const typeOrder = { "retry-loop": 0, "read-storm": 1, "stall": 2 };
+  return [
+    ...detectRetryLoops(toolEvents),
+    ...detectReadStorms(readTurnsByPath),
+    ...detectStalls(totalTurns, mutationTurns),
+  ].sort((a, b) =>
+    a.turnRange[0] - b.turnRange[0]
+    || typeOrder[a.type] - typeOrder[b.type]
+    || JSON.stringify(a.details).localeCompare(JSON.stringify(b.details)));
+}
+
 // ── Extraction state ──────────────────────────────────────────────────────────
 
 let seat = basename(jsonlPath, ".jsonl"); // fallback: session ID
@@ -77,6 +202,11 @@ const handoffEvents = [];       // { type: 'send'|'queue', to, message, turn }
 const claudeMdLoaded = new Set();
 const errors = [];              // { tool, message, turn }
 const irreversibleActions = []; // { command (truncated), kind, turn }
+
+// Stall-pattern inputs (RIG-59)
+const toolEvents = [];          // { turn, tool, key, command } per tool_use, in transcript order
+const mutationTurns = new Set(); // turns containing at least one mutating tool call
+const readTurnsByPath = {};     // path → [turn, ...] for Read calls
 
 // Per-turn token usage
 const turnTokenUsage = [];      // { turn, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens }
@@ -141,10 +271,16 @@ for (const line of rawLines) {
       // Track for error correlation
       if (c.id) pendingToolUse.set(c.id, { name: toolName, turn: totalTurns });
 
+      // Stall-pattern tracking
+      const eventKey = normalizedToolInput(toolName, input);
+      toolEvents.push({ turn: totalTurns, tool: toolName, key: eventKey });
+      if (isMutatingToolCall(toolName, input)) mutationTurns.add(totalTurns);
+
       // Read path tracking
       if (toolName === "Read" && input.file_path) {
         const fp = input.file_path;
         readPaths[fp] = (readPaths[fp] || 0) + 1;
+        (readTurnsByPath[fp] ||= []).push(totalTurns);
         // Per-segment tracking for compaction loss detection
         const seg = readPathsBySegment[currentSegmentIdx];
         if (!seg[fp]) seg[fp] = { firstTurn: totalTurns, count: 0 };
@@ -273,6 +409,8 @@ const repeatedReads = Object.entries(readPaths)
   .sort((a, b) => b[1] - a[1])
   .map(([path, count]) => ({ path, count }));
 
+const stallPatterns = detectStallPatterns();
+
 // ── Derive compaction losses ─────────────────────────────────────────────────
 // A file read in segment N and re-read in segment N+1 is a potential compaction loss.
 // Exclude CLAUDE.md / AGENTS.md — those are always re-read after compaction by design.
@@ -311,6 +449,7 @@ const digest = {
   claudeMdLoaded: [...claudeMdLoaded],
   errors,
   irreversibleActions,
+  stallPatterns,
   compactionBoundaries,
   compactionLosses,
   turnTokenUsage,
