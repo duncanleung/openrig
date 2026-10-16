@@ -1,6 +1,6 @@
 --- a/code-review-validate-findings/SKILL.md	2026-10-16 11:19:47
-+++ b/code-review-validate-findings/SKILL.md	2026-10-16 11:21:30
-@@ -249,7 +249,34 @@
++++ b/code-review-validate-findings/SKILL.md	2026-10-16 11:48:13
+@@ -249,6 +249,35 @@
     If this fails (no PR for the current branch), the launch summary's PR row says so explicitly and
     Step 3.75 (reply and resolve threads) will be skipped — note that up front rather than discovering
     it after the fixes are already pushed.
@@ -26,16 +26,17 @@
 +3. For each result, copy it onto the matching finding as `deterministic`:
 +   `{ "verdict": "confirmed|refuted|inconclusive", "method": "tsc|vitest|eslint", "reason": "...", "evidence": "..." }`.
 +   Findings with no result get no `deterministic` field. Pass the findings in Step 2 as usual.
-+4. If the checker fails to start or exits non-zero, continue without it. Print one line saying so.
-+   A missing pre-check never blocks validation.
- 
++4. If the checker fails to start, exits non-zero, or leaves `$CK/results.json` missing or not
++   parseable as a JSON array, treat the pre-check as failed. Print one line saying so and continue
++   with no `deterministic` field on any finding. Never reuse a results file from an earlier run.
++   A failed pre-check never blocks validation.
++
 +The Workflow skips the LLM validators for `confirmed` and `refuted` findings and records
 +`validator_calls_saved` in `metrics.json`. `inconclusive` findings run the normal panel.
-+
+ 
  ## Step 2 — Launch the Workflow
  
- Invoke the Workflow tool with the script at `<base-directory>/workflow.js` where `<base-directory>`
-@@ -377,6 +404,9 @@
+@@ -377,6 +406,9 @@
  |---|-------|------|-------|----------|---------------------|
  | 1 | <description> | <file> | <lines> | <pairYes>/3 | <approach> |
  
@@ -45,7 +46,7 @@
  For each must-fix issue, show:
  - Validator reasoning (the YES verdicts' key evidence)
  - If adjudicated contradictions: note which perspectives were disputed and how resolved
-@@ -552,6 +582,8 @@
+@@ -552,6 +584,8 @@
  
  If `budgetSkips` is non-empty, say so in the report — that is work the agent cap dropped.
  
@@ -195,9 +196,9 @@
      user_feedback: null,
    },
    mode: dualStack ? (opusFallbackResults.length > 0 ? 'dual-model-fallback' : 'dual-stack') : 'claude-only',
---- a/code-review-validate-findings/deterministic-check.mjs	2026-10-16 11:29:42
-+++ b/code-review-validate-findings/deterministic-check.mjs	2026-10-16 11:29:26
-@@ -0,0 +1,443 @@
+--- a/code-review-validate-findings/deterministic-check.mjs	2026-10-16 11:48:33
++++ b/code-review-validate-findings/deterministic-check.mjs	2026-10-16 11:47:56
+@@ -0,0 +1,473 @@
 +#!/usr/bin/env node
 +// Deterministic pre-validation checks for /code-review-validate-findings (RIG-10).
 +//
@@ -215,6 +216,7 @@
 +import { execFile } from 'node:child_process'
 +import { readFileSync, writeFileSync, realpathSync, statSync, existsSync } from 'node:fs'
 +import { dirname, join, relative, resolve, sep, isAbsolute } from 'node:path'
++import { fileURLToPath } from 'node:url'
 +import { promisify } from 'node:util'
 +
 +const execFileP = promisify(execFile)
@@ -421,6 +423,18 @@
 +// ── Per-tool checks ─────────────────────────────────────────────────────────
 +// Each returns { verdict, method, reason, evidence?, argv? }. `run` is injectable for tests.
 +
++export function namedTsCodes(finding) {
++  return [...new Set(String(finding.description || '').match(/\bTS\d{4}\b/g) || [])]
++}
++
++// A test title the finding names: test "title", it 'title', spec `title`. An unquoted "test X" is
++// too ambiguous to match, so it is ignored and the check stays file-level.
++export function namedTestTitles(finding) {
++  const out = []
++  for (const m of String(finding.description || '').matchAll(/\b(?:tests?|it|spec)\s+(?:named\s+|called\s+)?(["'`])([^"'`]{3,120})\1/gi)) out.push(m[2])
++  return [...new Set(out)]
++}
++
 +export async function checkTsc({ root, finding, diffFiles, run }) {
 +  const file = resolveClaimedPath(root, finding.file, diffFiles)
 +  if (!file.ok) return inconclusive('tsc', file.reason)
@@ -433,6 +447,8 @@
 +  if (r.error) return inconclusive('tsc', r.error)
 +  const realRoot = realpathSync(root)
 +  const range = parseLines(finding.lines)
++  // A finding that names TSnnnn codes is confirmed only by an error with one of those codes.
++  const codes = namedTsCodes(finding)
 +  const lines = String(r.stdout).split('\n')
 +  if (r.code === 0) {
 +    const listed = lines.some(l => {
@@ -460,7 +476,7 @@
 +    } catch {
 +      continue
 +    }
-+    if (real === file.real && inRange(Number(m[2]), range)) hits.push(l.trim())
++    if (real === file.real && inRange(Number(m[2]), range) && (codes.length === 0 || codes.includes(m[3]))) hits.push(l.trim())
 +  }
 +  return hits.length > 0
 +    ? { verdict: 'confirmed', method: 'tsc', reason: 'tool-failed-at-claimed-location', evidence: clip(hits.join('\n')), argv }
@@ -494,8 +510,13 @@
 +  const results = entry.assertionResults || []
 +  const failed = results.filter(a => a.status === 'failed')
 +  const passed = results.filter(a => a.status === 'passed')
++  const titles = namedTestTitles(finding).map(x => x.toLowerCase())
++  const matching = titles.length === 0
++    ? failed
++    : failed.filter(a => titles.some(t => `${a.fullName || ''} ${a.title || ''}`.toLowerCase().includes(t)))
++  if (failed.length > 0 && matching.length === 0) return inconclusive('vitest', 'failure-not-in-named-test')
 +  if (failed.length > 0) {
-+    const evidence = clip(failed.map(a => `${a.fullName || a.title}: ${(a.failureMessages || [])[0] || ''}`).join('\n'))
++    const evidence = clip(matching.map(a => `${a.fullName || a.title}: ${(a.failureMessages || [])[0] || ''}`).join('\n'))
 +    return { verdict: 'confirmed', method: 'vitest', reason: 'test-failed-in-claimed-file', evidence, argv }
 +  }
 +  if (passed.length > 0 && r.code === 0) return { verdict: 'refuted', method: 'vitest', reason: 'tests-executed-and-passed', argv }
@@ -635,7 +656,17 @@
 +  else console.log(json)
 +}
 +
-+if (import.meta.url === `file://${process.argv[1]}`) {
++// True only when this file is the entry point. realpath on both sides handles symlinks, and
++// fileURLToPath handles URL-encoding (spaces). Any failure means "not main".
++export function isMain(metaUrl = import.meta.url, argv1 = process.argv[1]) {
++  try {
++    return realpathSync(fileURLToPath(metaUrl)) === realpathSync(argv1)
++  } catch {
++    return false
++  }
++}
++
++if (isMain()) {
 +  main().catch(e => {
 +    console.error(String(e && e.message))
 +    process.exit(1)

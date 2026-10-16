@@ -165,9 +165,9 @@ line, any failure in the claimed file matches.
 
 | Tool | confirmed | refuted | inconclusive |
 |------|-----------|---------|--------------|
-| tsc | Exit non-zero and an `error TSnnnn` line names the claimed file (and line) | Exit 0 and `--listFiles` lists the claimed file (it is in the tsconfig program) | Exit 0 but file not listed; failure only in other files or other lines; no tsconfig |
-| vitest | The named test file ran and has at least one failed test | The named test file ran, has at least one passed test, no failed test, and the exit code is 0 | File did not run; only skipped tests; JSON not parseable |
-| eslint | Exit 1 and an error-severity message in the claimed file (and line). If the finding names rules in backticks, the message `ruleId` must match one. | Exit 0, file linted and not ignored, the finding names a rule, and `--print-config` shows that rule enabled | File ignored; no rule named; named rule not enabled; errors only elsewhere |
+| tsc | Exit non-zero and an `error TSnnnn` line names the claimed file (and line). If the finding text names `TSnnnn` codes, the error code must be one of them. | Exit 0 and `--listFiles` lists the claimed file (it is in the tsconfig program) | Exit 0 but file not listed; failure only in other files or other lines; no tsconfig |
+| vitest | The named test file ran and has at least one failed test. If the finding names a test title in quotes after `test`, `it`, or `spec` (for example `test "handles empty input"`), a failed test whose title or full name contains it is required. | The named test file ran, has at least one passed test, no failed test, and the exit code is 0 | File did not run; only skipped tests; JSON not parseable |
+| eslint | Exit 1 and an error-severity message in the claimed file (and line). If the finding names rules in backticks, the message `ruleId` must match one. A message with a null `ruleId` never matches a named rule. | Exit 0, file linted and not ignored, the finding names a rule, and `--print-config` shows that rule enabled | File ignored; no rule named; named rule not enabled; errors only elsewhere |
 | any | | | Tool missing, no `node_modules`, timeout, output cap, crash (eslint exit above 1), spawn failure, unparseable output, head mismatch, dirty tree, tree mutated |
 
 Provenance rule: a `refuted` result also needs the "Who may refute" condition above. If it fails,
@@ -177,7 +177,9 @@ the result becomes `inconclusive` (`refute-needs-structured-claim`). Every resul
 Why eslint is strict: a clean lint run proves nothing about a rule that the config does not enable.
 A clean run only refutes a finding that names an enabled rule.
 
-Line numbers for vitest are not checked. A test failure is a file-level fact in this design.
+Line numbers for vitest are not checked. A test failure is file-level unless the finding names a quoted test title. An unquoted "test X" is too ambiguous to match, so it stays file-level.
+
+A failure elsewhere never confirms. A named `TSnnnn` code, named eslint rule, or named vitest title narrows `confirmed` to the identifier the finding names. A failure with another code, rule, or title gives `inconclusive` (`failure-not-at-claimed-location` or `failure-not-in-named-test`).
 
 ## Interaction with the LLM validators
 
@@ -362,3 +364,8 @@ rollback: with no `deterministic` field on any finding, the Workflow behaves as 
 - The qualifier detection for vitest (flaky, timezone, "on CI", and similar words) is a heuristic
   word list over the first 300 characters. A conditional claim phrased with other words can still
   be refuted by one clean run. Set `deterministicKind` only for claims one local run can settle.
+- The named-identifier match is textual. A backticked token that is not a rule id (for example a
+  variable name) makes eslint demand a matching `ruleId`, so the finding stays `inconclusive`. A
+  vitest title written without quotes is not matched, so the check stays file-level.
+- The helper's entry-point guard compares real paths, so symlinks and paths with spaces work. It was
+  tested with a spaced and a symlinked copy, not on every shell or OS.
