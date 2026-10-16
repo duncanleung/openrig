@@ -47,7 +47,7 @@ export interface SnapshotRollupResult {
   snapshotsUpserted: number;
 }
 
-const PARSER_VERSION = "reduce-transcript.mjs@6";
+const PARSER_VERSION = "reduce-transcript.mjs@7";
 const MAX_CONCURRENT_REDUCERS = 3;
 
 function sha256Hex(data: Buffer | string): string {
@@ -265,6 +265,8 @@ function adaptDigest(
     claudeMdLoaded: str(reducerOutput.claudeMdLoaded),
     errors: redactedStr(reducerOutput.errors),
     irreversibleActions: redactedStr(reducerOutput.irreversibleActions),
+    // Stall pattern details carry command text, so they go through the same redaction as irreversibleActions.
+    stallPatterns: redactedStr(reducerOutput.stallPatterns),
     compactionBoundaries: str(reducerOutput.compactionBoundaries),
     compactionLosses: str(reducerOutput.compactionLosses),
     tokenUsage: str(reducerOutput.turnTokenUsage),
