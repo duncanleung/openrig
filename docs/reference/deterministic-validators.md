@@ -56,23 +56,44 @@ Two facts the ticket does not state:
 
 ## Finding classification
 
-A finding gets at most one tool. Unsure means no check.
+A finding gets at most one tool. Unsure means no check. The classification also records how the
+tool was chosen (`classifiedBy`), because that decides whether a clean run may refute the finding.
 
 1. Structured field first. If the finding has `deterministicKind`, use it:
    `type-error` -> `tsc`, `test-failure` -> `vitest`, `lint` -> `eslint`. Any other value means no
-   check. The current finding schema has no such field, so the invoking session may set it.
+   check. `classifiedBy` is `structured`. The current finding schema has no such field, so the
+   invoking session may set it.
 2. Keyword fallback. Search `category` plus the first 300 characters of `description`:
 
    | Tool | Pattern (case-insensitive) |
    |------|----------------------------|
-   | `tsc` | `TS` plus four digits, "type error", "typecheck", "type check", "tsc", "does not compile" |
+   | `tsc` | `TS` plus four digits, "does not compile", "fail(s) (to) typecheck" or "type-check", "compile error" |
    | `vitest` | "vitest", "failing/failed/broken test", "test fails/failing/failure" |
    | `eslint` | "eslint", "lint", "linter", "linting" |
 
+   The bare words "type error", "tsc", and "type-check" do NOT select `tsc`. They also describe
+   runtime errors and type-system bypasses, which a compiler cannot refute. A case-sensitive
+   `TypeError` (the runtime class) in the text means the finding never selects `tsc`.
+   `classifiedBy` is `ts-code` when the tool is `tsc` and the text holds an explicit `TSnnnn` code.
+   Otherwise it is `keyword`.
 3. If two or more patterns match, or none match, run no check.
 
 Only `standard` track findings get a check. `deep-research` and `already-addressed-*` findings do
 not.
+
+### Who may refute
+
+A keyword match proves nothing about which claim the finding makes. So a clean run refutes a
+finding only if the claim is known:
+
+| Tool | `refuted` allowed when |
+|------|------------------------|
+| tsc | `classifiedBy` is `structured` or `ts-code` |
+| vitest | `classifiedBy` is `structured`, or the finding names a test file (path validation passes) AND says that test fails ("the test fails", "failing test"; "failing test helper" does not count) |
+| eslint | Always. The eslint rule already needs a named, enabled rule. |
+
+Otherwise a clean run gives `inconclusive` with reason `refute-needs-structured-claim`. `confirmed`
+needs no such rule: a tool failure at the claimed location is evidence whatever picked the tool.
 
 ## Where the check runs
 
@@ -136,8 +157,8 @@ A test file matches `*.test.*` or `*.spec.*` (`.js`, `.ts`, `.jsx`, `.tsx`, `.mj
 ## Verdict table (normative)
 
 `confirmed` needs the tool to fail AND the failure to point at the claimed file (and at the claimed
-line, when the finding names one). `refuted` needs a clean run AND proof that the run covered the
-claimed file. Everything else is `inconclusive`.
+line, when the finding names one). `refuted` needs a clean run, proof that the run covered the
+claimed file, AND the provenance rule below. Everything else is `inconclusive`.
 
 A line matches when it falls in the claimed range (inclusive, no tolerance). Without a claimed
 line, any failure in the claimed file matches.
@@ -148,6 +169,10 @@ line, any failure in the claimed file matches.
 | vitest | The named test file ran and has at least one failed test | The named test file ran, has at least one passed test, no failed test, and the exit code is 0 | File did not run; only skipped tests; JSON not parseable |
 | eslint | Exit 1 and an error-severity message in the claimed file (and line). If the finding names rules in backticks, the message `ruleId` must match one. | Exit 0, file linted and not ignored, the finding names a rule, and `--print-config` shows that rule enabled | File ignored; no rule named; named rule not enabled; errors only elsewhere |
 | any | | | Tool missing, no `node_modules`, timeout, output cap, crash (eslint exit above 1), spawn failure, unparseable output, head mismatch, dirty tree, tree mutated |
+
+Provenance rule: a `refuted` result also needs the "Who may refute" condition above. If it fails,
+the result becomes `inconclusive` (`refute-needs-structured-claim`). Every result carries
+`classifiedBy`.
 
 Why eslint is strict: a clean lint run proves nothing about a rule that the config does not enable.
 A clean run only refutes a finding that names an enabled rule.
@@ -249,6 +274,7 @@ the pre-check refuted is already dismissed and never reaches it.
 | Tool wrote to the tree | `inconclusive` for that finding and all later ones |
 | Monorepo `tsc` project with `references` and no `files` | The claimed file is not in the program, so `inconclusive` |
 | Wrong `confirmed` | Possible when the same file has a pre-existing error on the claimed line. Mitigation: the PR head is checked, but the checker does not diff against the base. See "Not verified". |
+| Runtime error mistaken for a type error (for example "throws a `TypeError` when rows is undefined") | Keyword classification does not select `tsc` for it. If a guess still selects a tool, a clean run gives `inconclusive`, never `refuted`. |
 | Hostile finding text | Never reaches argv. A path with shell characters fails `realpath` and gives `inconclusive`. |
 
 ## How to apply
@@ -288,7 +314,7 @@ dual diff is independent. You can apply the validate-findings diff alone and ski
    with no arguments. It must print a usage line and exit 2.
 3. Helper on a real PR checkout (head SHA, clean tree, `node_modules` installed). Write one finding
    with a known `tsc` error to a JSON file, run the helper, and expect `confirmed`. Then run it
-   on a finding for a clean file in the tsconfig program and expect `refuted`.
+   on a finding for a clean file in the tsconfig program, with `deterministicKind: "type-error"` or a `TSnnnn` code in the text, and expect `refuted`. The same finding with neither must give `inconclusive` (`refute-needs-structured-claim`).
 4. Run `/code-review-validate-findings` on a PR. Check `metrics.json` for `validator_calls_saved`,
    `deterministic`, and `findings_outcomes`. With no conclusive result, `validator_calls_saved` is
    `0` and the panel behavior matches the old run.
@@ -325,3 +351,11 @@ rollback: with no `deterministic` field on any finding, the Workflow behaves as 
   session follows it.
 - The `deterministicResults` path in `code-review-dual` has no caller. No dual `SKILL.md` step
   runs the checker.
+- `eslint` never ran against the real tool. This repo has no eslint config. Only fake scripts
+  covered it.
+- `tsc` checks the whole project, not one file. On a large monorepo the 180 s timeout turns the
+  result into `inconclusive`.
+- The keyword patterns are a heuristic. They can still select a tool for a finding that makes a
+  different claim. The provenance rule limits the damage: such a guess can `confirm` or stay
+  `inconclusive`, and cannot refute. `deterministicKind` or an explicit `TSnnnn` code is needed
+  for `tsc` to refute.

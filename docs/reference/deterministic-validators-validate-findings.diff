@@ -195,9 +195,9 @@
      user_feedback: null,
    },
    mode: dualStack ? (opusFallbackResults.length > 0 ? 'dual-model-fallback' : 'dual-stack') : 'claude-only',
---- a/code-review-validate-findings/deterministic-check.mjs	2026-10-16 11:21:35
-+++ b/code-review-validate-findings/deterministic-check.mjs	2026-10-16 11:20:26
-@@ -0,0 +1,403 @@
+--- a/code-review-validate-findings/deterministic-check.mjs	2026-10-16 11:27:51
++++ b/code-review-validate-findings/deterministic-check.mjs	2026-10-16 11:27:03
+@@ -0,0 +1,439 @@
 +#!/usr/bin/env node
 +// Deterministic pre-validation checks for /code-review-validate-findings (RIG-10).
 +//
@@ -231,23 +231,55 @@
 +// ── Classification ──────────────────────────────────────────────────────────
 +
 +const KIND_TO_METHOD = { 'type-error': 'tsc', 'test-failure': 'vitest', lint: 'eslint' }
-+const TSC_RE = /\bTS\d{4}\b|\btype[- ]?errors?\b|\btypecheck(ing)?\b|\btype[- ]check(ing)?\b|\btsc\b|does not compile/i
++const TS_CODE_RE = /\bTS\d{4}\b/
++const TSC_RE = /\bTS\d{4}\b|does not compile|\bfails?\s+(to\s+)?type[- ]?check|\bcompile errors?\b/i
++// A case-sensitive TypeError is the runtime class. A compiler cannot refute it.
++const RUNTIME_TYPEERROR_RE = /\bTypeError\b/
 +const VITEST_RE = /\bvitest\b|\b(failing|failed|broken)\s+tests?\b|\btests?\s+(is\s+|are\s+|will\s+)?(fail|failing|failure)/i
++// The finding says a test itself fails ("failing test helper" does not).
++const VITEST_FAILS_RE = /\btests?\b[^.\n]{0,80}\b(fails?|failing|failed|breaks?)\b|\b(failing|failed|broken)\s+tests?\b(?!\s+(helper|util|utils|fixture|mock|setup))/i
 +const ESLINT_RE = /\beslint\b|\blint(er|ing)?\b/i
 +
-+// Structured field first (finding.deterministicKind). Keyword fallback only on category plus the
-+// first 300 characters of the description. More than one match, or none, means no check.
-+export function classifyFinding(finding) {
++// Returns { method, classifiedBy } or null.
++//   structured: finding.deterministicKind, set by the invoking session.
++//   ts-code:    keyword path, tsc, and the text holds an explicit TSnnnn code.
++//   keyword:    any other keyword match.
++// Structured field first. Keyword fallback only on category plus the first 300 characters of the
++// description. More than one match, or none, means no check.
++export function classifyFindingDetailed(finding) {
 +  if (!finding || typeof finding !== 'object') return null
 +  if (typeof finding.deterministicKind === 'string') {
-+    return KIND_TO_METHOD[finding.deterministicKind] || null
++    const method = KIND_TO_METHOD[finding.deterministicKind]
++    return method ? { method, classifiedBy: 'structured' } : null
 +  }
 +  const text = `${finding.category || ''} ${String(finding.description || '').slice(0, 300)}`
 +  const hits = []
-+  if (TSC_RE.test(text)) hits.push('tsc')
++  if (TSC_RE.test(text) && !RUNTIME_TYPEERROR_RE.test(text)) hits.push('tsc')
 +  if (VITEST_RE.test(text)) hits.push('vitest')
 +  if (ESLINT_RE.test(text)) hits.push('eslint')
-+  return hits.length === 1 ? hits[0] : null
++  if (hits.length !== 1) return null
++  const method = hits[0]
++  return { method, classifiedBy: method === 'tsc' && TS_CODE_RE.test(text) ? 'ts-code' : 'keyword' }
++}
++
++export function classifyFinding(finding) {
++  const c = classifyFindingDetailed(finding)
++  return c ? c.method : null
++}
++
++// A clean run refutes a claim only if the claim itself is known, not guessed from keywords.
++//   tsc:    structured kind or an explicit TSnnnn code.
++//   vitest: structured kind, or the finding names a test file (checked by the caller) and says it fails.
++//   eslint: always; checkEslint already needs a named, enabled rule.
++export function refuteAllowed(method, classifiedBy, finding) {
++  if (method === 'eslint') return true
++  if (classifiedBy === 'structured') return true
++  if (method === 'tsc') return classifiedBy === 'ts-code'
++  if (method === 'vitest') {
++    const text = `${finding.category || ''} ${String(finding.description || '').slice(0, 300)}`
++    return VITEST_FAILS_RE.test(text)
++  }
++  return false
 +}
 +
 +// "42", "42-50", "L42-L50", "42,50" -> {start, end}; anything else -> null (no line claimed).
@@ -548,8 +580,9 @@
 +  const blocked = head !== headSha ? 'head-mismatch' : dirty !== '' ? 'dirty-tree' : null
 +  let mutated = false
 +  for (const finding of findings) {
-+    const method = classifyFinding(finding)
-+    if (!method) continue
++    const cls = classifyFindingDetailed(finding)
++    if (!cls) continue
++    const { method, classifiedBy } = cls
 +    let res
 +    if (blocked) res = inconclusive(method, blocked)
 +    else if (mutated) res = inconclusive(method, 'tree-mutated')
@@ -566,8 +599,11 @@
 +        res = inconclusive(method, 'tree-mutated')
 +      }
 +    }
++    if (res.verdict === 'refuted' && !refuteAllowed(method, classifiedBy, finding)) {
++      res = inconclusive(method, 'refute-needs-structured-claim')
++    }
 +    const { argv, ...rest } = res
-+    out.push({ id: finding.id, ...rest, command: argv ? argv.join(' ') : undefined })
++    out.push({ id: finding.id, ...rest, classifiedBy, command: argv ? argv.join(' ') : undefined })
 +  }
 +  return out
 +}
