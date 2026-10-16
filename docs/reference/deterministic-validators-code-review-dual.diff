@@ -1,0 +1,73 @@
+--- a/code-review-dual/SKILL.md	2026-10-16 11:19:47
++++ b/code-review-dual/SKILL.md	2026-10-16 11:21:23
+@@ -757,8 +757,12 @@
+   - `trace_id` — deterministic hash of run parameters, for future correlation.
+   - `version_manifest` — skill content hashes, model IDs, tool versions, runtime config.
+   - `findings_lifecycle` — per-finding lifecycle array with discovery, validation, classification,
+-    and (initially null) outcome fields. The `outcome_label` and `user_action` fields are set
+-    post-merge via `--annotate` in the audit skill.
++    and outcome fields. `deterministic_verdict` and `deterministic_method` stay null unless the
++    caller passes `deterministicResults` (see `code-review-validate-findings`, RIG-10). The
++    Workflow writes `outcome_label` and `outcome_source` at run time: a deterministic verdict wins,
++    otherwise MUST_FIX maps to `true_positive` and DISMISSED to `false_positive`. The
++    `user_action` field, and any later `outcome_label`, are set post-merge via `--annotate` in
++    the audit skill.
+ 
+ Write all three files even when the review found nothing — a clean run is data too.
+ 
+--- a/code-review-dual/workflow.js	2026-10-16 11:19:47
++++ b/code-review-dual/workflow.js	2026-10-16 11:21:04
+@@ -2346,11 +2346,36 @@
+     h = h & h
+   }
+   return ('00000000' + ((h >>> 0).toString(16))).slice(-8)
++}
++
++// Deterministic verdicts (RIG-10). This Workflow runs no deterministic check itself. A caller that
++// ran deterministic-check.mjs (code-review-validate-findings) can pass the results as
++// _args.deterministicResults = [{ file, lines, verdict, method }]; they are matched by file and lines.
++const DET_VERDICTS = ['confirmed', 'refuted', 'inconclusive']
++const DET_METHODS = ['tsc', 'vitest', 'eslint']
++
++function deterministicFor(finding) {
++  const list = Array.isArray(_args.deterministicResults) ? _args.deterministicResults : []
++  const d = list.find(r => r && r.file === finding.file && String(r.lines) === String(finding.lines))
++  if (!d || !DET_VERDICTS.includes(d.verdict) || !DET_METHODS.includes(d.method)) return null
++  return d
+ }
+ 
++// Deterministic verdict wins. Otherwise the LLM verdict: MUST_FIX is a true positive, DISMISSED a
++// false positive. SUGGESTION, ESCALATED and SMELL stay unlabeled. --annotate still overwrites later.
++function outcomeFor(det, verdict) {
++  if (det && det.verdict === 'confirmed') return { outcome_label: 'true_positive', outcome_source: 'deterministic' }
++  if (det && det.verdict === 'refuted') return { outcome_label: 'false_positive', outcome_source: 'deterministic' }
++  if (verdict === 'MUST_FIX') return { outcome_label: 'true_positive', outcome_source: 'llm_validator' }
++  if (verdict === 'DISMISSED') return { outcome_label: 'false_positive', outcome_source: 'llm_validator' }
++  return { outcome_label: null, outcome_source: null }
++}
++
+ function buildLifecycleRecord(finding, verdict) {
+   const chain = finding.evidenceChain || ''
+   const dismissReason = finding.dismissReason || null
++  const det = deterministicFor(finding)
++  const outcome = outcomeFor(det, verdict)
+   return {
+     finding_id: finding.findingId || null,
+     file: finding.file || null,
+@@ -2373,12 +2398,12 @@
+       : [],
+     verdict: verdict,
+     has_fix_spec: false,
+-    deterministic_verdict: null,
+-    deterministic_method: null,
++    deterministic_verdict: det ? det.verdict : null,
++    deterministic_method: det ? det.method : null,
+     repro_verdict: finding.repro ? finding.repro.verdict : null,
+     user_action: null,
+-    outcome_label: null,
+-    outcome_source: null,
++    outcome_label: outcome.outcome_label,
++    outcome_source: outcome.outcome_source,
+     outcome_timestamp: null,
+     description_hash: hashString(finding.description),
+     description_prefix: (finding.description || '').slice(0, 200),
