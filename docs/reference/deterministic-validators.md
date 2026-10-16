@@ -89,7 +89,7 @@ finding only if the claim is known:
 | Tool | `refuted` allowed when |
 |------|------------------------|
 | tsc | `classifiedBy` is `structured` or `ts-code` |
-| vitest | `classifiedBy` is `structured`, or the finding names a test file (path validation passes) AND says that test fails ("the test fails", "failing test"; "failing test helper" does not count) |
+| vitest | `classifiedBy` is `structured`, or the finding names a test file (path validation passes), says that test fails ("the test fails", "failing test"; "failing test helper" does not count), AND makes no conditional or intermittent claim. The first 300 characters must not match words such as flaky, intermittent, sometimes, race, timezone, locale, "on CI", "only when", "when run in", "under load". A `structured` finding skips this check. |
 | eslint | Always. The eslint rule already needs a named, enabled rule. |
 
 Otherwise a clean run gives `inconclusive` with reason `refute-needs-structured-claim`. `confirmed`
@@ -359,3 +359,6 @@ rollback: with no `deterministic` field on any finding, the Workflow behaves as 
   different claim. The provenance rule limits the damage: such a guess can `confirm` or stay
   `inconclusive`, and cannot refute. `deterministicKind` or an explicit `TSnnnn` code is needed
   for `tsc` to refute.
+- The qualifier detection for vitest (flaky, timezone, "on CI", and similar words) is a heuristic
+  word list over the first 300 characters. A conditional claim phrased with other words can still
+  be refuted by one clean run. Set `deterministicKind` only for claims one local run can settle.

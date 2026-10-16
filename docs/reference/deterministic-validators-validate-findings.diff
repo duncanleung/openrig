@@ -195,9 +195,9 @@
      user_feedback: null,
    },
    mode: dualStack ? (opusFallbackResults.length > 0 ? 'dual-model-fallback' : 'dual-stack') : 'claude-only',
---- a/code-review-validate-findings/deterministic-check.mjs	2026-10-16 11:27:51
-+++ b/code-review-validate-findings/deterministic-check.mjs	2026-10-16 11:27:03
-@@ -0,0 +1,439 @@
+--- a/code-review-validate-findings/deterministic-check.mjs	2026-10-16 11:29:42
++++ b/code-review-validate-findings/deterministic-check.mjs	2026-10-16 11:29:26
+@@ -0,0 +1,443 @@
 +#!/usr/bin/env node
 +// Deterministic pre-validation checks for /code-review-validate-findings (RIG-10).
 +//
@@ -238,6 +238,9 @@
 +const VITEST_RE = /\bvitest\b|\b(failing|failed|broken)\s+tests?\b|\btests?\s+(is\s+|are\s+|will\s+)?(fail|failing|failure)/i
 +// The finding says a test itself fails ("failing test helper" does not).
 +const VITEST_FAILS_RE = /\btests?\b[^.\n]{0,80}\b(fails?|failing|failed|breaks?)\b|\b(failing|failed|broken)\s+tests?\b(?!\s+(helper|util|utils|fixture|mock|setup))/i
++// A conditional or intermittent claim ("flaky", "in a different timezone", "on CI"). One clean local
++// run cannot refute it. Heuristic: it only looks at the first 300 characters.
++const QUALIFIER_RE = /\b(flaky|flake|flakes|intermittent(ly)?|sometimes|occasionally|nondeterministic\w*|race|order[- ]dependent|timezone|time zone|locale|only (on|in|when|under|with)|on CI|in CI|when run (in|on|with)|under load)\b/i
 +const ESLINT_RE = /\beslint\b|\blint(er|ing)?\b/i
 +
 +// Returns { method, classifiedBy } or null.
@@ -269,7 +272,8 @@
 +
 +// A clean run refutes a claim only if the claim itself is known, not guessed from keywords.
 +//   tsc:    structured kind or an explicit TSnnnn code.
-+//   vitest: structured kind, or the finding names a test file (checked by the caller) and says it fails.
++//   vitest: structured kind, or the finding names a test file (checked by the caller), says it fails,
++//           and makes no conditional or intermittent claim (QUALIFIER_RE).
 +//   eslint: always; checkEslint already needs a named, enabled rule.
 +export function refuteAllowed(method, classifiedBy, finding) {
 +  if (method === 'eslint') return true
@@ -277,7 +281,7 @@
 +  if (method === 'tsc') return classifiedBy === 'ts-code'
 +  if (method === 'vitest') {
 +    const text = `${finding.category || ''} ${String(finding.description || '').slice(0, 300)}`
-+    return VITEST_FAILS_RE.test(text)
++    return VITEST_FAILS_RE.test(text) && !QUALIFIER_RE.test(text)
 +  }
 +  return false
 +}
