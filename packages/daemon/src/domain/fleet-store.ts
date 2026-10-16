@@ -816,7 +816,7 @@ export class FleetStore {
       top_seats: seats.rows,
       reviews_by_seat_week: weekly.rows,
       stats: this.stats(),
-      truncated: sessions.truncated || tokens.truncated || reviews.truncated,
+      truncated: sessions.truncated || tokens.truncated || reviews.truncated || weekly.truncated,
     };
   }
 

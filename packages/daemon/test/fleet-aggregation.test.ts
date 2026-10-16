@@ -184,6 +184,17 @@ describe("FleetStore aggregation", () => {
     expect(s.top_seats[0]!.seat_name).toBe("dev-impl");
   });
 
+  it("summary reports truncated when the weekly review groups exceed the cap of 50", () => {
+    for (let i = 0; i < 50; i++) store.upsertReviewRun(review({ seatName: `seat-${i}` }), null);
+    const atCap = store.summary();
+    expect(atCap.reviews_by_seat_week).toHaveLength(50);
+    expect(atCap.truncated).toBe(false);
+    store.upsertReviewRun(review({ seatName: "seat-50" }), null);
+    const over = store.summary();
+    expect(over.reviews_by_seat_week).toHaveLength(50);
+    expect(over.truncated).toBe(true);
+  });
+
   it("is read-only: aggregation does not change row counts", () => {
     store.upsertSnapshot(snap());
     const before = JSON.stringify(store.stats());
