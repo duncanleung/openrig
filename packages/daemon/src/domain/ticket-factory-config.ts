@@ -24,7 +24,7 @@ export interface JevSettings {
   model: string;
 }
 
-export const JEV_DEFAULTS: JevSettings = { threshold: 0.8, model: "jev-1.13" };
+export const JEV_DEFAULTS: JevSettings = { threshold: 0.8, model: "jev-latest" };
 
 export const FACTORY_DEFAULTS: FactorySettings = {
   pollIntervalSeconds: 300,

@@ -105,7 +105,7 @@ describe("classifyWithJev", () => {
     expect(init.method).toBe("POST");
     expect(init.headers.Authorization).toBe(`Bearer ${KEY}`);
     const sent = JSON.parse(init.body);
-    expect(sent.model).toBe("jev-1.13");
+    expect(sent.model).toBe("jev-latest");
     expect(Object.keys(sent.questions)).toEqual(["risk_class", "auto_merge_safe"]);
     expect(sent.state).toEqual(summary);
   });

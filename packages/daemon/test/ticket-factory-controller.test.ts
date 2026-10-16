@@ -427,7 +427,7 @@ describe("ticket-factory recurring operation (RIG-88)", () => {
     });
 
     it("jev settings default and validate", () => {
-      expect(parseFactorySettings("").jev).toEqual({ threshold: 0.8, model: "jev-1.13" });
+      expect(parseFactorySettings("").jev).toEqual({ threshold: 0.8, model: "jev-latest" });
       const th = (v: string) => parseFactorySettings(`jev:\n  threshold: ${v}\n`).jev!.threshold;
       expect(th("0")).toBe(0);
       expect(th("1")).toBe(1);
@@ -438,19 +438,19 @@ describe("ticket-factory recurring operation (RIG-88)", () => {
       expect(th('"x"')).toBe(0.8);
       expect(th(".nan")).toBe(0.8);
       expect(th(".inf")).toBe(0.8);
-      expect(parseFactorySettings("jev: nope\n").jev).toEqual({ threshold: 0.8, model: "jev-1.13" });
+      expect(parseFactorySettings("jev: nope\n").jev).toEqual({ threshold: 0.8, model: "jev-latest" });
     });
 
     it("jev model must be a non-empty string", () => {
       expect(parseFactorySettings('jev:\n  model: "jev-latest"\n').jev!.model).toBe("jev-latest");
-      expect(parseFactorySettings('jev:\n  model: ""\n').jev!.model).toBe("jev-1.13");
-      expect(parseFactorySettings("jev:\n  model: 5\n").jev!.model).toBe("jev-1.13");
+      expect(parseFactorySettings('jev:\n  model: ""\n').jev!.model).toBe("jev-latest");
+      expect(parseFactorySettings("jev:\n  model: 5\n").jev!.model).toBe("jev-latest");
     });
 
     it("the repo .factory.yml jev block parses and leaves merge_policy unchanged", () => {
       const text = readFileSync(resolve(import.meta.dirname, "../../../.factory.yml"), "utf8");
       const s = parseFactorySettings(text);
-      expect(s.jev).toEqual({ threshold: 0.8, model: "jev-1.13" });
+      expect(s.jev).toEqual({ threshold: 0.8, model: "jev-latest" });
       expect(s.mergePolicy).toBe("auto-low-risk");
     });
 

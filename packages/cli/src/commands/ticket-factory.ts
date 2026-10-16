@@ -3,6 +3,7 @@ import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, daemonStatusGuard } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
+import { runJevClassify, realJevDeps, type JevClassifyDeps } from "./ticket-factory-jev.js";
 
 /**
  * `rig ticket-factory` — controls for the recurring ticket-factory (RIG-88).
@@ -62,7 +63,7 @@ export async function ticketFactoryStatus(deps: TicketFactoryDeps, json: boolean
   await call(deps, "get", "/api/ticket-factory/status", json);
 }
 
-export function ticketFactoryCommand(depsOverride?: TicketFactoryDeps): Command {
+export function ticketFactoryCommand(depsOverride?: TicketFactoryDeps, jevDepsOverride?: JevClassifyDeps): Command {
   const cmd = new Command("ticket-factory").description("Recurring ticket-factory controls: status, enable, pause, resume (RIG-88)");
   const getDeps = (): TicketFactoryDeps =>
     depsOverride ?? { lifecycleDeps: realDeps(), clientFactory: (url: string) => new DaemonClient(url) };
@@ -70,6 +71,18 @@ export function ticketFactoryCommand(depsOverride?: TicketFactoryDeps): Command 
   cmd.command("status").description("State, cadence, capacity, run budget, backoff and merge precedence")
     .option("--json", "JSON output for agents")
     .action(async (opts: { json?: boolean }) => ticketFactoryStatus(getDeps(), opts.json ?? false));
+
+  cmd.command("jev-classify")
+    .description("Shadow-mode Jev risk verdict for a PR next to its rule bucket; never changes merge behavior (RIG-99)")
+    .option("--pr <number>", "Pull request number")
+    .option("--bucket <bucket>", "Rule-based bucket: AUTO, ADJUDICATE_LIGHT, ADJUDICATE_HEAVY or ESCALATE")
+    .option("--repo <owner/name>", "Repository (default: current gh repo)")
+    .option("--threshold <0..1>", "auto_merge_safe threshold")
+    .option("--model <id>", "Jev model id")
+    .option("--json", "JSON output for agents")
+    .action(async (opts: { pr?: string; bucket?: string; repo?: string; threshold?: string; model?: string; json?: boolean }) => {
+      process.exitCode = await runJevClassify(opts, jevDepsOverride ?? realJevDeps());
+    });
 
   const verbs: Array<[string, string]> = [
     ["enable", "Start polling the backlog (opens a run if none is open)"],
