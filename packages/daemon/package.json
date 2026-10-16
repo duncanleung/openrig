@@ -73,6 +73,10 @@
     "./local-reading": {
       "types": "./dist/local-reading-surface.d.ts",
       "import": "./dist/local-reading-surface.js"
+    },
+    "./jev-classifier": {
+      "types": "./dist/jev-classifier-surface.d.ts",
+      "import": "./dist/jev-classifier-surface.js"
     }
   },
   "scripts": {

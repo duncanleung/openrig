@@ -7,7 +7,7 @@
 
 import { redactDigestValue } from "./digest-redaction.js";
 
-export const JEV_DEFAULT_MODEL = "jev-1.13";
+export const JEV_DEFAULT_MODEL = "jev-latest";
 export const JEV_DEFAULT_BASE_URL = "https://api.typesafe.ai";
 export const JEV_DEFAULT_TIMEOUT_MS = 10_000;
 export const JEV_DEFAULT_THRESHOLD = 0.8;

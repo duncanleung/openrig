@@ -53,4 +53,4 @@ approval_batching:
 # which never gates a merge (ADR-0008).
 jev:
   threshold: 0.8
-  model: "jev-1.13"
+  model: "jev-latest"
