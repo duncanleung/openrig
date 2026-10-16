@@ -195,6 +195,118 @@ function normalizeUntilDate(value: string): string {
   return value;
 }
 
+
+// ── Aggregation (RIG-80). Read-only GROUP BY rollups; tokens only, never dollars. ──
+
+/** Label for rows whose rig_name / seat_name / model / week is NULL. Never dropped silently. */
+export const UNATTRIBUTED = "(unattributed)";
+export const UNDATED = "(undated)";
+export const UNKNOWN_MODEL = "(unknown)";
+
+const AGG_DEFAULT_LIMIT = 200;
+const AGG_MAX_LIMIT = 500;
+
+export interface AggregateFilter {
+  rig?: string;
+  seat?: string;
+  /** Date-only (YYYY-MM-DD) lower bound. */
+  since?: string;
+  /** Date-only (YYYY-MM-DD) upper bound, inclusive. */
+  until?: string;
+  /** Max groups returned (default 200, max 500). */
+  limit?: number;
+}
+
+export interface AggregateResult<T> {
+  rows: T[];
+  /** True when more groups existed than `limit`. */
+  truncated: boolean;
+}
+
+export interface TokensRigDayRow {
+  day: string;
+  rig_name: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  seats: number;
+  samples: number;
+}
+
+export interface TokensSeatRow {
+  rig_name: string;
+  seat_name: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  days: number;
+  samples: number;
+}
+
+export interface ReviewsSeatWeekRow {
+  /** Monday (UTC date) that starts the week, YYYY-MM-DD; "(undated)" when completed_at is missing. */
+  week_start: string;
+  rig_name: string;
+  seat_name: string;
+  runs: number;
+  must_fix: number;
+  suggestion: number;
+  dismissed: number;
+}
+
+export interface SessionsRigRow {
+  rig_name: string;
+  sessions: number;
+  total_turns: number;
+  conversation_turns: number;
+  input_tokens: number;
+  output_tokens: number;
+  escalations: number;
+  last_ingested_at: string | null;
+}
+
+export interface FleetSummaryRig {
+  rig_name: string;
+  sessions: number;
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  review_runs: number;
+  must_fix: number;
+  suggestion: number;
+  dismissed: number;
+}
+
+export interface FleetSummary {
+  totals: {
+    rigs: number;
+    sessions: number;
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    review_runs: number;
+    must_fix: number;
+    suggestion: number;
+    dismissed: number;
+    escalations: number;
+  };
+  rigs: FleetSummaryRig[];
+  top_seats: TokensSeatRow[];
+  reviews_by_seat_week: ReviewsSeatWeekRow[];
+  stats: FleetStoreStats;
+  truncated: boolean;
+}
+
+function clampAggLimit(raw: number | undefined): number {
+  if (raw === undefined || !Number.isFinite(raw)) return AGG_DEFAULT_LIMIT;
+  return Math.min(Math.max(1, Math.floor(raw)), AGG_MAX_LIMIT);
+}
+
+function label(v: string | null | undefined, fallback: string): string {
+  return v === null || v === undefined || v === "" ? fallback : v;
+}
+
 export class FleetStore {
   private readonly db: Database;
 
@@ -553,6 +665,188 @@ export class FleetStore {
       LIMIT ? OFFSET ?
     `).all(...params, limit, offset) as SnapshotRow[];
     return { rows, total };
+  }
+
+  private aggregate<R extends Record<string, unknown>>(
+    sql: string,
+    params: unknown[],
+    limit: number | undefined,
+  ): AggregateResult<R> {
+    const cap = clampAggLimit(limit);
+    const raw = this.db.prepare(sql).all(...params, cap + 1) as R[];
+    return { rows: raw.slice(0, cap), truncated: raw.length > cap };
+  }
+
+  /** Tokens per rig per day, from daily_token_snapshots. Groups on raw columns; NULL rig is labeled in JS. */
+  tokensByRigDay(filter: AggregateFilter = {}): AggregateResult<TokensRigDayRow> {
+    const { where, params } = this.buildWhere(filter, "rig_name", "seat_name", "day");
+    const res = this.aggregate<Record<string, unknown>>(`
+      SELECT day, rig_name,
+             COALESCE(SUM(input_tokens_delta), 0) AS input_tokens,
+             COALESCE(SUM(output_tokens_delta), 0) AS output_tokens,
+             COALESCE(SUM(COALESCE(total_tokens_delta, COALESCE(input_tokens_delta, 0) + COALESCE(output_tokens_delta, 0))), 0) AS total_tokens,
+             COUNT(DISTINCT seat_session) AS seats,
+             COALESCE(SUM(samples), 0) AS samples
+      FROM daily_token_snapshots${where}
+      GROUP BY day, rig_name
+      ORDER BY day DESC, rig_name ASC
+      LIMIT ?
+    `, params, filter.limit);
+    return {
+      truncated: res.truncated,
+      rows: res.rows.map((r) => ({ ...r, rig_name: label(r.rig_name as string | null, UNATTRIBUTED) }) as unknown as TokensRigDayRow),
+    };
+  }
+
+  /** Tokens per rig, seat and model, from daily_token_snapshots. Ordered by total tokens. */
+  tokensBySeat(filter: AggregateFilter = {}): AggregateResult<TokensSeatRow> {
+    const { where, params } = this.buildWhere(filter, "rig_name", "seat_name", "day");
+    const res = this.aggregate<Record<string, unknown>>(`
+      SELECT rig_name, seat_name, model,
+             COALESCE(SUM(input_tokens_delta), 0) AS input_tokens,
+             COALESCE(SUM(output_tokens_delta), 0) AS output_tokens,
+             COALESCE(SUM(COALESCE(total_tokens_delta, COALESCE(input_tokens_delta, 0) + COALESCE(output_tokens_delta, 0))), 0) AS total_tokens,
+             COUNT(DISTINCT day) AS days,
+             COALESCE(SUM(samples), 0) AS samples
+      FROM daily_token_snapshots${where}
+      GROUP BY rig_name, seat_name, model
+      ORDER BY total_tokens DESC, rig_name ASC, seat_name ASC
+      LIMIT ?
+    `, params, filter.limit);
+    return {
+      truncated: res.truncated,
+      rows: res.rows.map((r) => ({
+        ...r,
+        rig_name: label(r.rig_name as string | null, UNATTRIBUTED),
+        seat_name: label(r.seat_name as string | null, UNATTRIBUTED),
+        model: label(r.model as string | null, UNKNOWN_MODEL),
+      }) as unknown as TokensSeatRow),
+    };
+  }
+
+  /**
+   * Review runs per seat per week, from review_runs. A week starts on Monday (UTC date of
+   * completed_at). Runs without a parseable completed_at group under "(undated)" unless a
+   * since/until filter excludes them.
+   */
+  reviewsBySeatWeek(filter: AggregateFilter = {}): AggregateResult<ReviewsSeatWeekRow> {
+    const { where, params } = this.buildWhere(filter, "rig_name", "seat_name", "completed_at");
+    const res = this.aggregate<Record<string, unknown>>(`
+      SELECT date(completed_at, 'weekday 0', '-6 days') AS week_start, rig_name, seat_name,
+             COUNT(*) AS runs,
+             COALESCE(SUM(must_fix), 0) AS must_fix,
+             COALESCE(SUM(suggestion), 0) AS suggestion,
+             COALESCE(SUM(dismissed), 0) AS dismissed
+      FROM review_runs${where}
+      GROUP BY week_start, rig_name, seat_name
+      ORDER BY week_start DESC, rig_name ASC, seat_name ASC
+      LIMIT ?
+    `, params, filter.limit);
+    return {
+      truncated: res.truncated,
+      rows: res.rows.map((r) => ({
+        ...r,
+        week_start: label(r.week_start as string | null, UNDATED),
+        rig_name: label(r.rig_name as string | null, UNATTRIBUTED),
+        seat_name: label(r.seat_name as string | null, UNATTRIBUTED),
+      }) as unknown as ReviewsSeatWeekRow),
+    };
+  }
+
+  /** Session digests per rig. since/until apply to ingested_at. */
+  sessionsByRig(filter: AggregateFilter = {}): AggregateResult<SessionsRigRow> {
+    const { where, params } = this.buildWhere(filter, "rig_name", "seat_name", "ingested_at");
+    const res = this.aggregate<Record<string, unknown>>(`
+      SELECT rig_name,
+             COUNT(*) AS sessions,
+             COALESCE(SUM(total_turns), 0) AS total_turns,
+             COALESCE(SUM(conversation_turns), 0) AS conversation_turns,
+             COALESCE(SUM(total_input_tokens), 0) AS input_tokens,
+             COALESCE(SUM(total_output_tokens), 0) AS output_tokens,
+             COALESCE(SUM(escalation_count), 0) AS escalations,
+             MAX(ingested_at) AS last_ingested_at
+      FROM session_digests${where}
+      GROUP BY rig_name
+      ORDER BY sessions DESC, rig_name ASC
+      LIMIT ?
+    `, params, filter.limit);
+    return {
+      truncated: res.truncated,
+      rows: res.rows.map((r) => ({ ...r, rig_name: label(r.rig_name as string | null, UNATTRIBUTED) }) as unknown as SessionsRigRow),
+    };
+  }
+
+  /** Headline numbers for the dashboard and `rig fleet summary`. One row per rig, plus fleet totals. */
+  summary(filter: AggregateFilter = {}): FleetSummary {
+    const sessions = this.sessionsByRig(filter);
+    const tokens = this.aggregateTokensByRig(filter);
+    const reviews = this.aggregateReviewsByRig(filter);
+    const seats = this.tokensBySeat({ ...filter, limit: 10 });
+    const weekly = this.reviewsBySeatWeek({ ...filter, limit: 50 });
+
+    const byRig = new Map<string, FleetSummaryRig>();
+    const row = (name: string): FleetSummaryRig => {
+      let r = byRig.get(name);
+      if (!r) {
+        r = { rig_name: name, sessions: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, review_runs: 0, must_fix: 0, suggestion: 0, dismissed: 0 };
+        byRig.set(name, r);
+      }
+      return r;
+    };
+    for (const s of sessions.rows) row(s.rig_name).sessions = s.sessions;
+    for (const t of tokens.rows) Object.assign(row(t.rig_name), { input_tokens: t.input_tokens, output_tokens: t.output_tokens, total_tokens: t.total_tokens });
+    for (const r of reviews.rows) Object.assign(row(r.rig_name), { review_runs: r.runs, must_fix: r.must_fix, suggestion: r.suggestion, dismissed: r.dismissed });
+
+    const rigs = [...byRig.values()].sort((a, b) => b.total_tokens - a.total_tokens || a.rig_name.localeCompare(b.rig_name));
+    const sum = (f: (r: FleetSummaryRig) => number) => rigs.reduce((n, r) => n + f(r), 0);
+    return {
+      totals: {
+        rigs: rigs.length,
+        sessions: sum((r) => r.sessions),
+        input_tokens: sum((r) => r.input_tokens),
+        output_tokens: sum((r) => r.output_tokens),
+        total_tokens: sum((r) => r.total_tokens),
+        review_runs: sum((r) => r.review_runs),
+        must_fix: sum((r) => r.must_fix),
+        suggestion: sum((r) => r.suggestion),
+        dismissed: sum((r) => r.dismissed),
+        escalations: sessions.rows.reduce((n, s) => n + s.escalations, 0),
+      },
+      rigs,
+      top_seats: seats.rows,
+      reviews_by_seat_week: weekly.rows,
+      stats: this.stats(),
+      truncated: sessions.truncated || tokens.truncated || reviews.truncated || weekly.truncated,
+    };
+  }
+
+  private aggregateTokensByRig(filter: AggregateFilter): AggregateResult<{ rig_name: string; input_tokens: number; output_tokens: number; total_tokens: number }> {
+    const { where, params } = this.buildWhere(filter, "rig_name", "seat_name", "day");
+    const res = this.aggregate<Record<string, unknown>>(`
+      SELECT rig_name,
+             COALESCE(SUM(input_tokens_delta), 0) AS input_tokens,
+             COALESCE(SUM(output_tokens_delta), 0) AS output_tokens,
+             COALESCE(SUM(COALESCE(total_tokens_delta, COALESCE(input_tokens_delta, 0) + COALESCE(output_tokens_delta, 0))), 0) AS total_tokens
+      FROM daily_token_snapshots${where}
+      GROUP BY rig_name
+      ORDER BY total_tokens DESC
+      LIMIT ?
+    `, params, filter.limit);
+    return { truncated: res.truncated, rows: res.rows.map((r) => ({ ...r, rig_name: label(r.rig_name as string | null, UNATTRIBUTED) }) as never) };
+  }
+
+  private aggregateReviewsByRig(filter: AggregateFilter): AggregateResult<{ rig_name: string; runs: number; must_fix: number; suggestion: number; dismissed: number }> {
+    const { where, params } = this.buildWhere(filter, "rig_name", "seat_name", "completed_at");
+    const res = this.aggregate<Record<string, unknown>>(`
+      SELECT rig_name, COUNT(*) AS runs,
+             COALESCE(SUM(must_fix), 0) AS must_fix,
+             COALESCE(SUM(suggestion), 0) AS suggestion,
+             COALESCE(SUM(dismissed), 0) AS dismissed
+      FROM review_runs${where}
+      GROUP BY rig_name
+      LIMIT ?
+    `, params, filter.limit);
+    return { truncated: res.truncated, rows: res.rows.map((r) => ({ ...r, rig_name: label(r.rig_name as string | null, UNATTRIBUTED) }) as never) };
   }
 
   private buildWhere(

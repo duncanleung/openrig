@@ -1,5 +1,6 @@
 import { Command } from "commander";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import nodePath from "node:path";
 import { DaemonClient, terminalAuthHeaders } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, daemonStatusGuard } from "../daemon-lifecycle.js";
 import { realDeps } from "./daemon.js";
@@ -312,6 +313,138 @@ export function fleetCommand(depsOverride?: StatusDeps): Command {
       } else {
         console.log("not-reviewed");
       }
+    });
+
+  const AGG_TIMEOUT_MS = 30_000;
+  const nf = new Intl.NumberFormat("en-US");
+  const fmt = (n: unknown) => (typeof n === "number" ? nf.format(n) : "—");
+
+  const filterParams = (opts: { rig?: string; seat?: string; since?: string; until?: string; limit?: string }) => {
+    const params = new URLSearchParams();
+    if (opts.rig) params.set("rig", opts.rig);
+    if (opts.seat) params.set("seat", opts.seat);
+    if (opts.since) params.set("since", opts.since);
+    if (opts.until) params.set("until", opts.until);
+    if (opts.limit) params.set("limit", opts.limit);
+    return params;
+  };
+
+  interface AggOpts { rig?: string; seat?: string; since?: string; until?: string; limit?: string; json?: boolean }
+
+  command
+    .command("summary")
+    .description("Fleet health at a glance: per-rig sessions, token burn (tokens, not dollars), and review coverage")
+    .option("--rig <name>", "Filter by rig name")
+    .option("--since <date>", "Window start (YYYY-MM-DD)")
+    .option("--until <date>", "Window end, inclusive (YYYY-MM-DD)")
+    .option("--json", "Output as JSON")
+    .action(async (opts: AggOpts) => {
+      const client = await getClient();
+      if (!client) return;
+      const qs = filterParams(opts).toString();
+      const response = await client.get<{ ok: boolean; summary?: Record<string, unknown>; error?: string }>(`/api/fleet/summary${qs ? `?${qs}` : ""}`, { timeoutMs: AGG_TIMEOUT_MS });
+      if (response.status >= 400 || !response.data.summary) {
+        console.error(`Error: ${response.data.error ?? "Unknown error"}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) {
+        console.log(JSON.stringify(response.data, null, 2));
+        return;
+      }
+      const s = response.data.summary as {
+        totals: Record<string, number>;
+        rigs: Array<Record<string, unknown>>;
+        stats: { session_digests: { last_ingested_at: string | null }; review_runs: { last_ingested_at: string | null }; daily_token_snapshots: { last_snapshot_at: string | null } };
+        truncated: boolean;
+      };
+      const t = s.totals;
+      console.log("Fleet Summary (tokens, not dollars)");
+      console.log("─".repeat(100));
+      console.log(`rigs ${fmt(t.rigs)}   sessions ${fmt(t.sessions)}   tokens in ${fmt(t.input_tokens)}   out ${fmt(t.output_tokens)}   total ${fmt(t.total_tokens)}`);
+      console.log(`reviews ${fmt(t.review_runs)}   must-fix ${fmt(t.must_fix)}   escalations ${fmt(t.escalations)}`);
+      console.log("");
+      if (s.rigs.length === 0) {
+        console.log("No fleet data yet. Run: rig fleet reconcile");
+      } else {
+        console.log(`  ${"RIG".padEnd(24)} ${"SESSIONS".padStart(9)} ${"TOKENS IN".padStart(14)} ${"TOKENS OUT".padStart(14)} ${"REVIEWS".padStart(8)} ${"MUST-FIX".padStart(9)}`);
+        for (const r of s.rigs) {
+          console.log(`  ${String(r.rig_name).padEnd(24)} ${fmt(r.sessions).padStart(9)} ${fmt(r.input_tokens).padStart(14)} ${fmt(r.output_tokens).padStart(14)} ${fmt(r.review_runs).padStart(8)} ${fmt(r.must_fix).padStart(9)}`);
+        }
+      }
+      if (s.truncated) console.log("\nNote: some groups were truncated by the result cap. Narrow with --rig/--since/--until.");
+      console.log(`\nData as of — digests: ${s.stats.session_digests.last_ingested_at ?? "never"}   reviews: ${s.stats.review_runs.last_ingested_at ?? "never"}   snapshots: ${s.stats.daily_token_snapshots.last_snapshot_at ?? "never"}`);
+    });
+
+  command
+    .command("aggregate")
+    .description("Aggregate rollups: tokens (per rig per day, or per seat), reviews (per seat per week), sessions (per rig)")
+    .argument("<kind>", "tokens | reviews | sessions")
+    .option("--by <grouping>", "For tokens: rig-day (default) or seat", "rig-day")
+    .option("--rig <name>", "Filter by rig name")
+    .option("--seat <name>", "Filter by seat name")
+    .option("--since <date>", "Window start (YYYY-MM-DD)")
+    .option("--until <date>", "Window end, inclusive (YYYY-MM-DD)")
+    .option("--limit <n>", "Maximum groups to return (default 200, max 500)")
+    .option("--json", "Output as JSON")
+    .action(async (kind: string, opts: AggOpts & { by: string }) => {
+      if (!["tokens", "reviews", "sessions"].includes(kind)) {
+        console.error(`Error: kind must be tokens, reviews, or sessions (got "${kind}").`);
+        process.exitCode = 1;
+        return;
+      }
+      const client = await getClient();
+      if (!client) return;
+      const params = filterParams(opts);
+      if (kind === "tokens") params.set("by", opts.by);
+      const response = await client.get<{ ok: boolean; rows?: Array<Record<string, unknown>>; truncated?: boolean; error?: string }>(`/api/fleet/aggregate/${kind}?${params.toString()}`, { timeoutMs: AGG_TIMEOUT_MS });
+      if (response.status >= 400) {
+        console.error(`Error: ${response.data.error ?? "Unknown error"}`);
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.json) {
+        console.log(JSON.stringify(response.data, null, 2));
+        return;
+      }
+      const rows = response.data.rows ?? [];
+      console.log(`Aggregate ${kind}${kind === "tokens" ? ` by ${opts.by}` : ""} (${rows.length} groups${response.data.truncated ? ", truncated" : ""})`);
+      console.log("─".repeat(100));
+      for (const r of rows) {
+        if (kind === "tokens" && opts.by === "seat") {
+          console.log(`  ${String(r.rig_name).padEnd(20)} ${String(r.seat_name).padEnd(20)} ${String(r.model).padEnd(20)} in ${fmt(r.input_tokens).padStart(14)}  out ${fmt(r.output_tokens).padStart(14)}  total ${fmt(r.total_tokens).padStart(14)}`);
+        } else if (kind === "tokens") {
+          console.log(`  ${String(r.day)}  ${String(r.rig_name).padEnd(20)} in ${fmt(r.input_tokens).padStart(14)}  out ${fmt(r.output_tokens).padStart(14)}  total ${fmt(r.total_tokens).padStart(14)}  seats ${fmt(r.seats)}`);
+        } else if (kind === "reviews") {
+          console.log(`  ${String(r.week_start).padEnd(12)} ${String(r.rig_name).padEnd(20)} ${String(r.seat_name).padEnd(20)} runs ${fmt(r.runs).padStart(5)}  MF:${fmt(r.must_fix)} S:${fmt(r.suggestion)} D:${fmt(r.dismissed)}`);
+        } else {
+          console.log(`  ${String(r.rig_name).padEnd(24)} sessions ${fmt(r.sessions).padStart(6)}  turns ${fmt(r.total_turns).padStart(8)}  in ${fmt(r.input_tokens).padStart(14)}  out ${fmt(r.output_tokens).padStart(14)}  escalations ${fmt(r.escalations)}`);
+        }
+      }
+    });
+
+  command
+    .command("dashboard")
+    .description("Fetch the fleet dashboard (self-contained HTML) and write it to a local file")
+    .option("--out <path>", "Output file path", "./fleet-dashboard.html")
+    .option("--rig <name>", "Filter by rig name")
+    .option("--since <date>", "Window start (YYYY-MM-DD)")
+    .option("--until <date>", "Window end, inclusive (YYYY-MM-DD)")
+    .action(async (opts: AggOpts & { out: string }) => {
+      const client = await getClient();
+      if (!client) return;
+      const qs = filterParams(opts).toString();
+      const response = await client.getText(`/api/fleet/dashboard${qs ? `?${qs}` : ""}`, { timeoutMs: AGG_TIMEOUT_MS });
+      if (response.status >= 400) {
+        let message = `HTTP ${response.status}`;
+        try { message = (JSON.parse(response.data) as { error?: string }).error ?? message; } catch { /* non-JSON body */ }
+        console.error(`Error: ${message}`);
+        process.exitCode = 1;
+        return;
+      }
+      const outPath = nodePath.resolve(opts.out);
+      writeFileSync(outPath, response.data, "utf-8");
+      console.log(outPath);
     });
 
   command

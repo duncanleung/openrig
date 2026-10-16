@@ -2,6 +2,8 @@ import { Hono } from "hono";
 import type { Database } from "better-sqlite3";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { FleetStore } from "../domain/fleet-store.js";
+import type { AggregateFilter } from "../domain/fleet-store.js";
+import { renderFleetDashboard } from "../domain/fleet-dashboard.js";
 import type {
   SessionDigestInput,
   ReviewRunInput,
@@ -189,6 +191,27 @@ function normalizeSnapshot(body: Record<string, unknown>): DailyTokenSnapshotInp
   };
 }
 
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Aggregate filters take date-only since/until. Stored timestamps mix `YYYY-MM-DD HH:MM:SS` and
+ * ISO `T...Z` forms, so a full timestamp would compare wrongly against some columns.
+ */
+function parseAggregateFilter(q: Record<string, string>): AggregateFilter | { error: string } {
+  const limit = parseIntParam(q.limit, { min: 1 });
+  if (limit === "invalid") return { error: "limit must be a positive integer." };
+  for (const k of ["since", "until"] as const) {
+    if (q[k] && !DATE_ONLY.test(q[k]!)) return { error: `${k} must be a date in YYYY-MM-DD form.` };
+  }
+  return {
+    rig: q.rig || undefined,
+    seat: q.seat || undefined,
+    since: q.since || undefined,
+    until: q.until || undefined,
+    limit,
+  };
+}
+
 export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
   const app = new Hono();
 
@@ -355,6 +378,50 @@ export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
   });
 
   app.route("/", writeApp);
+
+  // Aggregation + dashboard (RIG-80): read-only, registered before param routes.
+  const aggregateRoute = (path: string, run: (st: FleetStore, f: AggregateFilter, q: Record<string, string>) => unknown | { error: string }) => {
+    app.get(path, (c) => {
+      try {
+        const q = c.req.query();
+        const filter = parseAggregateFilter(q);
+        if ("error" in filter) return c.json({ ok: false, code: "invalid_field", error: filter.error }, 400);
+        const result = run(store(), filter, q);
+        if (result && typeof result === "object" && "error" in result) {
+          return c.json({ ok: false, code: "invalid_field", error: (result as { error: string }).error }, 400);
+        }
+        return c.json({ ok: true, ...(result as object) });
+      } catch (err) {
+        console.error(`[fleet-store] GET ${path} error:`, err instanceof Error ? err.message : String(err));
+        return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
+      }
+    });
+  };
+
+  aggregateRoute("/aggregate/tokens", (st, f, q) => {
+    const by = q.by || "rig-day";
+    if (by === "rig-day") return { by, ...st.tokensByRigDay(f) };
+    if (by === "seat") return { by, ...st.tokensBySeat(f) };
+    return { error: "by must be rig-day or seat." };
+  });
+  aggregateRoute("/aggregate/reviews", (st, f) => st.reviewsBySeatWeek(f));
+  aggregateRoute("/aggregate/sessions", (st, f) => st.sessionsByRig(f));
+  aggregateRoute("/summary", (st, f) => ({ summary: st.summary(f) }));
+
+  app.get("/dashboard", (c) => {
+    try {
+      const filter = parseAggregateFilter(c.req.query());
+      if ("error" in filter) return c.json({ ok: false, code: "invalid_field", error: filter.error }, 400);
+      const html = renderFleetDashboard(store().summary(filter), {
+        filters: { rig: filter.rig, seat: filter.seat, since: filter.since, until: filter.until },
+        generatedAt: new Date().toISOString(),
+      });
+      return c.html(html);
+    } catch (err) {
+      console.error("[fleet-store] GET /dashboard error:", err instanceof Error ? err.message : String(err));
+      return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
+    }
+  });
 
   app.get("/digests", (c) => {
     try {
