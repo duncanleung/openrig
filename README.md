@@ -46,6 +46,11 @@ GET /fleet/reviews
 GET /fleet/reviews/:traceId/findings
 GET /fleet/snapshots
 GET /fleet/stats
+GET /fleet/aggregate/tokens        # ?by=rig-day|seat (tokens, not dollars)
+GET /fleet/aggregate/reviews
+GET /fleet/aggregate/sessions
+GET /fleet/summary
+GET /fleet/dashboard              # self-contained HTML
 
 # CLI commands (same filters via flags, plus --json)
 rig fleet digests --rig my-rig --since 2026-10-01
@@ -53,6 +58,9 @@ rig fleet reviews --limit 10 --json
 rig fleet findings <traceId>
 rig fleet snapshots --seat dev-impl --since 2026-10-05
 rig fleet stats
+rig fleet summary --since 2026-10-01
+rig fleet aggregate tokens --by seat
+rig fleet dashboard --out ./fleet-dashboard.html   # see docs/reference/fleet-aggregation.md
 ```
 
 **Questions Fleet Analytics answers:**
