@@ -472,3 +472,37 @@ it("automatic reminder records retained custody and no delivered fire or input",
   await f.guard.set("a",true,"person","draft");await Promise.all([f.repo.drainPendingWakeIntents(),f.repo.drainPendingWakeIntents()]);
   expect(f.outbox.heldForNode("a").items.map(entry=>entry.outboxId)).toEqual([id]);expect(f.outbox.getById(id)).toMatchObject({body,deliveryState:"retained",deliveredAt:null});expect(f.writes).toEqual([]);f.db.close();
  });
+
+describe("hasWaiters probe (RIG-98)", () => {
+  it("is false for a lone holder, true while another caller is queued, and returns to zero", async () => {
+    const { db, guard } = fixture(); const gate = signal(); const seen: boolean[] = [];
+    const first = guard.operation("a", async () => { seen.push(guard.hasWaiters("a")); await gate.ready; seen.push(guard.hasWaiters("a")); });
+    const second = guard.operation("a", async () => { seen.push(guard.hasWaiters("a")); });
+    await new Promise(r => setTimeout(r, 0));
+    gate.release(); await Promise.all([first, second]);
+    expect(seen).toEqual([true, true, false]);
+    expect(guard.hasWaiters("a")).toBe(false);
+    await guard.operation("a", async () => { expect(guard.hasWaiters("a")).toBe(false); });
+    db.close();
+  });
+  it("is scoped to one node and false for an unknown name", async () => {
+    const { db, guard } = fixture(); const gate = signal();
+    const held = guard.operation("a", async () => { await gate.ready; });
+    const queued = guard.operation("a", async () => {});
+    expect(guard.hasWaiters("a")).toBe(true);
+    expect(guard.hasWaiters("b")).toBe(false);
+    expect(guard.hasWaiters("nope")).toBe(false);
+    gate.release(); await Promise.all([held, queued]); db.close();
+  });
+  it("decrements when the holder throws and keeps later callers serialized", async () => {
+    const { db, guard } = fixture(); const gate = signal(); const order: string[] = [];
+    const failing = guard.operation("a", async () => { await gate.ready; order.push("fail"); throw new Error("boom"); });
+    const next = guard.operation("a", async () => { order.push("next"); return guard.hasWaiters("a"); });
+    const failed = expect(failing).rejects.toThrow("boom");
+    gate.release(); await failed;
+    expect(await next).toBe(false);
+    expect(order).toEqual(["fail", "next"]);
+    expect(guard.hasWaiters("a")).toBe(false);
+    db.close();
+  });
+});
