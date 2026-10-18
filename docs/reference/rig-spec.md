@@ -409,6 +409,48 @@ directory's `CLAUDE.md`, including blocks written by other rigs.
 | `session_source` | object | no | — | Start the seat from an existing session: `fork` with `native_id`, `rebuild` with `artifact_set`, or `agent_image` with `image_name`. A Claude Code `fork` needs Claude Code 2.0.73 or later. Not valid on terminal members. |
 | `starter_ref` | object | no | — | `{ name }` of an agent starter (`^[a-zA-Z0-9][a-zA-Z0-9_-]*$`) whose files lead the seat's startup. Not valid on terminal members or with a fork. |
 | `startup` | StartupBlock | no | — | Member-level startup files and actions. Applied only to this member. |
+| `fallback` | object | no | — | Runtime fallback on provider usage limit. When the seat's provider pool is exhausted, the daemon hands the seat to an occupant on the fallback runtime. Fields are in [Runtime fallback](#runtime-fallback). A member without it behaves as before. |
+
+### Runtime fallback
+
+`fallback` lets a seat keep working when its provider hits a usage limit. Example:
+
+```yaml
+- id: reviewer
+  runtime: codex
+  fallback:
+    runtime: claude-code
+    model: claude-sonnet-4-6
+    on: [usage_limit]
+    swap_back: at_expiry
+```
+
+| Field | Type | Required | Meaning |
+|---|---|---|---|
+| `runtime` | string | yes | Runtime of the fallback occupant. Non-empty. |
+| `model` | string | no | Model for the fallback occupant. Non-empty when present. |
+| `on` | array | yes | Triggers. v1 accepts `usage_limit` only. Any other value fails `rig spec validate`. |
+| `swap_back` | string | yes | `at_expiry` or `manual`. No default in the spec. |
+
+How it runs:
+
+1. The wake ladder creates a new `usage-limit-blocker` for the seat's pool. If the node has a
+   `fallback` and is not already on fallback, the daemon starts a forward swap.
+2. The swap is a seat handover with source `rebuild`. The seat keeps its identity. Its runtime
+   changes to the fallback runtime. The runtime change and the provenance commit in one transaction.
+3. The daemon skips the swap when the node is already on fallback, when a swap is in flight for the
+   node, when the node has no fallback runtime, or when the pool expiry has already passed.
+4. When `usage_limit_expiry_fired` resolves the blocker, `swap_back: at_expiry` runs the reverse
+   handover to the original runtime. `swap_back: manual` sets the node to `swap_back_pending` and
+   emits `seat.runtime_fallback_swap_back_pending`. The daemon then runs the reverse handover
+   from that event.
+
+Events: `seat.runtime_fallback_entered`, `seat.runtime_fallback_swap_back_pending`,
+`seat.runtime_fallback_exited`. See [agent state taxonomy](agent-state-taxonomy.md#runtime-fallback-state).
+
+Limits in v1: Codex pools only (the only pool the daemon can derive), same host only, and no
+trigger other than `usage_limit`. `rig ps --nodes`, `rig seat status` and `rig provider status`
+do not show fallback state yet.
 
 ### Pi (`runtime: pi`)
 

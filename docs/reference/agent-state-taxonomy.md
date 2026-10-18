@@ -119,6 +119,22 @@ LIFECYCLE); see the
 - **Restore outcome:** `resumed`, `fresh-primed`, `awaiting-decision`, `attention_required`,
   `failed` (plus `rebuilt`, `operator_recovered` and the legacy `fresh`).
 
+### Runtime fallback state
+
+A node on runtime fallback has a stored `fallback_state`. It is a separate vocabulary and not an
+activity value. It is stored on the node row (migration 090), not derived at read time.
+
+- **`null`:** the seat runs on its declared runtime.
+- **`on_fallback`:** the seat runs on the fallback runtime. The node keeps the pool key, the
+  original runtime and the pool expiry.
+- **`swap_back_pending`:** the pool expired and the spec says `swap_back: manual`. The daemon
+  emits `seat.runtime_fallback_swap_back_pending` and then runs the reverse handover.
+
+The daemon clears all fallback columns in the same transaction as the reverse handover. Events:
+`seat.runtime_fallback_entered`, `seat.runtime_fallback_swap_back_pending`,
+`seat.runtime_fallback_exited` (`trigger`: `at_expiry` or `manual_operator`). No read surface
+shows this state yet. Spec: [rig-spec](rig-spec.md#runtime-fallback).
+
 ## Rejected oracles — dated receipts (2026-08-26), so nobody re-derives them expensively
 
 - **transcript-quiescence as an activity oracle: REJECTED.** omnigent's 1-second version
