@@ -873,6 +873,14 @@ Root: `rig`; declared option: `-V, --version`.
 | `rig seat clean <seat>` | — | `--reason <text>` **required**<br>`--operator <address>`<br>`--json` |
 | `rig seat set-resume-token <session>` | — | `--token-stdin`<br>`--reason <text>` **required**<br>`--json` |
 
+### runtime fallback (no command)
+
+Runtime fallback adds no command or option. It is a member property, `fallback:`, checked by
+`rig spec validate <path>`. The daemon runs the swaps by the same code path as `rig seat handover`
+and `rig handover`. Source: `packages/daemon/src/domain/runtime-fallback-service.ts`. Spec fields:
+[rig-spec](../reference/rig-spec.md#runtime-fallback). Fallback state is not yet shown by
+`rig ps --nodes`, `rig seat status` or `rig provider status`.
+
 ### handover
 
 | Invocation | Aliases | Declared options |
