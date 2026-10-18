@@ -1,7 +1,7 @@
 backlog:
-  source: linear
-  team: RIG
-  query_filter: "state:backlog"
+  source: obsidian
+  vault_path: /Users/duncanleung/Documents/obsidian-local-life-manager
+  project: openrig
   priority_floor: low
 
 topology:

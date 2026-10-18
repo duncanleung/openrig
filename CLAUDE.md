@@ -24,6 +24,20 @@ Conventions: `status:` frontmatter field (`proposed` / `accepted` / `superseded`
 **ADR directory:** `docs/decisions/`
 **Next number:** 0009
 
+## Issue Tracking
+
+Tickets are tracked in the Obsidian vault at `~/Documents/obsidian-local-life-manager/projects/openrig/tickets/`. Do NOT use Linear for ticket operations. Use the ticket CLI:
+
+```bash
+TICKET_CLI=~/Documents/obsidian-local-life-manager/_system/bin/ticket
+$TICKET_CLI list --project openrig --status backlog       # view backlog
+$TICKET_CLI show RIG-12 --json                             # read a ticket
+$TICKET_CLI update RIG-12 --status in-progress             # transition state
+$TICKET_CLI list --ranked                                  # priority queue
+```
+
+Ticket IDs use the `RIG-N` format (e.g., `RIG-12`, `RIG-99`). The CLI enforces atomic ID allocation and validates enum values. Do not hand-edit ticket frontmatter.
+
 ## Code review guardrails
 
 - **Always use `/code-review-dual` over `/code-review`.** The full pre-merge pipeline is: PR → `/code-review-dual` → `/code-review-validate-findings` → fixes → green checks → merge. Never use single-stack `/code-review` as a substitute.

@@ -18,9 +18,9 @@ a threshold.
 
 A hosted classifier in the merge path creates three risks. First, a wrong high score can merge
 unsafe code. Second, PR metadata leaves the machine. Third, the vendor API is new: its SDK is
-pre-1.0, we have no calibration data for our PRs, and we have not verified two facts: whether the
-API accepts the model id `jev-1.13` (the vendor docs show `jev-latest` and report versioned ids such
-as `jev-1.13.0`), and the vendor's data-retention terms.
+pre-1.0, we have no calibration data for our PRs, and the vendor's data-retention terms are
+unverified. (The model id was verified: `jev-1.13` is rejected; `jev-latest`, a floating alias
+resolving to `jev-1.13.0`, works. RIG-99 PR1 updated the default.)
 
 ## Decision
 
@@ -63,12 +63,15 @@ dependency surface unchanged and keeps failure handling in one small function.
 - Each classification call sends path names to a third party. Repos with sensitive path names need
   review before the skill calls the classifier.
 - The skill-side wiring is a separate ticket. This change adds no route and no startup wiring.
-- The default model id `jev-1.13` is a config value (`jev.model` in `.factory.yml`). If the API
-  rejects it, the client returns `null` and the factory continues unchanged.
+- The default model id is `jev-latest` (a floating alias that resolves to a versioned id such as
+  `jev-1.13.0` server-side). The API rejected the originally planned `jev-1.13`; `jev-latest` was
+  verified with a live call (RIG-99 PR1, `d6814b38`). The config value `jev.model` in `.factory.yml`
+  overrides the code default. If the API rejects the configured model, the client returns `null` and
+  the factory continues unchanged.
 
 ## Revisit Triggers
 
 - Calibration data exists that compares verdicts to human merge decisions on at least a few dozen PRs.
 - The vendor retention terms are verified, or they change.
-- The API rejects `jev-1.13`, or the vendor changes the response shape or releases a stable SDK.
+- The vendor changes the response shape, drops the `jev-latest` alias, or releases a stable SDK.
 - Someone proposes sending more than paths and counts to the vendor.
