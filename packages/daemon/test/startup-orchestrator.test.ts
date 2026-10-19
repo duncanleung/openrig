@@ -811,6 +811,89 @@ describe("StartupOrchestrator", () => {
     expect(preloadDeliveries).toBe(1);
   });
 
+  // RIG-109: bundle lookup must use the resolved hint. A persisted file with the literal
+  // "auto" hint and a non-.md path resolves to send_text, so it is a bundle candidate.
+  // Reading the raw hint skipped it: the bundle went to a later literal send_text file,
+  // or to none, and the auto file was delivered as a separate turn.
+  describe("bundle lookup uses the resolved hint (RIG-109)", () => {
+    const autoFile = (path: string, ownerRoot = "/rig"): ResolvedStartupFile => ({
+      path, absolutePath: `${ownerRoot}/${path}`, ownerRoot, deliveryHint: "auto", required: true, appliesOn: ["fresh_start", "restore"],
+    });
+    const literalFile = (path: string): ResolvedStartupFile => ({
+      path, absolutePath: `/rig/${path}`, ownerRoot: "/rig", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start", "restore"],
+    });
+    const contents: Record<string, string> = {
+      "/rig/first-prompt.txt": "AUTO-FIRST content",
+      "/rig/second-prompt.txt": "LITERAL-SECOND content",
+    };
+    const readFile = (p: string) => contents[p] ?? "";
+
+    function deliveredPaths(adapter: RuntimeAdapter): string[] {
+      return (adapter.deliverStartup as ReturnType<typeof vi.fn>).mock.calls
+        .flatMap((c) => (c[0] as ResolvedStartupFile[]).map((f) => f.path));
+    }
+
+    it("fresh start: an auto file that resolves to send_text is bundled first, in order", async () => {
+      const seed = seedSession();
+      const adapter = mockAdapter();
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const orch = createOrchestrator({ tmux: mockTmux({ sendText }), readFile });
+      const result = await orch.startNode(makeInput(seed, {
+        adapter,
+        resolvedStartupFiles: [autoFile("first-prompt.txt"), literalFile("second-prompt.txt")],
+        startupActions: [makeIdentityAction()],
+        isRestore: false,
+      }));
+      expect(result.ok).toBe(true);
+
+      const prompts = sendText.mock.calls.map((c) => (c as unknown as [string, string])[1]);
+      const identityPrompt = prompts.find((t) => t.includes(makeIdentityAction().value))!;
+      expect(identityPrompt).toContain("AUTO-FIRST content");
+      expect(identityPrompt).not.toContain("LITERAL-SECOND content");
+      // The bundled file is not delivered a second time; the other one still is.
+      expect(deliveredPaths(adapter)).toEqual(["second-prompt.txt"]);
+    });
+
+    it("restore: an auto file that resolves to send_text is bundled behind the preload", async () => {
+      const seed = seedSession();
+      const adapter = mockAdapter();
+      const PRELOAD = "BEFORE you do anything else, load your skills.";
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const orch = createOrchestrator({ tmux: mockTmux({ sendText }), readFile });
+      const result = await orch.startNode(makeInput(seed, {
+        adapter,
+        resolvedStartupFiles: [autoFile("first-prompt.txt"), literalFile("second-prompt.txt")],
+        startupActions: [makeAction({ type: "send_text", value: PRELOAD, phase: "after_ready", appliesOn: ["fresh_start", "restore"], idempotent: true })],
+        isRestore: true,
+        resumeToken: "codex-session-abc",
+      }));
+      expect(result.ok).toBe(true);
+
+      const prompts = sendText.mock.calls.map((c) => (c as unknown as [string, string])[1]);
+      const preloadPrompt = prompts.find((t) => t.includes(PRELOAD))!;
+      expect(preloadPrompt).toContain("AUTO-FIRST content");
+      expect(preloadPrompt.indexOf(PRELOAD)).toBeLessThan(preloadPrompt.indexOf("AUTO-FIRST content"));
+      expect(preloadPrompt).not.toContain("LITERAL-SECOND content");
+      expect(deliveredPaths(adapter)).toEqual(["second-prompt.txt"]);
+    });
+
+    it("an auto file that resolves to guidance_merge is not a bundle candidate", async () => {
+      const seed = seedSession();
+      const adapter = mockAdapter();
+      const sendText = vi.fn(async () => ({ ok: true as const }));
+      const orch = createOrchestrator({ tmux: mockTmux({ sendText }), readFile: () => "GUIDANCE content" });
+      await orch.startNode(makeInput(seed, {
+        adapter,
+        resolvedStartupFiles: [autoFile("guidance/role.md")],
+        startupActions: [makeIdentityAction()],
+        isRestore: false,
+      }));
+      const prompts = sendText.mock.calls.map((c) => (c as unknown as [string, string])[1]);
+      const identityPrompt = prompts.find((t) => t.includes(makeIdentityAction().value))!;
+      expect(identityPrompt).not.toContain("GUIDANCE content");
+    });
+  });
+
   it("sends the identity prompt first when restore falls back to a fresh launch", async () => {
     const seed = seedSession();
     const sendText = vi.fn(async () => ({ ok: true as const }));
