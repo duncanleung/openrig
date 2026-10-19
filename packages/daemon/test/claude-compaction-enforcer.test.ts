@@ -792,6 +792,11 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls[4]![1]).toContain("Required items are your restore map's ranked entries above your restore class's tier line");
     expect(send.mock.calls[4]![1]).toContain("the session JSONL stay lookup-only");
     expect(send.mock.calls[4]![1]).toContain("Read every required item that is not FULL in full now");
+    // RIG-117: the report lists exceptions only (count plus non-FULL items), not the full table.
+    expect(send.mock.calls[4]![1]).toContain("report only exceptions, not the full table");
+    expect(send.mock.calls[4]![1]).toContain("Do not list items that were FULL");
+    expect(send.mock.calls[4]![1]).toContain("A named gap");
+    expect(send.mock.calls[4]![1]).not.toContain("report the final read-depth table");
     expect(send.mock.calls[4]![1]).not.toContain("Do not optimize for token conservation");
     expect(send.mock.calls[3]![1]).toContain("read your newest restore map and use the restore packet as a lookup");
     expect(send.mock.calls[3]![1]).not.toContain("read the restore packet files");

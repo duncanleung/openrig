@@ -351,6 +351,16 @@ it('preparation contract: prompt qualifies later refusal and the shipped skill f
  expect(skill).toContain('Only when none names a path');
 });
 
+it('restore skill (RIG-117): previous map is an optional entry and the constraint audit reports one compact line',()=>{
+ const skill=readFileSync(new URL('../assets/plugins/openrig-core/skills/claude-compaction-restore/SKILL.md',import.meta.url),'utf8');
+ expect(skill).toContain('The previous map and its `RESTORED` note are optional entries.');
+ expect(skill).toContain('Step 6 still names');
+ expect(skill).toContain('Constraint audit: <N> in force, <N> CONFIRMED');
+ expect(skill).toContain('Run the audit in full, one row at a time');
+ // The safety rows stay: the audit still runs in full and MISSING still forces a re-read.
+ expect(skill).toContain('A MISSING row means you');
+});
+
 it('preparation receipt: unknown activity at the final short send is not an unsent refusal',async()=>{
  const f=fixture(10_000);f.onSleep(async()=>{stageMap(f);});
  const wait=f.transport.waitUntilIdle.bind(f.transport);
