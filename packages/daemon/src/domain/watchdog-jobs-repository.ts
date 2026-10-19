@@ -44,6 +44,10 @@ export const PHASE_D_POLICIES = [
   // RIG-88 — recurring ticket-factory backlog poll. Injected via additionalPolicies; the
   // policy only wakes the controller, which polls in a detached single-flight worker.
   "ticket-factory-poll",
+  // RIG-118 — per-seat watch of one managed compaction attempt (marker_pending ->
+  // delivered -> acknowledged). Registered by the enforcer's onCompactSent; injected via
+  // additionalPolicies like parked-owner-consumer.
+  "compaction-lifecycle",
 ] as const;
 
 /** @deprecated since Phase D — use PHASE_D_POLICIES. */

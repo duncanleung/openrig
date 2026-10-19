@@ -15,7 +15,7 @@ import { ClaudeCompactionEnforcer as ActualEnforcer, buildPostCompactRestoreProm
 import type { SessionTransport } from "../src/domain/session-transport.js";
 import type { ClaudeCompactionPolicy, SettingsStore } from "../src/domain/user-settings/settings-store.js";
 
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 const fixtureHomes: string[] = [];
@@ -745,6 +745,51 @@ describe("ClaudeCompactionEnforcer", () => {
     expect(send.mock.calls[3]![1]).toContain("Please respond to this normal user message now");
     expect(send.mock.calls[4]![1]).toContain("/tmp/openrig-test-home/compaction/restore-pending/claude-seat@rig.json");
     expect(send.mock.calls[4]![1]).toContain("/tmp/claude.jsonl");
+  });
+
+  // RIG-118: the daemon watches one managed attempt. The enforcer reports /compact sent and
+  // stamps restoreRequestSentAt on the seat's marker when the restore request goes out.
+  it("reports compact-sent and stamps restoreRequestSentAt on the marker at the restore prompt", async () => {
+    const home = mkdtempSync(join(tmpdir(), "rig118-enforcer-"));
+    fixtureHomes.push(home);
+    const markerFile = join(home, "compaction", "restore-pending", "claude-seat@rig.json");
+    mkdirSync(dirname(markerFile), { recursive: true });
+    writeFileSync(markerFile, `${JSON.stringify({ version: 1, createdAt: "2026-10-19T23:00:00.000Z", sessionName: "claude-seat@rig" })}\n`);
+    const onCompactSent = vi.fn();
+    const { transport } = makeSessionTransport();
+    const enforcer = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), transport, {
+      openrigHome: home,
+      onCompactSent,
+    });
+    const tick = (usedPercentage: number) => enforcer.maybeAutoCompact({ sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage });
+
+    await tick(95); // preparation turn
+    await tick(95); // /compact
+    expect(onCompactSent).toHaveBeenCalledTimes(1);
+    const info = onCompactSent.mock.calls[0]![0];
+    expect(info.sessionName).toBe("claude-seat@rig");
+    expect(info.mapPath).toMatch(/RESTORE-MAP\.md$/);
+    expect(typeof info.attemptId).toBe("string");
+    expect(Number.isNaN(Date.parse(info.startedAt))).toBe(false);
+    expect(JSON.parse(readFileSync(markerFile, "utf8")).restoreRequestSentAt).toBeUndefined();
+
+    await tick(0); // turn boundary: still no restore request
+    expect(JSON.parse(readFileSync(markerFile, "utf8")).restoreRequestSentAt).toBeUndefined();
+    await tick(0); // restore request
+    const marker = JSON.parse(readFileSync(markerFile, "utf8"));
+    expect(Number.isNaN(Date.parse(marker.restoreRequestSentAt))).toBe(false);
+    expect(marker.sessionName).toBe("claude-seat@rig"); // the writer's fields are kept
+  });
+
+  it("a throwing onCompactSent never blocks the compaction", async () => {
+    const { transport } = makeSessionTransport();
+    const enforcer = new ClaudeCompactionEnforcer(makeSettingsStore(POLICY_ENABLED_AT_80), transport, {
+      openrigHome: "/tmp/openrig-test-home",
+      onCompactSent: () => { throw new Error("watchdog registration failed"); },
+    });
+    const tick = (usedPercentage: number) => enforcer.maybeAutoCompact({ sessionName: "claude-seat@rig", runtime: "claude-code", usedPercentage });
+    await tick(95);
+    expect(await tick(95)).toEqual({ triggered: true });
   });
 
   it("post-compact compliance prompt follows the restore prompt and enforces read-depth audit language", async () => {
