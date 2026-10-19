@@ -163,14 +163,21 @@ You are about to lose every connection you have built. Spend this turn making th
      - the path;
      - the exact part to read (a heading, a line range, or a JSONL range found with `grep -n`), not the
        whole file unless the whole file is the point;
-     - its approximate size (bytes ÷ 4 ≈ tokens; `wc -c`);
+     - its approximate size (bytes ÷ 4 ≈ tokens; `wc -c`). This is a file-size estimate. Real context
+       costs about 1.7 to 2 times it, because of line numbers on reads, repeated reads, tool output and
+       your own reasoning;
      - one line on why it matters.
+   - **Skills are not read entries.** Skill files (`~/.claude/skills/*/SKILL.md`, plugin skills) load on
+     demand through the Skill tool. Reading one during restore costs context for a skill you may never use.
+     List each relevant skill as one line: its name, its purpose, and when the restored self will need it.
+     Never give its file path as a read entry.
    - **The first entry** is this map's own `## Standing Directives` section. It is always Tier 1, whatever
      the class, and the post-restore audit counts it as a required item.
    - **The second entry** is the post-compaction world profile, with its size from
      `rig context profile … --json` (`totalEstimatedTokens`).
    - **Tier lines:** keep a running bytes ÷ 4 total, draw the Tier 1 line at about 50k (about 100k of real
-     context), and continue to about 100k for Tier 2 (about 200k real).
+     context), and continue to about 100k for Tier 2 (about 200k real). The running total is the file-size
+     estimate, so real context lands at about twice the number you write on the line.
    - **Rank for connections.** Prefer the entry that connects the most other things you need, and choose a
      section that explains how things fit over a long file of detail you can look up later.
 6. **Link the chain.** Name the previous restore map (and its `RESTORED` note, if one exists) so a later
