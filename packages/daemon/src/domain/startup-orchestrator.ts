@@ -485,7 +485,7 @@ export class StartupOrchestrator {
     const consumedActions = new Set<StartupAction>();
     let challengeOnlyPrompt: string | null = null;
     if (continuityOutcome === "fresh" && identityAction) {
-      const initialPrompt = await this.deliverInitialSessionPrompt(deliveryInput, identityAction, postLaunchFiles, challenge?.promptBlock ?? null, input.includeDurableObligations);
+      const initialPrompt = await this.deliverInitialSessionPrompt(deliveryInput, identityAction, postLaunchFiles, deliveryHintOf, challenge?.promptBlock ?? null, input.includeDurableObligations);
       if (!initialPrompt.ok) {
         errors.push(initialPrompt.error);
         return this.fail(input, "failed", errors);
@@ -528,7 +528,7 @@ export class StartupOrchestrator {
           !(input.isRestore && !a.idempotent),
       );
       if (preloadActions.length > 0) {
-        const preload = await this.deliverRestorePreloadPrompt(deliveryInput, preloadActions, postLaunchFiles);
+        const preload = await this.deliverRestorePreloadPrompt(deliveryInput, preloadActions, postLaunchFiles, deliveryHintOf);
         if (!preload.ok) {
           errors.push(preload.error);
           return this.fail(input, "failed", errors);
@@ -785,6 +785,7 @@ export class StartupOrchestrator {
     input: StartupDeliveryInput,
     identityAction: StartupAction,
     postLaunchFiles: ResolvedStartupFile[],
+    hintOf: (file: ResolvedStartupFile) => ConcreteDeliveryHint,
     challengeBlock: string | null,
     includeDurableObligations = false,
   ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[]; bundledFile: ResolvedStartupFile | null } | { ok: false; error: string }> {
@@ -793,7 +794,7 @@ export class StartupOrchestrator {
       return { ok: false, error: "No tmux session for the initial session identity prompt" };
     }
 
-    const firstSendTextIndex = postLaunchFiles.findIndex((file) => file.deliveryHint === "send_text");
+    const firstSendTextIndex = postLaunchFiles.findIndex((file) => hintOf(file) === "send_text");
     let prompt = identityAction.value;
     let remainingFiles = postLaunchFiles;
     let bundledFile: ResolvedStartupFile | null = null;
@@ -841,6 +842,7 @@ export class StartupOrchestrator {
     input: StartupDeliveryInput,
     preloadActions: StartupAction[],
     postLaunchFiles: ResolvedStartupFile[],
+    hintOf: (file: ResolvedStartupFile) => ConcreteDeliveryHint,
   ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[]; bundledFile: ResolvedStartupFile | null } | { ok: false; error: string }> {
     const { binding } = input;
     if (!binding.tmuxSession) {
@@ -851,7 +853,7 @@ export class StartupOrchestrator {
     let remainingFiles = postLaunchFiles;
     let bundledFile: ResolvedStartupFile | null = null;
 
-    const firstSendTextIndex = postLaunchFiles.findIndex((file) => file.deliveryHint === "send_text");
+    const firstSendTextIndex = postLaunchFiles.findIndex((file) => hintOf(file) === "send_text");
     if (firstSendTextIndex !== -1) {
       const firstSendText = postLaunchFiles[firstSendTextIndex]!;
       try {
