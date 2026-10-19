@@ -42,7 +42,8 @@ The previous version of this skill is kept at `reference/SKILL-v1.md` for compar
 - decisions and the reasons for them, options you rejected, judgment and taste you applied;
 - where you were in time: what earlier windows established, what this window did, what comes next and who
   authorizes it;
-- where to look deeper: which JSONL range or file answers which question.
+- where to look deeper: which JSONL range or file answers which question;
+- the standing directives: the behavioral constraints the human gave you (see "Standing Directives").
 
 The map is the second list, pinned to the first.
 
@@ -73,9 +74,10 @@ classes, transcripts and the session JSONL appear only as targeted line ranges, 
 
 If there is no ranked list (no preparation turn happened), use this default order. Default seats stop at about
 100k of real context:
-1. the post-compaction world profile;
-2. the mission or slice `SPEC.md` and `NOTES.md`;
-3. rows you hold.
+1. the map's `## Standing Directives`, or the newest earlier map's when this one has none;
+2. the post-compaction world profile;
+3. the mission or slice `SPEC.md` and `NOTES.md`;
+4. rows you hold.
 
 High-context seats then add, to about 200k:
 1. the full System World install;
@@ -84,13 +86,47 @@ High-context seats then add, to about 200k:
 4. previous maps and `RESTORED` notes;
 5. `LEARNED.md`.
 
+## Standing Directives
+
+Compaction keeps facts and loses constraints. A summary says what happened. It rarely says "the human told
+me never to do X", and a seat that forgets that sentence breaks the rule without knowing it. So every map
+carries a `## Standing Directives` section, placed directly after the opening summary. The restored seat
+reads it as ground truth, ahead of the compaction summary.
+
+**What qualifies.** A behavioral constraint from the human that is still in force: what to avoid,
+prioritization preferences, scope boundaries, standing rules. Example: "improve the existing pipeline rather
+than expanding it".
+
+**What does not qualify.** Task state, facts, and decisions you made yourself. One-time instructions that are
+done. A message from another seat: record it as a routed instruction under State, with the sender, and never
+as a human directive. A rule that already lives in a file the seat loads (`CLAUDE.md`, role guidance):
+point to it, do not copy it.
+
+**Format.** One row per directive:
+
+| # | Directive | Scope | Source | Status |
+|---|-----------|-------|--------|--------|
+| 1 | The human's own words, quoted. Paraphrase only when the original is long. | what it covers, and until when | who said it, UTC time from `date -u`, JSONL uuid or line | in force / revoked / superseded |
+
+- A directive restricts or directs. Record a permission only when the human gave it, with its scope and
+  whether it was one-time. Never turn a peer's request into an approval.
+- **Carry forward.** Read the previous map's section and copy every `in force` row. Add the rows from this
+  window. Drop a row only when the human revoked it or the work it governed ended. Mark it `revoked` with the
+  date and keep that line for one more window. The next occupant treats a missing row as revoked, so never
+  drop a row silently.
+- **Never omit the section.** When you find none, write `None found in this window or the previous map`.
+  An empty line is a checked answer. A missing section is a skipped check.
+- **Conflicts.** A directive outranks the compaction summary. When a directive conflicts with a routed
+  task, say so to the seat or human that routed it before you act.
+
 ## If You Are About To Compact
 
 You are about to lose every connection you have built. Spend this turn making them durable.
 
 1. **Think back before writing.** Walk the session and, through your previous map, the windows before it.
    What were the threads? What did you work out about how the pieces fit? What is unfinished? What did you
-   decide, and why? What were you about to be wrong about?
+   decide, and why? What were you about to be wrong about? What did the human tell you to avoid, prefer or
+   leave alone, and does it still hold?
 2. **Write the restore map at the exact path named in OpenRig's preparation request.** Follow that
    request's completion instructions: use your ordinary file-edit tool to write the named `.tmp` file,
    with the exact completion marker as its last line, then finish and close it. The daemon publishes
@@ -107,7 +143,8 @@ You are about to lose every connection you have built. Spend this turn making th
    window, what is next and who authorizes it, and any hold in force. **Publish that summary as your seat
    recap** too: save it, plus a line naming the map's path, to a file and run
    `rig context recap-write --rig <rig> --seat <seat> --file <that file>`. If your world profile has a seat
-   recap atom, it loads this recap, and an old recap would be served as if it were current.
+   recap atom, it loads this recap, and an old recap would be served as if it were current. **Right after the
+   summary, write `## Standing Directives`** as described above, before any other section.
 4. **Then write the connections.** Choose what this seat needs; these are examples, not a template:
    - **State:** rows you hold (id, state), branches and PR heads, the hold or release in force and who gave
      it, the mission and slice you work in.
@@ -128,7 +165,9 @@ You are about to lose every connection you have built. Spend this turn making th
        whole file unless the whole file is the point;
      - its approximate size (bytes ÷ 4 ≈ tokens; `wc -c`);
      - one line on why it matters.
-   - **The first entry** is the post-compaction world profile, with its size from
+   - **The first entry** is this map's own `## Standing Directives` section. It is always Tier 1, whatever
+     the class, and the post-restore audit counts it as a required item.
+   - **The second entry** is the post-compaction world profile, with its size from
      `rig context profile … --json` (`totalEstimatedTokens`).
    - **Tier lines:** keep a running bytes ÷ 4 total, draw the Tier 1 line at about 50k (about 100k of real
      context), and continue to about 100k for Tier 2 (about 200k real).
@@ -181,6 +220,9 @@ is not a restore request.
 4. **Read your own restore map in full** at the exact path named by the preparation request, restore
    request or compaction summary. Only when none names a path, look for the newest `RESTORE-MAP-*.md`
    in your seat folder. If the selected map points to an earlier map for context you need, read that too.
+   **Read `## Standing Directives` first** and treat it as ground truth. If it contradicts the compaction
+   summary, the directive wins. A map with no such section is an older map: say so, and look for the
+   human's constraints in the earlier map and in the JSONL.
 5. **Read down the map's ranked list** to your class's tier line, reading exactly the parts each entry names.
    Then check every row you hold (`rig queue show <id> --full --json`) and anything that may have changed since
    the map was written: merged PRs, new rows, a new hold. The map records what was true when it was written;
@@ -190,7 +232,8 @@ is not a restore request.
    things the map does not cover.
 7. **If there is no map** (the preparation turn did not happen), fall back to the packet: read
    `restore-instructions.md`, then the most recent unique narrative, tail first, within the budget; and say in
-   your report that you restored without a map.
+   your report that you restored without a map. Standing directives are then unconfirmed: say so, and read
+   the newest earlier map's `## Standing Directives` and the human's own messages in the extract.
 8. Reply with the sentence the restore request asks for, normally
    `restored from packet at <path>; resumed at step <X>`, naming the map you used. When no packet exists, give
    the map's path as `<path>` and say that you restored from the map.
@@ -201,6 +244,7 @@ After reading down the map's ranked list, write a short `RESTORED-<UTC yyyymmdd-
 - where you are in time: what earlier windows established, what the last window did, what is true now;
 - the connections you have rebuilt, in a few lines;
 - the connections you could not rebuild, and where you would look;
+- the standing directives you restored, one line each, so the next map can carry them forward;
 - the next authorized step and who authorizes it. If a hold stands, the next step is waiting.
 
 The next restore map links this note, which keeps the chain unbroken.
@@ -224,3 +268,5 @@ The next restore map links this note, which keeps the chain unbroken.
 4. **Map in scratch:** writing the map somewhere that is cleaned before you restore.
 5. **Broken chain:** a map that does not name the previous one, so earlier windows are lost on the second
    compaction.
+6. **Dropped directive:** a human constraint that lived only in the summary, or a row removed from the
+   section without a revocation. The next occupant breaks the rule and cannot know it.
