@@ -898,7 +898,9 @@ export class ClaudeCompactionEnforcer {
         occupantGeneration: attempt.occupantGeneration,
         startedAt: new Date(this.now()).toISOString(),
       });
-    } catch { /* lifecycle observation is best-effort; it never blocks a compaction */ }
+    } catch (err) {
+      console.warn(`[compaction-enforcer] onCompactSent failed for ${input.sessionName}: ${err instanceof Error ? err.message : err}`);
+    }
     this.lastAutoCompactAt.set(input.sessionName, this.now());
     this.triggeredAboveThreshold.add(input.sessionName);
     this.pendingPostCompactRestore.set(input.sessionName, "turn_boundary");
