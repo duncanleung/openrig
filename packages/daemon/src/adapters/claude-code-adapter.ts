@@ -17,7 +17,7 @@ import { observeClaudePaneProcess, type ClaudeLaunchedProcess, type NativeProces
 import { mergeManagedBlock, DEFAULT_CLAUDE_MANAGED_BLOCK_FILE, type ClaudeManagedBlockFile } from "../domain/managed-blocks.js";
 import { claudeResumeLaunchEnv, claudeResumeLaunchPrefix } from "./claude-resume-launch.js";
 import { shellQuote } from "./shell-quote.js";
-import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH, type ActivityRelayEvent } from "../domain/claude-activity-hooks.js";
+import { validateClaudeActivityHookDelivery, claudeActivityRelayPath, CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH, claudeCompactionBridgePath, CLAUDE_COMPACTION_BRIDGE_RELATIVE_PATH, deriveBridgeEvents, type ActivityRelayEvent } from "../domain/claude-activity-hooks.js";
 import { isFilesystemRoot } from "../domain/cwd-resolution.js";
 import { observeClaudePermission } from "../domain/permission-drift.js";
 import { unresolvedClaudePermissionModes } from "../domain/native-permission-selection.js";
@@ -64,6 +64,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   readonly claudeManagedLaunch?: ClaudeManagedLaunch;
   private activityRelayPath: string | null;
   private claudeHooksManifestPath: string | null;
+  private compactionBridgePath: string | null;
   /** P20 — called after a projected file is written to a target, so the manifest
    *  records what we last wrote (→ operator-vs-stale discrimination). No-op by default. */
   private recordProjection: (targetPath: string, content: string) => void;
@@ -84,6 +85,8 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     /** DI source of the canonical claude.json hooks manifest — the event vocabulary
      *  is derived (filtered to relay events) from it, not a parallel constant. */
     claudeHooksManifestPath?: string;
+    /** DI source of the compaction-restore-bridge.cjs asset (RIG-116). */
+    compactionBridgePath?: string;
     /** P20 — record-at-apply hook (startup wires it to the projection manifest store).
      *  Absent → no-op (the manifest stays empty → discrimination safe-degrades to P17). */
     recordProjection?: (targetPath: string, content: string) => void;
@@ -100,6 +103,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     this.claudeManagedLaunch = deps.claudeManagedLaunch;
     this.activityRelayPath = deps.activityRelayPath ?? null;
     this.claudeHooksManifestPath = deps.claudeHooksManifestPath ?? null;
+    this.compactionBridgePath = deps.compactionBridgePath ?? null;
     this.recordProjection = deps.recordProjection ?? (() => {});
   }
 
@@ -156,6 +160,13 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         : "";
       console.error(`[openrig] claude activity-hook reconcile warning${atRoot}: ${(err as Error).message}`);
       activityOutcome = { changed: false, delivered: false, sourceMissing: false, manifestUnavailable: false, settingsUnparseable: false };
+    }
+    // RIG-116: the compaction restore bridge rides the same enable flag and settings file.
+    // A bridge failure only warns; it never changes the activity-hook outcome.
+    try {
+      this.reconcileClaudeCompactionBridgeHooks(binding.cwd, activityEntries.length > 0);
+    } catch (err) {
+      console.error(`[openrig] claude compaction-bridge hook reconcile warning: ${(err as Error).message}`);
     }
     // Never claim a resource as PROJECTED when delivery could not happen (missing
     // relay source or a fail-closed malformed settings file): demote to skipped so
@@ -975,6 +986,76 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
   }
 
   /**
+   * RIG-116: register the compaction restore bridge directly in `.claude/settings.local.json`
+   * (SessionStart(compact), UserPromptSubmit, PostCompact), mirroring the activity-relay
+   * delivery above. Without this the bridge is reachable only through the openrig-core
+   * plugin hooks, and the plugin is not loaded, so restore markers were written and never read.
+   *
+   * Direct registration bypasses the plugin loader (shared:openrig-core not in
+   * installed_plugins.json). Remove these entries when the plugin loader is fixed.
+   *
+   * PreCompact (the marker WRITER) is deliberately not registered here. It stays in the plugin
+   * manifest (pinned by openrig-core-plugin.test.ts) and in the operator's settings.json; if the
+   * plugin loader is fixed while settings.json still registers it, the writer fires twice. Drop
+   * one of the two at that point.
+   *
+   * Only the non-managed events are touched; managed compaction does not use this bridge.
+   * Enable only deletes nothing when the source or manifest is unavailable (existing entries
+   * are preserved). Ownership is the EXACT `node <quoted bridge path>` command shape.
+   */
+  private reconcileClaudeCompactionBridgeHooks(cwd: string, enabled: boolean): void {
+    const bridgeDest = claudeCompactionBridgePath(this.stateDir ?? undefined);
+    const ownedCmd = `node ${shellQuote(bridgeDest)}`;
+    const settingsPath = nodePath.join(cwd, ".claude", "settings.local.json");
+    const events = deriveBridgeEvents(this.fs, this.claudeHooksManifestPath);
+    const sourceOk = !!this.compactionBridgePath && this.fs.exists(this.compactionBridgePath);
+    if (enabled && (!sourceOk || events.length === 0)) return;
+    if (!enabled && !this.fs.exists(settingsPath)) return;
+
+    const settings = this.fs.exists(settingsPath) ? this.readJsonObjectStrict(settingsPath) : {};
+    const hooks = this.readJsonObjectField(settings, "hooks");
+
+    let changed = false;
+    for (const event of Object.keys(hooks)) {
+      const groups = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : null;
+      if (!groups) continue;
+      const keptGroups: unknown[] = [];
+      for (const group of groups) {
+        if (!isPlainObject(group) || !Array.isArray(group["hooks"])) { keptGroups.push(group); continue; }
+        const groupHooks = group["hooks"] as unknown[];
+        const keptHooks = groupHooks.filter((h) => !isOwnedBridgeCommand(hookCommand(h)));
+        if (keptHooks.length !== groupHooks.length) changed = true;
+        if (keptHooks.length === 0) continue;
+        keptGroups.push({ ...group, hooks: keptHooks });
+      }
+      if (keptGroups.length === 0) delete hooks[event];
+      else hooks[event] = keptGroups;
+    }
+
+    if (enabled) {
+      this.fs.mkdirp(nodePath.dirname(bridgeDest));
+      if (!this.fs.exists(bridgeDest) || this.fs.readFile(bridgeDest) !== this.fs.readFile(this.compactionBridgePath!)) {
+        this.fs.copyFile(this.compactionBridgePath!, bridgeDest);
+      }
+      this.preserveMode(this.compactionBridgePath!, bridgeDest);
+      for (const { event, matcher, timeout } of events) {
+        const groups = Array.isArray(hooks[event]) ? (hooks[event] as unknown[]) : [];
+        const hook: Record<string, unknown> = { type: "command", command: ownedCmd };
+        if (typeof timeout === "number") hook["timeout"] = timeout;
+        groups.push({ ...(matcher !== undefined ? { matcher } : {}), hooks: [hook] });
+        hooks[event] = groups;
+        changed = true;
+      }
+    }
+
+    if (!changed) return;
+    if (Object.keys(hooks).length > 0) settings["hooks"] = hooks;
+    else delete settings["hooks"];
+    this.fs.mkdirp(nodePath.dirname(settingsPath));
+    this.fs.writeFile(settingsPath, JSON.stringify(settings, null, 2));
+  }
+
+  /**
    * Check whether the global ~/.claude/settings.json already carries an
    * owned relay hook for every derived relay event. When it does, a project-level
    * copy is redundant (Claude Code merges hooks from all tiers) and fragile
@@ -1059,6 +1140,16 @@ function isOwnedRelayCommand(cmd: string | undefined): boolean {
   if (shellQuote(decoded) !== arg) return false;
   return decoded.endsWith(LEGACY_OWNED_RELAY_SUFFIX)
     || decoded.endsWith(`/${CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH}`);
+}
+
+function isOwnedBridgeCommand(cmd: string | undefined): boolean {
+  if (!cmd) return false;
+  const m = /^node\s+(.+)$/.exec(cmd.trim());
+  if (!m) return false;
+  const arg = m[1]!;
+  const decoded = unquoteSingleShellToken(arg);
+  if (decoded === null || shellQuote(decoded) !== arg) return false;
+  return decoded.endsWith(`/${CLAUDE_COMPACTION_BRIDGE_RELATIVE_PATH}`);
 }
 
 /** Decode ONE POSIX single-quoted shell token as produced by shellQuote (outer `'…'` with an

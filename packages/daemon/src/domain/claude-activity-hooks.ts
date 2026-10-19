@@ -10,6 +10,13 @@ import { getOpenRigHome } from "../openrig-compat.js";
 /** Instance-owned copy: independent of project cleanup and installed package replacement. */
 export const CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH = "state/claude-activity-hooks/activity-relay.cjs";
 
+/** Instance-owned copy of the compaction restore bridge (same rationale as the relay copy). */
+export const CLAUDE_COMPACTION_BRIDGE_RELATIVE_PATH = "state/claude-hooks/compaction-restore-bridge.cjs";
+
+export function claudeCompactionBridgePath(openrigHome = getOpenRigHome()): string {
+  return resolve(openrigHome, CLAUDE_COMPACTION_BRIDGE_RELATIVE_PATH);
+}
+
 export function claudeActivityRelayPath(openrigHome = getOpenRigHome()): string {
   return resolve(openrigHome, CLAUDE_ACTIVITY_RELAY_RELATIVE_PATH);
 }
@@ -79,6 +86,44 @@ export function deriveRelayEvents(fs: ActivityHookFsRead, manifestPath: string |
         seen.add(event);
         break;
       }
+    }
+  }
+  return out;
+}
+
+export interface CompactionBridgeEvent {
+  event: string;
+  matcher?: string;
+  timeout?: number;
+}
+
+/**
+ * Bridge event vocabulary DERIVED from the canonical claude.json manifest: every group that
+ * invokes compaction-restore-bridge.cjs, with its matcher (SessionStart is scoped to
+ * `compact`) and timeout. Empty when the manifest is absent / unreadable / has no bridge groups.
+ */
+export function deriveBridgeEvents(fs: ActivityHookFsRead, manifestPath: string | null | undefined): CompactionBridgeEvent[] {
+  if (!manifestPath || !fs.exists(manifestPath)) return [];
+  let manifest: unknown;
+  try { manifest = JSON.parse(fs.readFile(manifestPath)); } catch { return []; }
+  const hooks = isPlainObject(manifest) && isPlainObject(manifest["hooks"]) ? (manifest["hooks"] as Record<string, unknown>) : {};
+  const out: CompactionBridgeEvent[] = [];
+  for (const [event, groups] of Object.entries(hooks)) {
+    if (!Array.isArray(groups)) continue;
+    for (const group of groups as unknown[]) {
+      if (!isPlainObject(group) || !Array.isArray(group["hooks"])) continue;
+      const bridge = (group["hooks"] as unknown[]).find((h) => {
+        const c = isPlainObject(h) && typeof h["command"] === "string" ? (h["command"] as string) : "";
+        return c.includes("compaction-restore-bridge.cjs");
+      });
+      if (!bridge) continue;
+      const t = isPlainObject(bridge) ? bridge["timeout"] : undefined;
+      const m = group["matcher"];
+      out.push({
+        event,
+        ...(typeof m === "string" ? { matcher: m } : {}),
+        ...(typeof t === "number" ? { timeout: t } : {}),
+      });
     }
   }
   return out;
