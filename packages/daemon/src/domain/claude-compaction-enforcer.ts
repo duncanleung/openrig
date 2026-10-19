@@ -369,6 +369,14 @@ export class ClaudeCompactionEnforcer {
   // retired-generation stage → refuse. Injected resolver (atom-B's currentOccupantTenure by session).
   private readonly pendingStageGeneration = new Map<string, string | null>();
   private readonly resolveOccupantGeneration?: (sessionName: string) => string | null;
+  // RIG-118: told when /compact was sent, so the daemon can watch that one attempt's lifecycle.
+  private readonly onCompactSent?: (info: {
+    sessionName: string;
+    attemptId: string;
+    mapPath: string;
+    occupantGeneration: string | null;
+    startedAt: string;
+  }) => void;
   private readonly onPostRestoreComplete?: (receipt: {
     sessionName: string;
     occupantGeneration: string | null;
@@ -388,6 +396,13 @@ export class ClaudeCompactionEnforcer {
       sleep?: (ms: number) => Promise<void>;
       postCompactSendWaitMs?: number;
       resolveOccupantGeneration?: (sessionName: string) => string | null;
+      onCompactSent?: (info: {
+        sessionName: string;
+        attemptId: string;
+        mapPath: string;
+        occupantGeneration: string | null;
+        startedAt: string;
+      }) => void;
       onPostRestoreComplete?: (receipt: {
         sessionName: string;
         occupantGeneration: string | null;
@@ -407,6 +422,7 @@ export class ClaudeCompactionEnforcer {
     this.postCompactSendWaitMs = opts?.postCompactSendWaitMs ?? POST_COMPACT_SEND_WAIT_MS_DEFAULT;
     this.resolveOccupantGeneration = opts?.resolveOccupantGeneration;
     this.onPostRestoreComplete = opts?.onPostRestoreComplete;
+    this.onCompactSent = opts?.onCompactSent;
   }
 
   /**
@@ -542,6 +558,7 @@ export class ClaudeCompactionEnforcer {
         return { triggered: false, reason: "send_failed" };
       }
       this.pendingPostCompactRestore.set(input.sessionName, "compliance_prompt");
+      this.stampRestoreRequestSent(input.sessionName);
       // OPR.0.4.3.14 — surface manual-trigger progress (no-op for auto seats).
       this.advanceManualStage(input.sessionName, "compact-sent", "restore-sent");
       return { triggered: true };
@@ -874,11 +891,39 @@ export class ClaudeCompactionEnforcer {
     }
     if (attempt.controller.signal.aborted) return { ok: false, reason: attempt.reason };
     attempt.status = "compact-sent";
+    try {
+      this.onCompactSent?.({
+        sessionName: input.sessionName,
+        attemptId: attempt.attemptId,
+        mapPath: attempt.mapPath,
+        occupantGeneration: attempt.occupantGeneration,
+        startedAt: new Date(this.now()).toISOString(),
+      });
+    } catch (err) {
+      console.warn(`[compaction-enforcer] onCompactSent failed for ${input.sessionName}: ${err instanceof Error ? err.message : err}`);
+    }
     this.lastAutoCompactAt.set(input.sessionName, this.now());
     this.triggeredAboveThreshold.add(input.sessionName);
     this.pendingPostCompactRestore.set(input.sessionName, "turn_boundary");
     this.pendingStageGeneration.set(input.sessionName, attempt.occupantGeneration);
     return { ok: true };
+  }
+
+  /**
+   * RIG-118: record on the seat's restore-pending marker that the restore request was sent.
+   * The compaction-lifecycle watchdog reads it as the managed "delivered" signal (deliveredAt
+   * is bridge-only). Best-effort and atomic: a missing or unreadable marker is left alone.
+   */
+  private stampRestoreRequestSent(sessionName: string): void {
+    const file = path.join(this.openrigHome, "compaction", "restore-pending", `${sanitizeSessionKey(sessionName)}.json`);
+    try {
+      const marker = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
+      if (!marker || typeof marker !== "object" || Array.isArray(marker)) return;
+      marker["restoreRequestSentAt"] = new Date(this.now()).toISOString();
+      const tmp = `${file}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, `${JSON.stringify(marker, null, 2)}\n`, "utf8");
+      fs.renameSync(tmp, file);
+    } catch { /* marker absent or unreadable: nothing to stamp */ }
   }
 
   /** Existing monitor polls and manual waits call this even when context usage is stale. */
