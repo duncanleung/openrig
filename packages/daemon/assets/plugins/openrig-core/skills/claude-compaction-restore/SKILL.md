@@ -171,6 +171,10 @@ You are about to lose every connection you have built. Spend this turn making th
      demand through the Skill tool. Reading one during restore costs context for a skill you may never use.
      List each relevant skill as one line: its name, its purpose, and when the restored self will need it.
      Never give its file path as a read entry.
+   - **The previous map and its `RESTORED` note are optional entries.** Leave them out when this map's
+     summary and `## Standing Directives` already carry the prior window's key connections. Step 6 still names
+     them, so the chain stays walkable and a later reader can open them. Keep one as an entry only when the
+     restored self needs a connection that this map does not state.
    - **The first entry** is this map's own `## Standing Directives` section. It is always Tier 1, whatever
      the class, and the post-restore audit counts it as a required item.
    - **The second entry** is the post-compaction world profile, with its size from
@@ -248,8 +252,11 @@ is not a restore request.
    - **MISSING:** you cannot. The section was only partly read, a later compaction cut it, or the map has no
      section.
 
-   Give the table (`# | Directive | CONFIRMED or MISSING`) in the same report as the read-depth table when
-   the operator's post-restore audit asks for one. Otherwise run it before you reply. A MISSING row means you
+   Run the audit in full, one row at a time, in your own check. What you report depends on whether the
+   operator's post-restore audit follows. When it follows, report one compact line in that audit's report:
+   `Constraint audit: <N> in force, <N> CONFIRMED`, then one line for each MISSING or UNLISTED row and nothing
+   for the CONFIRMED rows. When no operator audit follows, give the table
+   (`# | Directive | CONFIRMED or MISSING`) before you reply. A MISSING row means you
    re-read `## Standing Directives` in full and audit again. If the section is absent or unreadable after
    that, tell the seat or human that routes your work, and do read-only work until they answer. When the
    section says `None found`, write `none to audit`. If the compaction summary names a human constraint that
