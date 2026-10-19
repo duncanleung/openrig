@@ -241,7 +241,22 @@ is not a restore request.
    `restore-instructions.md`, then the most recent unique narrative, tail first, within the budget; and say in
    your report that you restored without a map. Standing directives are then unconfirmed: say so, and read
    the newest earlier map's `## Standing Directives` and the human's own messages in the extract.
-8. Reply with the sentence the restore request asks for, normally
+8. **Constraint audit.** List every row of `## Standing Directives` whose status is `in force`, and mark
+   each one:
+   - **CONFIRMED:** you read the row in full during this restore, and you can say in your own words what it
+     requires or forbids and what it covers.
+   - **MISSING:** you cannot. The section was only partly read, a later compaction cut it, or the map has no
+     section.
+
+   Give the table (`# | Directive | CONFIRMED or MISSING`) in the same report as the read-depth table when
+   the operator's post-restore audit asks for one. Otherwise run it before you reply. A MISSING row means you
+   re-read `## Standing Directives` in full and audit again. If the section is absent or unreadable after
+   that, tell the seat or human that routes your work, and do read-only work until they answer. When the
+   section says `None found`, write `none to audit`. If the compaction summary names a human constraint that
+   the section lacks, list it as UNLISTED so the next map carries it. The audit shows that you hold the
+   directives. It does not show that you will follow them: check each directive against your next action
+   before you take it.
+9. Reply with the sentence the restore request asks for, normally
    `restored from packet at <path>; resumed at step <X>`, naming the map you used. When no packet exists, give
    the map's path as `<path>` and say that you restored from the map.
 
@@ -251,7 +266,8 @@ After reading down the map's ranked list, write a short `RESTORED-<UTC yyyymmdd-
 - where you are in time: what earlier windows established, what the last window did, what is true now;
 - the connections you have rebuilt, in a few lines;
 - the connections you could not rebuild, and where you would look;
-- the standing directives you restored, one line each, so the next map can carry them forward;
+- the constraint audit: each in-force directive with CONFIRMED or MISSING, one line each, and any UNLISTED
+  constraint, so the next map can carry them forward;
 - the next authorized step and who authorizes it. If a hold stands, the next step is waiting.
 
 The next restore map links this note, which keeps the chain unbroken.
