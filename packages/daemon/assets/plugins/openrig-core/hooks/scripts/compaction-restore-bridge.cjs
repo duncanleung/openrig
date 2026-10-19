@@ -256,6 +256,10 @@ async function main() {
 
   // R5: stale-firing gate — never deliver a marker written for a different compaction.
   if (!premiseMatches(marker.data, payload)) {
+    // RIG-116: a dropped delivery must be visible. Stderr, so it never pollutes additionalContext.
+    process.stderr.write(
+      `compaction-restore-bridge: marker identity mismatch — marker has transcript ${marker.data.transcriptPath || "none"} (session ${marker.data.sessionId || "none"}), payload has transcript ${payload.transcript_path || payload.transcriptPath || "none"} (session ${payload.session_id || payload.sessionId || "none"}), skipping delivery\n`,
+    );
     return;
   }
 
