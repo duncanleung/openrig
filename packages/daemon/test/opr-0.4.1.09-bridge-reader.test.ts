@@ -8,7 +8,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, existsSync, readFileSync, chmodSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join, resolve, dirname } from "node:path";
 import { tmpdir } from "node:os";
@@ -135,5 +135,58 @@ describe("OPR.0.4.1.09 part 2b — bridge reader resolves ONLY this seat's marke
     const { stdout } = runBridge(home, { hook_event_name: "UserPromptSubmit" });
     expect(stdout).toContain("additionalContext");
     expect(stdout).not.toContain("Per-seat restore map");
+  });
+});
+
+// RIG-116: PostCompact self-nudge. Managed compaction gets its restore request from the
+// enforcer, so the bridge only nudges. A manual or automatic /compact has no enforcer, so
+// the bridge must send the real restore request. A fake `rig` on PATH records the argv.
+describe("RIG-116 PostCompact nudge carries the restore request for non-managed markers", () => {
+  const RESTORE_PREFIX = "Please respond to this normal user message now by restoring this Claude session after compaction.";
+
+  function runPostCompact(managed: boolean | undefined) {
+    const bin = join(tmpDir, "bin");
+    const sent = join(tmpDir, "rig-argv.json");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "rig"), `#!/bin/sh\nprintf '%s' "$3" > "${sent}.tmp" && mv "${sent}.tmp" "${sent}"\n`, "utf8");
+    chmodSync(join(bin, "rig"), 0o755);
+    writeMarker(home, SEAT, {
+      version: 1,
+      ...(managed === undefined ? {} : { managedRefocusPending: managed }),
+      transcriptPath: "/t/session.jsonl",
+      sessionId: "sid-1",
+      outputDir: "/tmp/claude-compaction-restore/x",
+      postCompactInstruction: "Read the mission notes.",
+    });
+    spawnSync(process.execPath, [BRIDGE], {
+      input: JSON.stringify({ hook_event_name: "PostCompact", transcript_path: "/t/session.jsonl", session_id: "sid-1" }),
+      encoding: "utf8",
+      env: { ...process.env, OPENRIG_HOME: home, OPENRIG_SESSION_NAME: SEAT, RIGGED_HOME: undefined, PATH: `${bin}:${process.env.PATH}` } as NodeJS.ProcessEnv,
+    });
+    // The nudge is a detached child; wait for the fake rig to record its argument.
+    const deadline = Date.now() + 5000;
+    while (!existsSync(sent) && Date.now() < deadline) { /* spin */ }
+    return existsSync(sent) ? readFileSync(sent, "utf8") : null;
+  }
+
+  it("manual or automatic compaction (managedRefocusPending false) sends the restore request", () => {
+    const nudge = runPostCompact(false);
+    expect(nudge).not.toBeNull();
+    expect(nudge!.startsWith(RESTORE_PREFIX)).toBe(true);
+    expect(nudge).toContain(join(home, "compaction", "restore-pending", `${SEAT}.json`));
+    expect(nudge).toContain("/t/session.jsonl");
+    expect(nudge).toContain("Operator post-compaction instruction: Read the mission notes.");
+    expect(nudge).toContain("restored from packet at <path>; resumed at step <X>");
+    expect(nudge).not.toContain("Continue from where you left off");
+  });
+
+  it("a marker with no managedRefocusPending field is non-managed too", () => {
+    expect(runPostCompact(undefined)!.startsWith(RESTORE_PREFIX)).toBe(true);
+  });
+
+  it("managed compaction keeps the plain continuation nudge (the enforcer sends the request)", () => {
+    const nudge = runPostCompact(true);
+    expect(nudge).toContain("Continue from where you left off");
+    expect(nudge).not.toContain(RESTORE_PREFIX);
   });
 });

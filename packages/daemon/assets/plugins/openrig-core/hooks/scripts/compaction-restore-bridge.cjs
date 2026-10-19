@@ -172,6 +172,38 @@ function buildRestoreContext(marker) {
   return pieces.join("\n");
 }
 
+// RIG-116: for a manual or automatic /compact no OpenRig enforcer sends the restore
+// request (only managed compaction does, via claude-compaction-enforcer.ts
+// buildPostCompactRestorePrompt). The additionalContext above is informational, so
+// without a request the seat resumes work un-restored. This builds the same request.
+// It must start with the exact sentence below: refocus.cjs lets only that prompt
+// through its managed-restore hold. Keep it in step with buildPostCompactRestorePrompt.
+function buildRestoreRequest(marker) {
+  const home = openrigHome();
+  const markerPath = marker.filePath;
+  const transcriptPath = firstString(marker.data.transcriptPath);
+  const sessionId = firstString(marker.data.sessionId);
+  const postInstruction = firstString(marker.data.postCompactInstruction);
+  const pieces = [
+    "Please respond to this normal user message now by restoring this Claude session after compaction.",
+    "This is the operator-authorized OpenRig restore request referenced by the compact summary; it is not local-command stdout or hook output.",
+    "Restoration is the current task. Do not wait for a future user request or task assignment before reading the required files.",
+    "If you did not compact (your earlier context is still present), say so and skip the restore reading.",
+    `First, look for the pending restore marker at ${markerPath}.`,
+  ];
+  if (transcriptPath) {
+    pieces.push(`If the marker is missing and you have no restore map, rebuild a packet from this Claude JSONL transcript: ${transcriptPath}.`);
+  } else if (sessionId) {
+    pieces.push(`If the marker is missing and you have no restore map, inspect the newest matching packet under /tmp/claude-compaction-restore/ for session id ${sessionId}.`);
+  } else {
+    pieces.push("If the marker is missing and you have no restore map, inspect the newest matching packet under /tmp/claude-compaction-restore/ for this Claude session.");
+  }
+  if (postInstruction) pieces.push(`Operator post-compaction instruction: ${postInstruction}`);
+  pieces.push("Load/read the claude-compaction-restore skill, follow the marker's restoreInstruction and postCompactInstruction when present, read your newest restore map and use the restore packet as a lookup, then reply with: restored from packet at <path>; resumed at step <X>.");
+  pieces.push(`During this restore, read ${path.join(home, "plugins", "openrig-core", "skills", "refocusing", "SKILL.md")} and consume the current topology and work traces delivered with this restore request, if present; do not rerun Python just to duplicate a delivered trace. Missing trace delivery is a named gap. Read required notes and full sources with the native file-read tool; a pointer, compact summary or truncated extract is not a full source read.`);
+  return pieces.join(" ");
+}
+
 // R5 marker-lifecycle (stale-firing-premise-false): a marker records the identity of
 // the compaction it was written for (its own transcriptPath / sessionId, stamped by the
 // PreCompact writer from the same Claude input). The bridge fires ONLY when the current
@@ -240,9 +272,13 @@ async function main() {
       process.env.RIGGED_SESSION_NAME,
     );
     if (selfSession) {
+      // Managed compaction: the enforcer sends the restore request itself. Anything else
+      // (manual or automatic /compact) gets it from here (RIG-116).
+      const nudge = marker.data.managedRefocusPending === true
+        ? "Continue from where you left off. A compaction restore packet is available — check the hook context for its location."
+        : buildRestoreRequest(marker);
       try {
-        const child = spawn("rig", ["send", selfSession,
-          "Continue from where you left off. A compaction restore packet is available — check the hook context for its location."], {
+        const child = spawn("rig", ["send", selfSession, nudge], {
           detached: true,
           stdio: "ignore",
           env: process.env,
