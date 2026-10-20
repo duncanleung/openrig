@@ -223,3 +223,33 @@ export async function runMemoryComparison(
   ]);
   return scoreMemoryComparison(withMemory, withoutMemory);
 }
+
+// ---- RIG-111: decay scenarios ------------------------------------------------------------------
+// A decay scenario is a correction scenario plus the memory items on disk at startup. The decay
+// filter decides which items are delivered; the stub (or, later, live) provider reads that result.
+// "With decay" vs "without decay" then runs through runMemoryComparison unchanged, so RIG-111's
+// candidates are scored by the same scorer as RIG-110. Mechanics only: no winner is chosen here.
+
+import type { DecayItem, DeliveryDecayFilter } from "../../src/domain/delivery-decay-filter.js";
+
+export interface DecayScenario extends CorrectionScenario {
+  /** Items present at startup, with their last-access times. */
+  items: DecayItem[];
+  /** Paths the decay filter must still deliver (the correction's source) for the scenario to be answerable. */
+  mustDeliver: string[];
+}
+
+/** Paths a filter lets through, in item order. */
+export function deliveredPaths(items: DecayItem[], filter: DeliveryDecayFilter): string[] {
+  return items.filter((i) => filter.shouldDeliver(i)).map((i) => i.path);
+}
+
+/** Scenarios whose correction source the filter would drop: decay that would erase a live correction. */
+export function lostCorrections(scenarios: DecayScenario[], filter: DeliveryDecayFilter): string[] {
+  return scenarios
+    .filter((s) => {
+      const kept = new Set(deliveredPaths(s.items, filter));
+      return s.mustDeliver.some((p) => !kept.has(p));
+    })
+    .map((s) => s.id);
+}

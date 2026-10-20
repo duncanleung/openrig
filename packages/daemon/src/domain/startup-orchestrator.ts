@@ -5,6 +5,8 @@ import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { isClaudeResumeType } from "../adapters/claude-resume.js";
+import { statSync } from "node:fs";
+import type { DeliveryDecayFilter } from "./delivery-decay-filter.js";
 import type { StartupAction, StartupProofSelection } from "./types.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
@@ -123,6 +125,8 @@ interface StartupOrchestratorDeps {
   readinessSettings?: Pick<SettingsStore, "resolveOne">;
   /** Process observation for a Claude resume launch's own record of its process (#1077). */
   listProcesses?: NativeProcessLister;
+  /** RIG-111: per-file decay decision at delivery. Omitted = deliver everything (no decay). */
+  decayFilter?: DeliveryDecayFilter;
 }
 
 /**
@@ -155,6 +159,7 @@ export class StartupOrchestrator {
   private sessionTransport: SessionTransport;
   private readinessSettings: Pick<SettingsStore, "resolveOne">;
   private listProcesses: NativeProcessLister | undefined;
+  private decayFilter: DeliveryDecayFilter | undefined;
 
   constructor(deps: StartupOrchestratorDeps) {
     if (deps.db !== deps.sessionRegistry.db) throw new Error("StartupOrchestrator: sessionRegistry must share the same db handle");
@@ -167,6 +172,7 @@ export class StartupOrchestrator {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.readinessSettings = deps.readinessSettings ?? new SettingsStore();
     this.listProcesses = deps.listProcesses;
+    this.decayFilter = deps.decayFilter;
     this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
     this.sessionTransport = new SessionTransport({
       db: deps.db,
@@ -178,6 +184,20 @@ export class StartupOrchestrator {
   }
 
   private readFile: (path: string) => string;
+
+  /** RIG-111: ask the decay filter about one resolved file. A filter or stat failure delivers the file. */
+  private shouldDeliverAfterDecay(f: ResolvedStartupFile, hint: ConcreteDeliveryHint, warnings: string[]): boolean {
+    try {
+      const lastAccess = statSync(f.absolutePath).mtime;
+      const deliver = this.decayFilter!.shouldDeliver({
+        surface: classifyDeliveredSurface(f.path, hint), path: f.path, lastAccess, accessCount: 0,
+      });
+      if (!deliver) warnings.push(`Decay filter ${this.decayFilter!.name} skipped ${f.path}`);
+      return deliver;
+    } catch {
+      return true;
+    }
+  }
 
   /** The process this Claude resume launch started, as the launch itself observes it (#1077): the one
    *  the adapter's readiness check pinned first, else one observed now. A rotation its hook later
@@ -285,6 +305,7 @@ export class StartupOrchestrator {
       const hint = f.deliveryHint === "auto"
         ? resolveConcreteHint(f.path, this.safeReadFile(f.absolutePath))
         : f.deliveryHint;
+      if (this.decayFilter && !this.shouldDeliverAfterDecay(f, hint, warnings)) continue;
       resolvedHints.set(f, hint);
       if (hint === "send_text") {
         postLaunchFiles.push(f);
