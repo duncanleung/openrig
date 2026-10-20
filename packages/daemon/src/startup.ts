@@ -287,6 +287,115 @@ export function collectAllowlistedProviderAuthEnv(
   return out;
 }
 
+/**
+  * RIG-113: package-install and bootstrap services (Phase 4 + Phase 5). Moved verbatim out of createDaemon;
+  * the order of construction is unchanged.
+ */
+function initPackageAndBootstrapServices({ db, tmuxExec }: { db: Database.Database; tmuxExec?: ExecFn }) {
+  const packageRepo = new PackageRepository(db);
+  const installRepo = new InstallRepository(db);
+  const engineFsOps = {
+    readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+    writeFile: (p: string, content: string) => fs.writeFileSync(p, content, "utf-8"),
+    exists: (p: string) => fs.existsSync(p),
+    mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
+    copyFile: (src: string, dest: string) => fs.copyFileSync(src, dest),
+    deleteFile: (p: string) => fs.unlinkSync(p),
+  };
+  const installEngine = new InstallEngine(installRepo, engineFsOps);
+  const verifierFsOps = {
+    readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+    exists: (p: string) => fs.existsSync(p),
+  };
+  const installVerifier = new InstallVerifier(installRepo, packageRepo, verifierFsOps);
+
+  // Phase 5: Bootstrap services
+  const bootstrapRepo = new BootstrapRepository(db);
+  const exec = tmuxExec ?? execCommand;
+  const runtimeVerifier = new RuntimeVerifier({ exec, db });
+  const probeRegistry = new RequirementsProbeRegistry(exec);
+  const externalInstallPlanner = new ExternalInstallPlanner();
+  const externalInstallExecutor = new ExternalInstallExecutor({ exec, db });
+  const packageInstallService = new PackageInstallService({ packageRepo, installRepo, installEngine, installVerifier });
+  const resolverFsOps = {
+    readFile: (p: string) => fs.readFileSync(p, "utf-8"),
+    exists: (p: string) => fs.existsSync(p),
+    listFiles: (dirPath: string) => {
+      const results: string[] = [];
+      function walk(dir: string, prefix: string) {
+        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+          if (entry.isDirectory()) walk(nodePath.join(dir, entry.name), nodePath.join(prefix, entry.name));
+          else results.push(prefix ? nodePath.join(prefix, entry.name) : entry.name);
+        }
+      }
+      walk(dirPath, "");
+      return results;
+    },
+  };
+  const bundleSourceResolver = new BundleSourceResolver({ fsOps: resolverFsOps });
+  return { packageRepo, installRepo, installEngine, installVerifier, bootstrapRepo, exec, runtimeVerifier, probeRegistry, externalInstallPlanner, externalInstallExecutor, packageInstallService, resolverFsOps, bundleSourceResolver };
+}
+
+/** RIG-113: discovery services. Moved verbatim out of createDaemon; construction order is unchanged. */
+function initDiscoveryServices({ db, tmuxAdapter, cmuxAdapter, sessionRegistry, eventBus }: {
+  db: Database.Database; tmuxAdapter: TmuxAdapter; cmuxAdapter: CmuxAdapter; sessionRegistry: SessionRegistry; eventBus: EventBus;
+}) {
+  const tmuxScanner = new TmuxDiscoveryScanner({ tmuxAdapter });
+  const sessionFingerprinter = new SessionFingerprinter({
+    cmuxAdapter, tmuxAdapter, fsExists: (p: string) => fs.existsSync(p),
+  });
+  const sessionEnricher = new SessionEnricher({
+    fsExists: (p: string) => fs.existsSync(p),
+    fsReaddir: (p: string) => fs.readdirSync(p),
+  });
+  const discoveryRepo = new DiscoveryRepository(db);
+  const discoveryCoordinator = new DiscoveryCoordinator({
+    scanner: tmuxScanner, fingerprinter: sessionFingerprinter, enricher: sessionEnricher,
+    discoveryRepo, sessionRegistry, eventBus,
+  });
+  return { discoveryRepo, discoveryCoordinator };
+}
+
+/** RIG-113: the daemon-scoped context-pack library (PL-014). Moved verbatim out of createDaemon. */
+function initContextPackLibrary() {
+  return (() => {
+    // OPR.0.5.9.5 Wave B — config-resolved canonical context library. The
+    // shared instance initializer normally creates both roots; the mkdirs keep
+    // direct createDaemon test harnesses compatible.
+    const userPacksRoot = new ContextPackSettingsStore().resolveOne("context.root").value as string;
+    const [contextRoot, systemPacksRoot] = openRigContextLibraryRoots(userPacksRoot);
+    try { fs.mkdirSync(systemPacksRoot, { recursive: true }); } catch { /* best-effort */ }
+    const roots: Array<{ path: string; sourceType: "builtin" | "user_file" | "workspace" }> = [
+      { path: contextRoot, sourceType: "user_file" },
+      { path: systemPacksRoot, sourceType: "user_file" },
+    ];
+    try {
+      const settingsStore = new ContextPackSettingsStore();
+      const cfg = settingsStore.resolveConfig();
+      const workspacePacksRoot = nodePath.join(cfg.workspaceRoot, ".openrig", "context-packs");
+      // Registered even before it exists: scan() skips a missing root, so a
+      // folder created after startup is found by the next sync, not a restart.
+      if (workspacePacksRoot !== userPacksRoot && workspacePacksRoot !== systemPacksRoot) {
+        roots.push({ path: workspacePacksRoot, sourceType: "workspace" });
+      }
+    } catch { /* settings unavailable; fall through with user-file root only */ }
+    const builtinPacksRoot = nodePath.resolve(import.meta.dirname, "../context-packs");
+    if (fs.existsSync(builtinPacksRoot)) {
+      roots.unshift({ path: builtinPacksRoot, sourceType: "builtin" });
+    }
+    const lib = new ContextPackLibraryService({ roots });
+    lib.scan();
+    return lib;
+  })();
+}
+
+/** RIG-113: transcript settings from the environment (PNS-T02 config surface). */
+function readTranscriptConfig() {
+  const transcriptsEnabled = readOpenRigEnv("OPENRIG_TRANSCRIPTS_ENABLED", "RIGGED_TRANSCRIPTS_ENABLED") !== "false";
+  const transcriptsPath = readOpenRigEnv("OPENRIG_TRANSCRIPTS_PATH", "RIGGED_TRANSCRIPTS_PATH") || undefined;
+  return { transcriptsEnabled, transcriptsPath };
+}
+
 export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> {
   const daemonHome = os.homedir();
   const configuredCodexHome = process.env.CODEX_HOME || undefined;
@@ -531,8 +640,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   );
 
   // Read transcript config from env (passed by CLI via PNS-T02 config surface)
-  const transcriptsEnabled = readOpenRigEnv("OPENRIG_TRANSCRIPTS_ENABLED", "RIGGED_TRANSCRIPTS_ENABLED") !== "false";
-  const transcriptsPath = readOpenRigEnv("OPENRIG_TRANSCRIPTS_PATH", "RIGGED_TRANSCRIPTS_PATH") || undefined;
+  const { transcriptsEnabled, transcriptsPath } = readTranscriptConfig();
   const activityHookToken = readOpenRigEnv("OPENRIG_ACTIVITY_HOOK_TOKEN", "RIGGED_ACTIVITY_HOOK_TOKEN") || undefined;
   const activityHookUrl = readOpenRigEnv("OPENRIG_URL", "RIGGED_URL") || undefined;
   const openRigPort = readOpenRigEnv("OPENRIG_PORT", "RIGGED_PORT") || undefined;
@@ -716,48 +824,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     db, rigRepo, sessionRegistry, eventBus, nodeLauncher, preflight: rigSpecPreflight, tmuxAdapter,
   });
 
-  // Phase 4: Package install services
-  const packageRepo = new PackageRepository(db);
-  const installRepo = new InstallRepository(db);
-  const engineFsOps = {
-    readFile: (p: string) => fs.readFileSync(p, "utf-8"),
-    writeFile: (p: string, content: string) => fs.writeFileSync(p, content, "utf-8"),
-    exists: (p: string) => fs.existsSync(p),
-    mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }),
-    copyFile: (src: string, dest: string) => fs.copyFileSync(src, dest),
-    deleteFile: (p: string) => fs.unlinkSync(p),
-  };
-  const installEngine = new InstallEngine(installRepo, engineFsOps);
-  const verifierFsOps = {
-    readFile: (p: string) => fs.readFileSync(p, "utf-8"),
-    exists: (p: string) => fs.existsSync(p),
-  };
-  const installVerifier = new InstallVerifier(installRepo, packageRepo, verifierFsOps);
-
-  // Phase 5: Bootstrap services
-  const bootstrapRepo = new BootstrapRepository(db);
-  const exec = opts?.tmuxExec ?? execCommand;
-  const runtimeVerifier = new RuntimeVerifier({ exec, db });
-  const probeRegistry = new RequirementsProbeRegistry(exec);
-  const externalInstallPlanner = new ExternalInstallPlanner();
-  const externalInstallExecutor = new ExternalInstallExecutor({ exec, db });
-  const packageInstallService = new PackageInstallService({ packageRepo, installRepo, installEngine, installVerifier });
-  const resolverFsOps = {
-    readFile: (p: string) => fs.readFileSync(p, "utf-8"),
-    exists: (p: string) => fs.existsSync(p),
-    listFiles: (dirPath: string) => {
-      const results: string[] = [];
-      function walk(dir: string, prefix: string) {
-        for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-          if (entry.isDirectory()) walk(nodePath.join(dir, entry.name), nodePath.join(prefix, entry.name));
-          else results.push(prefix ? nodePath.join(prefix, entry.name) : entry.name);
-        }
-      }
-      walk(dirPath, "");
-      return results;
-    },
-  };
-  const bundleSourceResolver = new BundleSourceResolver({ fsOps: resolverFsOps });
+  // Phase 4 + 5: package install and bootstrap services (RIG-113: initPackageAndBootstrapServices)
+  const {
+    packageRepo, installRepo, installEngine, installVerifier, bootstrapRepo, exec, runtimeVerifier, probeRegistry, externalInstallPlanner, externalInstallExecutor, packageInstallService, resolverFsOps, bundleSourceResolver,
+  } = initPackageAndBootstrapServices({ db, tmuxExec: opts?.tmuxExec });
   // Pod-aware instantiator (AgentSpec reboot)
   const { PodRigInstantiator } = await import("./domain/rigspec-instantiator.js");
   const { reconcileSkillLoadout } = await import("./domain/skill-catalog.js");
@@ -914,35 +984,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // delivery-free /api/context-packs list/sync/compose/read/delete/preview/pieces
   // routes. Startup context-pack expansion is intentionally unsupported;
   // dedicated send/broadcast/walk/queue verbs own delivery.
-  const contextPackLibrary = (() => {
-    // OPR.0.5.9.5 Wave B — config-resolved canonical context library. The
-    // shared instance initializer normally creates both roots; the mkdirs keep
-    // direct createDaemon test harnesses compatible.
-    const userPacksRoot = new ContextPackSettingsStore().resolveOne("context.root").value as string;
-    const [contextRoot, systemPacksRoot] = openRigContextLibraryRoots(userPacksRoot);
-    try { fs.mkdirSync(systemPacksRoot, { recursive: true }); } catch { /* best-effort */ }
-    const roots: Array<{ path: string; sourceType: "builtin" | "user_file" | "workspace" }> = [
-      { path: contextRoot, sourceType: "user_file" },
-      { path: systemPacksRoot, sourceType: "user_file" },
-    ];
-    try {
-      const settingsStore = new ContextPackSettingsStore();
-      const cfg = settingsStore.resolveConfig();
-      const workspacePacksRoot = nodePath.join(cfg.workspaceRoot, ".openrig", "context-packs");
-      // Registered even before it exists: scan() skips a missing root, so a
-      // folder created after startup is found by the next sync, not a restart.
-      if (workspacePacksRoot !== userPacksRoot && workspacePacksRoot !== systemPacksRoot) {
-        roots.push({ path: workspacePacksRoot, sourceType: "workspace" });
-      }
-    } catch { /* settings unavailable; fall through with user-file root only */ }
-    const builtinPacksRoot = nodePath.resolve(import.meta.dirname, "../context-packs");
-    if (fs.existsSync(builtinPacksRoot)) {
-      roots.unshift({ path: builtinPacksRoot, sourceType: "builtin" });
-    }
-    const lib = new ContextPackLibraryService({ roots });
-    lib.scan();
-    return lib;
-  })();
+  const contextPackLibrary = initContextPackLibrary();
 
   // PL-016 Item 2 + Item 4: hoist AgentImageLibraryService construction
   // so the PodRigInstantiator can resolve `session_source: mode:
@@ -1082,20 +1124,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     } catch { /* logging must never throw */ }
   }
 
-  // Discovery services
-  const tmuxScanner = new TmuxDiscoveryScanner({ tmuxAdapter });
-  const sessionFingerprinter = new SessionFingerprinter({
-    cmuxAdapter, tmuxAdapter, fsExists: (p: string) => fs.existsSync(p),
-  });
-  const sessionEnricher = new SessionEnricher({
-    fsExists: (p: string) => fs.existsSync(p),
-    fsReaddir: (p: string) => fs.readdirSync(p),
-  });
-  const discoveryRepo = new DiscoveryRepository(db);
-  const discoveryCoordinator = new DiscoveryCoordinator({
-    scanner: tmuxScanner, fingerprinter: sessionFingerprinter, enricher: sessionEnricher,
-    discoveryRepo, sessionRegistry, eventBus,
-  });
+  // Discovery services (RIG-113: initDiscoveryServices)
+  const { discoveryRepo, discoveryCoordinator } = initDiscoveryServices({ db, tmuxAdapter, cmuxAdapter, sessionRegistry, eventBus });
   // Context usage store — constructed ahead of the refresher + ClaimService so the
   // Claude status-line sidecar reader can be injected into BOTH: FR-3
   // adoption-boundary capture (ClaimService) and FR-4 snapshot null-fill (refresher).
