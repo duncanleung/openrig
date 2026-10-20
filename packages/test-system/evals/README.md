@@ -35,3 +35,17 @@ Layout:
 
 Status: built. `npm test` covers the harness without a model (`packages/daemon/test/eval-*.test.ts`);
 live `--provider rig` runs are manual, and CI does not run them.
+
+## With/without-memory comparison (RIG-110)
+
+`packages/daemon/test/helpers/eval-memory-comparison.ts` measures whether memory changes behaviour.
+A `CorrectionScenario` (prior correction, prompt, expected behaviour, optional expected surface) runs
+through the SAME `runEvals` + door grader under two `EvalProvider`s: one whose seat holds the prior
+corrections, one with memory wiped. `improvementScore = pass_rate(with) - pass_rate(without)`.
+A scenario a provider could not run is excluded from the score, not counted as a fail.
+
+- No model calls in the harness. The live providers (a real seat with and without memory) are a
+  separate human-gated step; the scenarios themselves are authored in `openrig-memory`.
+- RIG-111 (decay patterns) reuses `scoreMemoryComparison(variantSummary, baselineSummary)` on two
+  runs of the same cases.
+- Tests: `packages/daemon/test/eval-memory-comparison.test.ts` (stub providers only).
