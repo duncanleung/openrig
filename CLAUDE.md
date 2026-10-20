@@ -22,7 +22,7 @@ Conventions: `status:` frontmatter field (`proposed` / `accepted` / `superseded`
 **Promote-to-arch-doc rule:** when an ADR materially reshapes the architecture (not just an implementation pick), add a one-paragraph entry in the parent architecture doc's decision list with a `→ ADR NNNN` link.
 
 **ADR directory:** `docs/decisions/`
-**Next number:** 0010
+**Next number:** 0011
 
 ## Issue Tracking
 
