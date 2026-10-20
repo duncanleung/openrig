@@ -125,6 +125,7 @@ import { registerTerminalAuthOnly, registerTerminalWs } from "./routes/terminal-
 import { createNodeWebSocket } from "@hono/node-ws";
 import { steeringRoutes } from "./routes/steering.js";
 import { healthSummaryRoutes } from "./routes/health-summary.js";
+import { memoryCoverageRoutes } from "./routes/memory-coverage.js";
 import { attentionRoutes } from "./routes/attention.js";
 import { healthRoutes } from "./routes/health.js";
 import { gatewayRoutes } from "./routes/gateway.js";
@@ -853,6 +854,8 @@ export function createApp(deps: AppDeps): Hono {
   // Operator Surface Reconciliation v0 — steering composition + health summary.
   app.route("/api/steering", steeringRoutes());
   app.route("/api/health-summary", healthSummaryRoutes());
+  // RIG-112 — read-only memory delivery coverage over the delivery manifest events.
+  app.route("/api/memory", memoryCoverageRoutes());
   app.route("/api/health", healthRoutes());
   app.route("/api/attention", attentionRoutes());
   app.route("/api/health-diagnosis", healthDiagnosisRoutes());
