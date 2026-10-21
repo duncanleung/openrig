@@ -84,6 +84,8 @@ export interface HealthDeps extends StatusDeps {
 }
 
 interface HealthListOptions {
+  operational?: boolean;
+  quiet?: boolean;
   self?: boolean;
   seat?: string;
   rig?: string;
@@ -297,6 +299,84 @@ function renderExplanation(record: HealthRecord): void {
   console.log(`  Inspect:     ${record.suggestedInspection}`);
 }
 
+// RIG-120 — the operational summary the daemon composes at GET /api/health/operational.
+interface OperationalCoverage {
+  source: string;
+  status: "complete" | "partial" | "unavailable";
+  examined: number;
+  limit?: number;
+  reason?: string;
+}
+
+interface OperationalSummaryView {
+  schema: string;
+  observedAt: string;
+  scope: { kind: string; rig: string | null; hosts: string };
+  seats: { total: number; bySessionStatus: Record<string, number>; byLifecycle: Record<string, number>; attentionRequired: number };
+  terminalInput: { count: number; seats: Array<{ rig: string; logicalId: string; session: string | null; count: number; reason: string | null }> };
+  humanGates: { count: number; items: Array<{ qitemId: string; state: string; destination: string; blockedOn: string | null; summary: string | null; evidenceRef: string | null; updatedAt: string }> };
+  stalledWork: { count: number; items: Array<{ qitemId: string; owner: string; evidence: string | null; updatedAt: string }> };
+  watchdog: { activeJobs: number; newestEvaluationAt: string | null; neverEvaluated: number; stale: Array<{ jobId: string; policy: string; target: string; lastEvaluationAt: string | null }> } | null;
+  coverage: OperationalCoverage[];
+  verdict: "attention" | "clear" | "indeterminate";
+}
+
+function operationalError(status: number, data: unknown): HealthCliError {
+  const code = typeof data === "object" && data !== null && typeof (data as { error?: unknown }).error === "string"
+    ? (data as { error: string }).error
+    : null;
+  const message = typeof data === "object" && data !== null && typeof (data as { message?: unknown }).message === "string"
+    ? (data as { message: string }).message
+    : null;
+  if (status === 404 && code === "rig_not_found") {
+    return { schema: HEALTH_ERROR_SCHEMA, error: code, message: message ?? "No rig matches that name or id.", nextInspection: "rig ps" };
+  }
+  if (status === 404) {
+    return { schema: HEALTH_ERROR_SCHEMA, error: "operational_summary_unavailable", message: "The daemon is reachable, but it does not expose the operational summary. Upgrade the daemon.", nextInspection: "rig --version", details: data };
+  }
+  if (status === 503) {
+    return { schema: HEALTH_ERROR_SCHEMA, error: code ?? "operational_summary_unavailable", message: message ?? "The daemon is reachable, but the operational summary is unavailable.", nextInspection: "rig daemon status" };
+  }
+  return { schema: HEALTH_ERROR_SCHEMA, error: "health_query_failed", message: `The daemon rejected the operational summary query (HTTP ${status}).`, nextInspection: "rig health --help", details: data };
+}
+
+function renderOperationalQuiet(s: OperationalSummaryView): void {
+  const incomplete = s.coverage.filter((c) => c.status !== "complete").length;
+  console.log(`verdict=${s.verdict} seats=${s.seats.total} attention-required=${s.seats.attentionRequired} terminal-input=${s.terminalInput.count} human-gates=${s.humanGates.count} stalled=${s.stalledWork.count} incomplete-sources=${incomplete} observed=${s.observedAt}`);
+}
+
+function renderOperational(s: OperationalSummaryView): void {
+  const scope = s.scope.kind === "rig" ? `rig ${s.scope.rig}` : "all rigs on this daemon";
+  console.log(`Operational health — observed=${s.observedAt} scope=${scope} (this daemon only; other hosts are not included)`);
+  console.log(`Verdict: ${s.verdict.toUpperCase()}`);
+  for (const c of s.coverage) {
+    if (c.status === "complete") continue;
+    const label = c.status === "unavailable" ? "UNAVAILABLE" : "PARTIAL";
+    console.log(`${label}: ${c.source}: ${c.reason ?? "not fully read"}. This source is not healthy until it is read in full.`);
+  }
+  const counts = (m: Record<string, number>) => Object.entries(m).map(([k, v]) => `${k}=${v}`).join(" ") || "none";
+  console.log(`Seats: ${s.seats.total} total; attention-required=${s.seats.attentionRequired}; session: ${counts(s.seats.bySessionStatus)}`);
+  console.log(`Terminal input needed (seat is waiting at a prompt): ${s.terminalInput.count}`);
+  for (const seat of s.terminalInput.seats) {
+    console.log(`  ${seat.session ?? `${seat.logicalId}@${seat.rig}`}  count=${seat.count}${seat.reason ? `  ${seat.reason}` : ""}`);
+  }
+  console.log(`Human gates (a person must decide): ${s.humanGates.count}`);
+  for (const g of s.humanGates.items) {
+    console.log(`  ${g.qitemId}  ${g.state}  for ${g.blockedOn ?? g.destination}${g.summary ? `  ${g.summary}` : ""}${g.evidenceRef ? `  evidence=${g.evidenceRef}` : ""}`);
+  }
+  console.log(`Stalled work (claimed, no meaningful change): ${s.stalledWork.count}`);
+  for (const w of s.stalledWork.items) {
+    console.log(`  ${w.qitemId}  owner=${w.owner}${w.evidence ? `  ${w.evidence}` : ""}`);
+  }
+  if (s.watchdog) {
+    console.log(`Watchdog: ${s.watchdog.activeJobs} active job(s); newest evaluation=${s.watchdog.newestEvaluationAt ?? "none"}; never evaluated=${s.watchdog.neverEvaluated}; stale=${s.watchdog.stale.length}`);
+    for (const j of s.watchdog.stale) console.log(`  stale: ${j.jobId}  ${j.policy}  ${j.target}  last=${j.lastEvaluationAt ?? "never"}`);
+  } else {
+    console.log("Watchdog: unavailable");
+  }
+  if (s.verdict === "indeterminate") console.log("Indeterminate: no finding was seen, but at least one source was not read in full. Do not read this as healthy.");
+}
+
 async function guardedRequest<T>(
   request: () => Promise<{ status: number; data: T }>,
   json: boolean,
@@ -320,9 +400,11 @@ export function healthCommand(depsOverride?: HealthDeps): Command {
   const deps = depsOverride ?? defaultDeps();
   const command = new Command("health")
     .description("Inspect read-only, explainable system health records")
+    .addOption(new Option("--operational", "One operational summary: seat counts, terminal input needed, human gates, stalled work, watchdog freshness").conflicts(["self", "seat", "instance"]))
+    .option("--quiet", "With --operational: print one line of counts and the verdict")
     .addOption(new Option("--self", "Inspect the current seat (default)").conflicts(["seat", "rig", "instance"]))
     .addOption(new Option("--seat <node-id>", "Inspect one seat by stable node ID").conflicts(["self", "rig", "instance"]))
-    .addOption(new Option("--rig <rig-id>", "Inspect findings whose canonical scope is this rig").conflicts(["self", "seat", "instance"]))
+    .addOption(new Option("--rig <rig-id>", "Inspect findings whose canonical scope is this rig (with --operational: a rig name or id)").conflicts(["self", "seat", "instance"]))
     .addOption(new Option("--instance [instance-id]", "Inspect the whole local instance, or one canonical instance scope by ID").conflicts(["self", "seat", "rig"]))
     .addOption(new Option("--severity <severity>", "Filter by severity").choices([...HEALTH_SEVERITIES]))
     .addOption(new Option("--status <status>", "Filter by finding status").choices([...HEALTH_STATUSES]))
@@ -336,8 +418,29 @@ list/explain never mutate. Diagnosis mutations use explicit subcommands; automat
 
   command.action(async (options: HealthListOptions) => {
     const json = Boolean(options.json);
+    if (options.quiet && !options.operational) {
+      emitError({ schema: HEALTH_ERROR_SCHEMA, error: "invalid_arguments", message: "--quiet applies only to --operational.", nextInspection: "rig health --help" }, json);
+      return;
+    }
     const client = await readyClient(deps, json);
     if (!client) return;
+
+    if (options.operational) {
+      const query = options.rig ? `?rig=${encodeURIComponent(options.rig)}` : "";
+      const summary = await guardedRequest(
+        () => client.get<OperationalSummaryView>(`/api/health/operational${query}`),
+        json,
+      );
+      if (!summary) return;
+      if (summary.status >= 400) {
+        emitError(operationalError(summary.status, summary.data), json);
+        return;
+      }
+      if (json) console.log(JSON.stringify(summary.data));
+      else if (options.quiet) renderOperationalQuiet(summary.data);
+      else renderOperational(summary.data);
+      return;
+    }
 
     let scopeType: HealthScope["type"] | undefined;
     let scopeId: string | undefined;

@@ -5,6 +5,11 @@ import {
   type HealthScope,
 } from "../domain/health-projection.js";
 import type { HealthProjectionService } from "../domain/health-detectors.js";
+import { computeOperationalSummary, UnknownRigError } from "../domain/operational-summary.js";
+import type { RigRepository } from "../domain/rig-repository.js";
+import type { QueueRepository } from "../domain/queue-repository.js";
+import type { WatchdogJobsRepository } from "../domain/watchdog-jobs-repository.js";
+import type { SeatActivityService } from "../domain/seat-activity-service.js";
 
 const SCOPE_TYPES: HealthScope["type"][] = ["instance", "rig", "seat", "mission", "slice"];
 
@@ -42,6 +47,25 @@ export function healthRoutes(): Hono {
       }));
     } catch (error) {
       return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+  });
+
+  // RIG-120 — one operational summary composed from existing projections. Registered BEFORE
+  // /:findingId so "operational" is not read as a finding id.
+  app.get("/operational", (c) => {
+    const rigRepo = c.get("rigRepo" as never) as RigRepository | undefined;
+    if (!rigRepo) return c.json({ error: "operational_summary_unavailable", message: "rig repository is not wired" }, 503);
+    try {
+      return c.json(computeOperationalSummary({
+        rigRepo,
+        queueRepo: c.get("queueRepo" as never) as QueueRepository | undefined,
+        watchdogRepo: c.get("watchdogJobsRepo" as never) as WatchdogJobsRepository | undefined,
+        seatActivity: c.get("seatActivityService" as never) as SeatActivityService | undefined,
+        rig: c.req.query("rig") || undefined,
+      }));
+    } catch (error) {
+      if (error instanceof UnknownRigError) return c.json({ error: "rig_not_found", message: error.message }, 404);
+      return c.json({ error: "operational_summary_failed", message: error instanceof Error ? error.message : String(error) }, 500);
     }
   });
 

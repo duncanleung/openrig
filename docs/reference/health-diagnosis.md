@@ -421,3 +421,39 @@ home and database. Historical expected states must be grounded independently
 of the detector formula; incomplete outcome evidence is an indeterminate case,
 not a denominator of one. A calibration report describes its selected corpus
 and remaining blind spots, not a fleet-wide false-positive rate.
+
+## Operational summary
+
+`rig health --operational` (`GET /api/health/operational`) answers one question
+after an outage or quota event: what needs a person or an owner now. It is a
+read-only join of projections that already exist. It adds no detector, no new
+data source and no write.
+
+| Section | Meaning | Source |
+|---|---|---|
+| `terminalInput` | A seat waits at a terminal prompt. | Node inventory `activityState.needsInput` (the arbitrated activity oracle). The summary never reads it from queue rows. |
+| `humanGates` | A person must decide: a row owed to a human seat, or blocked on one. Each item carries its summary and evidence reference. | `QueueRepository.listAttention` |
+| `stalledWork` | A claimed row with no meaningful change. A row owed to a human is a gate, never stalled work. | The derived `pickup` receipt (`derivePickup`) |
+| `watchdog` | Active jobs, newest evaluation time, jobs never evaluated, stale jobs. | `watchdog_jobs` |
+
+The payload schema is `openrig.health-operational/v0alpha1`. It carries
+`observedAt` and a `scope` (`daemon`, or one `rig`; `hosts` is always
+`this-daemon-only`: other hosts are not included). Options: `--rig <name-or-id>`,
+`--json`, `--quiet` (one line of counts and the verdict).
+
+Each source appears in `coverage` as `complete`, `partial` or `unavailable`.
+The queue reads stop at 500 rows; a read that reaches the limit is `partial`. A
+running seat with no arbitrated activity state, a missing repository, no active
+watchdog job, and a watchdog job that is stale (older than three of its own
+intervals) or never evaluated all make a source not `complete`.
+
+`verdict` is `attention` when any section has an entry or any seat is
+`attention_required`, `clear` only when every source is `complete` and every
+count (including `seats.attentionRequired`) is zero, and `indeterminate` otherwise.
+`indeterminate` is not healthy. In rig scope, the 500-row queue reads are still
+fleet-wide before the rig filter, so a truncation applies to the whole daemon.
+
+The factory-loop change from `.ai/status/` stamp files to `rig queue block` and
+`rig queue resolve` at human gates lives in skills outside this repository. This
+summary shows those gates as soon as a seat uses `queue block`; it does not
+change any skill.
