@@ -9,6 +9,9 @@ import { computeMemoryCoverage, MEMORY_ATTR } from "../src/domain/memory-coverag
 let db: Database.Database;
 let n = 0;
 
+function pending(nodeId: string, at: string, rigId = "rig-1") {
+  db.prepare("INSERT INTO events (rig_id, node_id, type, payload, created_at) VALUES (?, ?, 'node.startup_pending', '{}', ?)").run(rigId, nodeId, at);
+}
 function ready(nodeId: string, at: string, rigId = "rig-1") {
   db.prepare("INSERT INTO events (rig_id, node_id, type, payload, created_at) VALUES (?, ?, 'node.startup_ready', '{}', ?)").run(rigId, nodeId, at);
 }
@@ -115,21 +118,33 @@ describe("computeMemoryCoverage", () => {
     expect(r.seatsFullyDelivered).toBe(1);
   });
 
-  it("treats delivered as empty when startup_ready is newer than the latest manifest", () => {
+  it("treats delivered as empty when a newer startup has no manifest", () => {
+    pending("a", "2026-10-19 09:00:00");
     manifest("a", "a@r", ["role", "guidance"], "2026-10-19 09:00:00");
-    ready("a", "2026-10-19 10:00:00");
+    ready("a", "2026-10-19 09:00:01");
+    pending("a", "2026-10-19 10:00:00");
+    ready("a", "2026-10-19 10:00:01");
     const r = computeMemoryCoverage(db, { expected: ["role", "guidance"] });
     const a = r.seats.find((s) => s.nodeId === "a")!;
     expect(a).toMatchObject({ delivered: [], missing: ["guidance", "role"], coverage: 0, latest: [] });
   });
 
-  it("uses the manifest when startup_ready is older than the latest manifest", () => {
+  it("uses the manifest when startup_ready is from the same startup (seq-adjacent)", () => {
     ready("a", "2026-10-19 09:00:00");
     manifest("a", "a@r", ["role", "guidance"], "2026-10-19 09:00:01");
     const r = computeMemoryCoverage(db, { expected: ["role", "guidance"] });
     const a = r.seats.find((s) => s.nodeId === "a")!;
     expect(a).toMatchObject({ delivered: ["guidance", "role"], missing: [], coverage: 1 });
     expect(a.latest.length).toBe(2);
+  });
+
+  it("does not false-positive when manifest and ready cross a second boundary", () => {
+    pending("a", "2026-10-19 10:00:00");
+    manifest("a", "a@r", ["role"], "2026-10-19 10:00:00");
+    ready("a", "2026-10-19 10:00:01");
+    const r = computeMemoryCoverage(db, { expected: ["role"] });
+    const a = r.seats.find((s) => s.nodeId === "a")!;
+    expect(a).toMatchObject({ delivered: ["role"], missing: [], coverage: 1 });
   });
 });
 

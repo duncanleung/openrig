@@ -90,11 +90,33 @@ export function computeMemoryCoverage(db: Database.Database, opts: MemoryCoverag
   const truncated = rows.length > MAX_MANIFEST_EVENTS;
   const manifests = (truncated ? rows.slice(0, MAX_MANIFEST_EVENTS) : rows).reverse(); // oldest first
 
-  // Query the latest startup_ready per node to detect seats whose newest startup delivered nothing.
-  const readyRows = db.prepare(
-    `SELECT node_id, max(created_at) AS latest_ready FROM events WHERE type = 'node.startup_ready'${filter} GROUP BY node_id`,
-  ).all(...args) as Array<{ node_id: string; latest_ready: string }>;
-  const latestReadyByNode = new Map(readyRows.map((r) => [r.node_id, r.latest_ready]));
+  // Determine per-node whether the latest startup delivered files, using event seq
+  // (autoincrement) instead of created_at to avoid false positives when manifest and
+  // ready from the same startup straddle a second boundary.
+  // startup-orchestrator emits: pending (step 1) → manifest (step 8, optional) → ready (step 9).
+  // A manifest belongs to the latest startup iff its seq > the latest pending seq.
+  const startupSeqs = db.prepare(
+    `SELECT node_id,
+      max(CASE WHEN type = 'node.startup_ready' THEN seq END) AS latest_ready_seq,
+      max(CASE WHEN type = 'node.startup_ready' THEN created_at END) AS latest_ready_at,
+      max(CASE WHEN type = 'node.startup_delivery_manifest' THEN seq END) AS latest_manifest_seq,
+      max(CASE WHEN type = 'node.startup_pending' THEN seq END) AS latest_pending_seq
+    FROM events
+    WHERE type IN ('node.startup_ready', 'node.startup_delivery_manifest', 'node.startup_pending')${filter}
+    GROUP BY node_id
+    HAVING max(CASE WHEN type = 'node.startup_ready' THEN seq END) IS NOT NULL`,
+  ).all(...args) as Array<{ node_id: string; latest_ready_seq: number; latest_ready_at: string; latest_manifest_seq: number | null; latest_pending_seq: number | null }>;
+
+  const nodeStartupState = new Map<string, { latestReadyAt: string; latestIsEmpty: boolean }>();
+  for (const row of startupSeqs) {
+    if (row.latest_manifest_seq == null) {
+      nodeStartupState.set(row.node_id, { latestReadyAt: row.latest_ready_at, latestIsEmpty: true });
+    } else if (row.latest_pending_seq != null && row.latest_manifest_seq < row.latest_pending_seq) {
+      nodeStartupState.set(row.node_id, { latestReadyAt: row.latest_ready_at, latestIsEmpty: true });
+    } else {
+      nodeStartupState.set(row.node_id, { latestReadyAt: row.latest_ready_at, latestIsEmpty: false });
+    }
+  }
 
   const bySeat = new Map<string, Array<{ at: string; sessionName: string; files: ManifestFile[] }>>();
   let withDelivery = 0;
@@ -111,9 +133,9 @@ export function computeMemoryCoverage(db: Database.Database, opts: MemoryCoverag
   }
 
   // Seed seats that have startup_ready but no manifest at all.
-  for (const [nodeId, latestReady] of latestReadyByNode) {
+  for (const [nodeId, state] of nodeStartupState) {
     if (!bySeat.has(nodeId)) {
-      bySeat.set(nodeId, [{ at: latestReady, sessionName: nodeId, files: [] }]);
+      bySeat.set(nodeId, [{ at: state.latestReadyAt, sessionName: nodeId, files: [] }]);
     }
   }
 
@@ -121,10 +143,8 @@ export function computeMemoryCoverage(db: Database.Database, opts: MemoryCoverag
   const seats: SeatCoverage[] = [];
   for (const [nodeId, list] of bySeat) {
     const latest = list[list.length - 1]!;
-    const latestReady = latestReadyByNode.get(nodeId);
-    // If the seat's latest startup_ready is newer than its latest manifest,
-    // the most recent startup delivered nothing — treat delivered as empty.
-    const latestIsEmpty = latestReady != null && latestReady > latest.at;
+    const startupState = nodeStartupState.get(nodeId);
+    const latestIsEmpty = startupState?.latestIsEmpty ?? false;
     const surfacesOf = (files: ManifestFile[]) => new Set(files.map((f) => asString(f.surface)).filter(Boolean));
     const delivered = latestIsEmpty ? [] : [...surfacesOf(latest.files)].sort();
     let expected: string[];
@@ -136,7 +156,7 @@ export function computeMemoryCoverage(db: Database.Database, opts: MemoryCoverag
       expected = [...seen].sort();
     }
     const missing = expected.filter((s) => !delivered.includes(s));
-    const effectiveLatestAt = latestIsEmpty ? latestReady : latest.at;
+    const effectiveLatestAt = latestIsEmpty && startupState ? startupState.latestReadyAt : latest.at;
     seats.push({
       nodeId,
       sessionName: latest.sessionName,
