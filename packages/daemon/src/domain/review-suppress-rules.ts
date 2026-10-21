@@ -6,8 +6,8 @@
  * dropped silently: it comes back in `suppressed` with the rule id and reason, so
  * the caller can log it for audit.
  *
- * Safety valve: a finding is never suppressed when its verdict is must-fix or its
- * category is security. The caller can also pass `override` to show every finding
+ * Safety valve: a finding is never suppressed when its verdict is must-fix, its
+ * category reads as security, or it has no category. The caller can also pass `override` to show every finding
  * for one review.
  *
  * Rule scope: a rule applies only to the repo it names. A quarantined rule applies
@@ -74,9 +74,27 @@ function normalizeToken(value: string | null): string {
   return (value ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
 }
 
-/** A finding that no suppress rule can hide: must-fix verdicts and security findings. */
+const SECURITY_TOKENS: ReadonlySet<string> = new Set([
+  "owasp", "auth", "authn", "authz", "authentication", "authorization", "xss", "csrf", "sqli",
+  "injection", "secret", "secrets", "crypto", "cryptography", "cve", "permission", "permissions", "privacy",
+]);
+
+/** True when a category label reads as security: "security", "Security & Vulnerabilities", "OWASP", "auth". */
+function isSecurityCategory(category: string): boolean {
+  return category
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .some((t) => t.startsWith("secur") || t.startsWith("vulnerab") || SECURITY_TOKENS.has(t));
+}
+
+/**
+ * A finding that no suppress rule can hide: a must-fix verdict, a security-looking category, or no
+ * category at all (an unclassified finding fails safe, so it stays visible).
+ */
 export function isSuppressExempt(finding: Pick<SuppressibleFinding, "verdict" | "category">): boolean {
-  return normalizeToken(finding.verdict) === "must_fix" || normalizeToken(finding.category) === "security";
+  if (normalizeToken(finding.verdict) === "must_fix") return true;
+  const category = (finding.category ?? "").trim();
+  return category === "" || isSecurityCategory(category);
 }
 
 /**
@@ -91,8 +109,14 @@ export function fileGlobMatches(glob: string, file: string): boolean {
     if (c === "*") {
       if (glob[i + 1] === "*") {
         i++;
-        if (glob[i + 1] === "/") i++;
-        re += "(?:.*/)?";
+        if (glob[i + 1] === "/") {
+          // "**/" matches zero or more whole directories.
+          i++;
+          re += "(?:.*/)?";
+        } else {
+          // "**" not followed by "/" (trailing, bare, or "**.ts") matches anything, slashes included.
+          re += ".*";
+        }
       } else {
         re += "[^/]*";
       }

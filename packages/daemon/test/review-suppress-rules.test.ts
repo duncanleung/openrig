@@ -67,7 +67,21 @@ describe("safety valve", () => {
 
   it("isSuppressExempt is false for an ordinary finding", () => {
     expect(isSuppressExempt(finding())).toBe(false);
-    expect(isSuppressExempt({ verdict: null, category: null })).toBe(false);
+    for (const category of ["style", "naming", "author-docs", "architecture-consistency", "performance"]) {
+      expect(isSuppressExempt({ verdict: "SUGGESTION", category })).toBe(false);
+    }
+  });
+
+  it("exempts security-looking labels, not only the exact word", () => {
+    for (const category of ["Security & Vulnerabilities", "OWASP", "auth", "Authorization", "security-review", "XSS", "secrets", "vulnerability"]) {
+      expect(isSuppressExempt({ verdict: "SUGGESTION", category })).toBe(true);
+    }
+  });
+
+  it("exempts a finding with no category (fails safe)", () => {
+    for (const category of [null, "", "  "]) expect(isSuppressExempt({ verdict: "SUGGESTION", category })).toBe(true);
+    const f = finding({ category: null });
+    expect(applySuppressRules([f], [rule({ category: null, fileGlob: "**/*.ts" })], opts).shown).toEqual([f]);
   });
 
   it("override shows every finding and suppresses nothing", () => {
@@ -156,6 +170,22 @@ describe("fileGlobMatches", () => {
     expect(fileGlobMatches("src/**/*.ts", "src/a/b/c.ts")).toBe(true);
     expect(fileGlobMatches("src/**/*.ts", "src/c.ts")).toBe(true);
     expect(fileGlobMatches("src/*.ts", "src/a/c.ts")).toBe(false);
+  });
+
+  it("lets a trailing ** match everything under a directory", () => {
+    expect(fileGlobMatches("docs/**", "docs/a.md")).toBe(true);
+    expect(fileGlobMatches("docs/**", "docs/x/y.md")).toBe(true);
+    expect(fileGlobMatches("docs/**", "src/docs/a.md")).toBe(false);
+    expect(fileGlobMatches("vendor/**", "vendor/lib/deep/x.go")).toBe(true);
+    expect(fileGlobMatches("vendor/**", "vendors/x.go")).toBe(false);
+  });
+
+  it("matches a bare ** and **.ts against any path", () => {
+    expect(fileGlobMatches("**", "a.ts")).toBe(true);
+    expect(fileGlobMatches("**", "a/b/c.ts")).toBe(true);
+    expect(fileGlobMatches("**.ts", "a/b/c.ts")).toBe(true);
+    expect(fileGlobMatches("**.ts", "c.ts")).toBe(true);
+    expect(fileGlobMatches("**.ts", "c.go")).toBe(false);
   });
 
   it("matches ? as one non-slash character", () => {
