@@ -46,6 +46,17 @@ interface SeatStatusResponse {
   previous_occupant: string | null;
   handover_at: string | null;
   restore_outcome: string;
+  /** RIG-101: present only while the seat runs on a fallback runtime. */
+  runtime_fallback?: {
+    state: "on_fallback" | "swap_back_pending";
+    originalRuntime: string | null;
+    currentRuntime: string | null;
+    poolKey: string | null;
+    enteredAt: string | null;
+    expiresAt: string | null;
+    swapBack: "at_expiry" | "manual" | null;
+    swapBackPending: boolean;
+  };
 }
 
 interface SeatStatusError {
@@ -192,6 +203,17 @@ function printHuman(status: SeatStatusResponse): void {
   console.log(`Handover result: ${display(status.handover_result)}`);
   console.log(`Previous occupant: ${display(status.previous_occupant)}`);
   console.log(`Handover at: ${display(status.handover_at)}`);
+  if (status.runtime_fallback) {
+    const f = status.runtime_fallback;
+    console.log(`Runtime fallback: ${f.swapBackPending ? "return pending" : "on fallback"}`);
+    console.log(`  Original runtime: ${display(f.originalRuntime)}`);
+    console.log(`  Current runtime: ${display(f.currentRuntime)}`);
+    console.log(`  Pool: ${display(f.poolKey)}`);
+    console.log(`  Entered at: ${display(f.enteredAt)}`);
+    console.log(`  Expires at: ${display(f.expiresAt)} (a deadline; it does not prove the provider recovered)`);
+    console.log(`  Swap-back policy: ${display(f.swapBack)}`);
+    if (f.swapBackPending) console.log("  The pool expired. The seat waits for its return swap to the original runtime.");
+  }
 }
 
 function printHumanHandoverPlan(plan: SeatHandoverPlan): void {

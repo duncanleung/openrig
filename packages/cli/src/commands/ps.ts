@@ -64,6 +64,14 @@ interface NodeEntry {
   tmuxAttachCommand: string | null;
   resumeCommand: string | null;
   latestError: string | null;
+  /** RIG-101: present only while the seat runs on a fallback runtime. */
+  runtimeFallback?: {
+    state: "on_fallback" | "swap_back_pending";
+    originalRuntime: string | null;
+    currentRuntime: string | null;
+    expiresAt: string | null;
+    swapBackPending: boolean;
+  };
   /** Slice 15 — `terminal-active` primitive. true=producing output,
    *  false=silent past threshold, null=no signal. NEVER derived from
    *  hasAssignedWork (non-inference contract). */
@@ -217,6 +225,7 @@ const ALLOWED_NODE_FIELDS = new Set([
   "agentActivity",
   "contextUsage",
   "heldReason",
+  "runtimeFallback",
 ]);
 
 interface PsCliOptions {
@@ -619,6 +628,20 @@ export function formatDeclaredModel(model: string | null | undefined): string {
   return m.length > 0 ? m : "not-declared";
 }
 
+/** RIG-101: short fallback marker for the human REASON/ERROR cell. null when the seat is not on fallback. */
+export function formatRuntimeFallback(n: Pick<NodeEntry, "runtimeFallback">): string | null {
+  const f = n.runtimeFallback;
+  if (!f) return null;
+  const was = f.originalRuntime ? ` (was ${f.originalRuntime})` : "";
+  return `${f.swapBackPending ? "fallback: return pending" : "on fallback"}${was}`;
+}
+
+function withFallback(n: NodeEntry, cell: string): string {
+  const mark = formatRuntimeFallback(n);
+  if (!mark) return cell;
+  return cell === "—" ? mark : `${mark}; ${cell}`;
+}
+
 export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, unknown>> {
   return nodes.map((n) => {
     const attention = needsAttention(n);
@@ -644,6 +667,8 @@ export function compactNodeProjection(nodes: NodeEntry[]): Array<Record<string, 
       // OPR.0.4.3.06 — challenge-verified orientation, distinct from ready.
       oriented: n.oriented ?? "n-a",
       lifecycleState: n.lifecycleState,
+      // RIG-101: only while on a fallback runtime, so other rows stay byte-identical.
+      ...(n.runtimeFallback ? { runtimeFallback: n.runtimeFallback } : {}),
       // activity (state always; short reason only when attention — keep it lean).
       agentActivity: attention
         ? { state: n.agentActivity?.state ?? "unknown", reason: n.agentActivity?.reason }
@@ -821,7 +846,7 @@ podNamespace, hostSelfId, canonicalSessionName, nodeKind, runtime, model, sessio
 startupStatus, restoreOutcome, lifecycleState, tmuxAttachCommand,
 resumeCommand, latestError, terminalActive, hasAssignedWork,
 assignedWorkCount, pendingWorkCount, inProgressWorkCount, blockedWorkCount,
-agentActivity, contextUsage, heldReason.
+agentActivity, contextUsage, heldReason, runtimeFallback.
 
 --host runs on a remote host declared in ~/.openrig/hosts.yaml (no current-rig
 default applied; the remote host's rigs are shown).
@@ -1222,7 +1247,7 @@ async function handleNodes(
         abbrevNodeLifecycle(n.lifecycleState),
         formatActivity(n),
         formatHasWork(n.hasAssignedWork, n.assignedWorkCount ?? n.pendingWorkCount),
-        reason,
+        withFallback(n, reason),
       ));
     }
   } else {
@@ -1249,7 +1274,7 @@ async function handleNodes(
         formatActivity(n),
         formatContextUsage(n.contextUsage),
         n.restoreOutcome,
-        missingSessionGuidance(n) ?? (n.latestError ? truncate(n.latestError, 30) : n.heldReason ? `held: ${truncate(n.heldReason, 25)}` : "—"),
+        withFallback(n, missingSessionGuidance(n) ?? (n.latestError ? truncate(n.latestError, 30) : n.heldReason ? `held: ${truncate(n.heldReason, 25)}` : "—")),
       ));
     }
   }

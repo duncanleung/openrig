@@ -685,6 +685,27 @@ export function identityVerdictDownranksRunning(
 //   attention_required — any node is attention_required (priority over above).
 export type RigLifecycleState = "running" | "recoverable" | "stopped" | "degraded" | "attention_required";
 
+/**
+ * RIG-101: read-only view of an active runtime fallback (nodes.fallback_* columns).
+ * Present on a NodeInventoryEntry only while the seat is on a fallback runtime.
+ */
+export interface RuntimeFallbackView {
+  state: FallbackState;
+  /** The runtime the seat held before the forward swap. */
+  originalRuntime: string | null;
+  /** The runtime the seat runs now. */
+  currentRuntime: string | null;
+  /** The usage-limit pool that triggered the fallback. */
+  poolKey: string | null;
+  enteredAt: string | null;
+  /** The pool's usage-limit deadline. A deadline does not prove the provider recovered. */
+  expiresAt: string | null;
+  /** Declared return policy. null = no policy stored on the node. */
+  swapBack: FallbackSwapBack | null;
+  /** True when the pool expired and the seat waits for its return swap. */
+  swapBackPending: boolean;
+}
+
 export interface NodeInventoryEntry {
   /** Stable daemon node identity. Health scopes and other canonical records
    * key seats by this value; logicalId remains the human-facing address. */
@@ -723,6 +744,8 @@ export interface NodeInventoryEntry {
   handoverResult: HandoverResult;
   previousOccupant: string | null;
   handoverAt: string | null;
+  /** RIG-101: set only while the seat runs on a fallback runtime. */
+  runtimeFallback?: RuntimeFallbackView;
   tmuxAttachCommand: string | null;
   resumeCommand: string | null;
   recoveryGuidance: NodeRecoveryGuidance | null;

@@ -2,7 +2,7 @@ import type { CaptureObserver, ObservedBinding } from "./capture-observer.js";
 import type Database from "better-sqlite3";
 import { decodeTime } from "ulid";
 import { resolveActiveOccupantRow } from "./active-occupant.js";
-import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeOriented, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind, AgentActivity, SeatActivity } from "./types.js";
+import type { NodeInventoryEntry, NodeDetailEntry, NodeDetailPeer, NodeDetailEdge, NodeDetailCompactSpec, NodeRestoreOutcome, NodeOriented, NodeLifecycleState, Binding, RestoreResult, NodeRecoveryGuidance, Snapshot, WorkspaceSpec, SeatIdentityVerdict, SeatIdentityVerdictKind, AgentActivity, SeatActivity, RuntimeFallbackView } from "./types.js";
 import { identityVerdictConfirmsSessionMissing, identityVerdictDownranksRunning } from "./types.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { buildOrientedMap } from "./startup-proof.js";
@@ -46,6 +46,12 @@ interface InventoryRow {
   handover_result: string | null;
   previous_occupant: string | null;
   handover_at: string | null;
+  fallback_state?: string | null;
+  fallback_original_runtime?: string | null;
+  fallback_pool_key?: string | null;
+  fallback_entered_at?: string | null;
+  fallback_expires_at?: string | null;
+  fallback_swap_back?: string | null;
   // Newest session fields (may be null if no session)
   session_id: string | null;
   session_name: string | null;
@@ -534,8 +540,12 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
 function runInventoryRowQuery(db: Database.Database, whereClause: string, orderClause: string, params: readonly string[]): InventoryRow[] {
   // Join nodes with newest session (max ULID = max session.id string comparison)
   // and the rig name
-  const hasCodexConfigProfile = db.prepare("PRAGMA table_info(nodes)").all()
-    .some((row) => (row as { name?: string }).name === "codex_config_profile");
+  const nodeColumns = new Set(
+    db.prepare("PRAGMA table_info(nodes)").all().map((row) => (row as { name?: string }).name),
+  );
+  const hasCodexConfigProfile = nodeColumns.has("codex_config_profile");
+  // RIG-101: fallback columns come from migrations 090/091; older fixtures lack them.
+  const fallbackSelect = (col: string): string => (nodeColumns.has(col) ? `n.${col}` : "NULL");
   const codexConfigProfileSelect = hasCodexConfigProfile
     ? "n.codex_config_profile"
     : "NULL";
@@ -563,6 +573,12 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       n.handover_result,
       n.previous_occupant,
       n.handover_at,
+      ${fallbackSelect("fallback_state")} as fallback_state,
+      ${fallbackSelect("fallback_original_runtime")} as fallback_original_runtime,
+      ${fallbackSelect("fallback_pool_key")} as fallback_pool_key,
+      ${fallbackSelect("fallback_entered_at")} as fallback_entered_at,
+      ${fallbackSelect("fallback_expires_at")} as fallback_expires_at,
+      ${fallbackSelect("fallback_swap_back")} as fallback_swap_back,
       s.id as session_id,
       s.session_name,
       s.created_at as session_created_at,
@@ -695,6 +711,7 @@ function buildInventoryEntry(
     handoverResult: row.handover_result as NodeInventoryEntry["handoverResult"] ?? null,
     previousOccupant: row.previous_occupant,
     handoverAt: row.handover_at,
+    ...(row.fallback_state ? { runtimeFallback: deriveRuntimeFallback(row) } : {}),
     tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? tmuxAttachCommand(row.session_name) : null,
     resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile),
     // OPR.0.4.0.26: recoveryGuidance is NOT inlined per node in the LIST
@@ -725,6 +742,20 @@ function buildInventoryEntry(
     // never observed; carries evidence on mismatch/missing.
     identityVerdict,
     heldReason: deriveHeldReason(db, row.rig_id, row.node_id, sessionStatus),
+  };
+}
+
+/** RIG-101: project the nodes.fallback_* columns. Call only when fallback_state is set. */
+function deriveRuntimeFallback(row: InventoryRow): RuntimeFallbackView {
+  return {
+    state: row.fallback_state as RuntimeFallbackView["state"],
+    originalRuntime: row.fallback_original_runtime ?? null,
+    currentRuntime: row.runtime,
+    poolKey: row.fallback_pool_key ?? null,
+    enteredAt: row.fallback_entered_at ?? null,
+    expiresAt: row.fallback_expires_at ?? null,
+    swapBack: (row.fallback_swap_back as RuntimeFallbackView["swapBack"]) ?? null,
+    swapBackPending: row.fallback_state === "swap_back_pending",
   };
 }
 
