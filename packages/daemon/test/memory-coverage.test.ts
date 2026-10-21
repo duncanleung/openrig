@@ -102,6 +102,35 @@ describe("computeMemoryCoverage", () => {
     ready("a", "2026-10-19 09:00:00");
     expect(computeMemoryCoverage(db).deliveryCoverage).toBe(1);
   });
+
+  it("includes a seat with startup_ready but no manifest (empty startup)", () => {
+    ready("a", "2026-10-19 10:00:00");
+    ready("b", "2026-10-19 10:01:00");
+    manifest("b", "b@r", ["role"], "2026-10-19 10:01:01");
+    const r = computeMemoryCoverage(db, { expected: ["role"] });
+    expect(r.seats.map((s) => s.nodeId).sort()).toEqual(["a", "b"]);
+    const a = r.seats.find((s) => s.nodeId === "a")!;
+    expect(a).toMatchObject({ delivered: [], missing: ["role"], coverage: 0, latest: [] });
+    expect(r.seatsWithMissing).toBe(1);
+    expect(r.seatsFullyDelivered).toBe(1);
+  });
+
+  it("treats delivered as empty when startup_ready is newer than the latest manifest", () => {
+    manifest("a", "a@r", ["role", "guidance"], "2026-10-19 09:00:00");
+    ready("a", "2026-10-19 10:00:00");
+    const r = computeMemoryCoverage(db, { expected: ["role", "guidance"] });
+    const a = r.seats.find((s) => s.nodeId === "a")!;
+    expect(a).toMatchObject({ delivered: [], missing: ["guidance", "role"], coverage: 0, latest: [] });
+  });
+
+  it("uses the manifest when startup_ready is older than the latest manifest", () => {
+    ready("a", "2026-10-19 09:00:00");
+    manifest("a", "a@r", ["role", "guidance"], "2026-10-19 09:00:01");
+    const r = computeMemoryCoverage(db, { expected: ["role", "guidance"] });
+    const a = r.seats.find((s) => s.nodeId === "a")!;
+    expect(a).toMatchObject({ delivered: ["guidance", "role"], missing: [], coverage: 1 });
+    expect(a.latest.length).toBe(2);
+  });
 });
 
 describe("GET /api/memory/coverage", () => {
@@ -119,6 +148,15 @@ describe("GET /api/memory/coverage", () => {
     const { app } = createTestApp(db);
     const res = await app.request("/api/memory/coverage?since=yesterday-ish");
     expect(res.status).toBe(400);
+  });
+
+  it("normalizes non-ISO date strings to ISO before querying", async () => {
+    ready("a", "2026-10-19 10:00:00"); manifest("a", "a@r", ["role"], "2026-10-19 10:00:01");
+    const { app } = createTestApp(db);
+    const res = await app.request("/api/memory/coverage?since=Oct+19+2026");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { startups: number };
+    expect(body.startups).toBe(1);
   });
 
   it("only answers GET", async () => {
