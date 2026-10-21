@@ -1,4 +1,10 @@
 import type { Database } from "better-sqlite3";
+import {
+  isUserAction,
+  type SuppressRule,
+  type SuppressRuleStatus,
+  type UserAction,
+} from "./review-suppress-rules.js";
 
 // ── Fleet store: upsert writers for the four analytics tables (migrations 096–099). ──
 
@@ -305,6 +311,36 @@ function clampAggLimit(raw: number | undefined): number {
 
 function label(v: string | null | undefined, fallback: string): string {
   return v === null || v === undefined || v === "" ? fallback : v;
+}
+
+interface SuppressRuleDbRow {
+  id: number;
+  repo: string;
+  category: string | null;
+  file_glob: string | null;
+  description_hash: string | null;
+  reason: string;
+  status: SuppressRuleStatus;
+  quarantined_pr: number | null;
+  created_at: string;
+  last_matched_at: string | null;
+  match_count: number;
+}
+
+function toSuppressRule(r: SuppressRuleDbRow): SuppressRule {
+  return {
+    id: r.id,
+    repo: r.repo,
+    category: r.category,
+    fileGlob: r.file_glob,
+    descriptionHash: r.description_hash,
+    reason: r.reason,
+    status: r.status,
+    quarantinedPr: r.quarantined_pr,
+    createdAt: r.created_at,
+    lastMatchedAt: r.last_matched_at,
+    matchCount: r.match_count,
+  };
 }
 
 export class FleetStore {
@@ -631,6 +667,96 @@ export class FleetStore {
       WHERE run_trace_id = ?
       ORDER BY score DESC
     `).all(traceId) as ReviewFindingRow[];
+  }
+
+  // ── RIG-9: review finding user actions and suppress rules ─────────────────
+
+  /** Record what the user did with a finding. `null` clears it. Returns false when the finding does not exist. */
+  setUserAction(runTraceId: string, findingId: string, action: UserAction | null): boolean {
+    if (action !== null && !isUserAction(action)) {
+      throw new Error(`invalid user_action: ${String(action)}`);
+    }
+    const info = this.db.prepare(
+      "UPDATE review_findings SET user_action = ? WHERE run_trace_id = ? AND finding_id = ?",
+    ).run(action, runTraceId, findingId);
+    return info.changes > 0;
+  }
+
+  listSuppressRules(filter: { repo?: string; status?: SuppressRuleStatus } = {}): SuppressRule[] {
+    const where: string[] = [];
+    const params: unknown[] = [];
+    if (filter.repo !== undefined) {
+      where.push("repo = ?");
+      params.push(filter.repo);
+    }
+    if (filter.status !== undefined) {
+      where.push("status = ?");
+      params.push(filter.status);
+    }
+    const rows = this.db.prepare(
+      `SELECT * FROM review_suppress_rules ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY id`,
+    ).all(...params) as SuppressRuleDbRow[];
+    return rows.map(toSuppressRule);
+  }
+
+  /**
+   * Create a rule. A new rule starts quarantined to its source PR unless the caller passes
+   * status "active". A rule needs at least one matcher; a quarantined rule needs its source PR.
+   */
+  createSuppressRule(input: {
+    repo: string;
+    category?: string | null;
+    fileGlob?: string | null;
+    descriptionHash?: string | null;
+    reason: string;
+    status?: Exclude<SuppressRuleStatus, "retired">;
+    quarantinedPr?: number | null;
+  }): SuppressRule {
+    const status = input.status ?? "quarantined";
+    if (status !== "quarantined" && status !== "active") {
+      throw new Error(`a new suppress rule cannot start as '${status}'`);
+    }
+    if (input.category == null && input.fileGlob == null && input.descriptionHash == null) {
+      throw new Error("a suppress rule needs at least one matcher: category, fileGlob or descriptionHash");
+    }
+    if (status === "quarantined" && input.quarantinedPr == null) {
+      throw new Error("a quarantined suppress rule needs its source PR (quarantinedPr)");
+    }
+    if (input.reason.trim().length === 0) {
+      throw new Error("a suppress rule needs a reason (it is shown in the audit log)");
+    }
+    const info = this.db.prepare(`
+      INSERT INTO review_suppress_rules (repo, category, file_glob, description_hash, reason, status, quarantined_pr)
+      VALUES (@repo, @category, @fileGlob, @descriptionHash, @reason, @status, @quarantinedPr)
+    `).run({
+      repo: input.repo,
+      category: input.category ?? null,
+      fileGlob: input.fileGlob ?? null,
+      descriptionHash: input.descriptionHash ?? null,
+      reason: input.reason,
+      status,
+      quarantinedPr: input.quarantinedPr ?? null,
+    });
+    const row = this.db.prepare("SELECT * FROM review_suppress_rules WHERE id = ?").get(Number(info.lastInsertRowid)) as SuppressRuleDbRow;
+    return toSuppressRule(row);
+  }
+
+  /** Retire a rule. The row stays for audit. Returns false when the rule does not exist or is already retired. */
+  retireSuppressRule(id: number): boolean {
+    const info = this.db.prepare(
+      "UPDATE review_suppress_rules SET status = 'retired' WHERE id = ? AND status != 'retired'",
+    ).run(id);
+    return info.changes > 0;
+  }
+
+  /** Count one match per entry in `ruleIds` (repeat an id for several findings). Feeds staleness detection. */
+  recordSuppressMatches(ruleIds: readonly number[]): void {
+    const stmt = this.db.prepare(
+      "UPDATE review_suppress_rules SET match_count = match_count + 1, last_matched_at = datetime('now') WHERE id = ?",
+    );
+    this.db.transaction(() => {
+      for (const id of ruleIds) stmt.run(id);
+    })();
   }
 
   checkReviewExists(repo: string, branch: string, headSha: string): {

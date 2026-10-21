@@ -112,6 +112,7 @@ import { ticketFactoryControlSchema } from "./migrations/105_ticket_factory_cont
 import { ticketFactoryCutoverSchema } from "./migrations/106_ticket_factory_cutover.js";
 import { cronJobsSchema } from "./migrations/107_cron_jobs.js";
 import { digestStallPatternsSchema } from "./migrations/108_session_digest_stall_patterns.js";
+import { reviewSuppressRulesSchema } from "./migrations/109_review_suppress_rules.js";
 import type { Migration } from "./migrate.js";
 
 import { rigInstallRootSchema } from "./migrations/096_rig_install_root.js";
@@ -236,4 +237,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   ticketFactoryCutoverSchema,
   cronJobsSchema,
   digestStallPatternsSchema,
+  reviewSuppressRulesSchema,
 ];
