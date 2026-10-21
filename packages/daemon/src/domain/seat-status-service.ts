@@ -1,7 +1,7 @@
 import type { RigRepository } from "./rig-repository.js";
 import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
 import { parseSessionName } from "./session-name.js";
-import type { NodeInventoryEntry, SeatIdentityVerdict } from "./types.js";
+import type { NodeInventoryEntry, RuntimeFallbackView, SeatIdentityVerdict } from "./types.js";
 import { NativePermissionStore, type StoredNativePermissionSelection, type ResolvedSeatPermission } from "./native-permission-store.js";
 import { AppliedLaunchObservationStore, type StoredAppliedLaunchObservation } from "./applied-launch-observation-store.js";
 
@@ -25,6 +25,8 @@ export interface SeatStatus {
   previous_occupant: string | null;
   handover_at: string | null;
   restore_outcome: NodeInventoryEntry["restoreOutcome"];
+  /** RIG-101: present only while the seat runs on a fallback runtime. */
+  runtime_fallback?: RuntimeFallbackView;
   permissions: {
     selectionState: "explicit" | "inherit" | "unknown";
     desired: StoredNativePermissionSelection | null;
@@ -122,6 +124,7 @@ export class SeatStatusService {
       previous_occupant: entry.previousOccupant,
       handover_at: entry.handoverAt,
       restore_outcome: entry.restoreOutcome,
+      ...(entry.runtimeFallback ? { runtime_fallback: entry.runtimeFallback } : {}),
       permissions: this.permissionStatus(entry.nodeId, entry.runtime),
     };
   }
