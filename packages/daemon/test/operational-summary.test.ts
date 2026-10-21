@@ -257,6 +257,19 @@ describe("operational summary (RIG-120)", () => {
     expect(cov(s, "watchdog").status).toBe("unavailable");
   });
 
+  it("an attention_required seat alone is a finding: verdict is attention, never clear", () => {
+    seat("dev.impl", "alpha", { activity: "working" });
+    const bad = seat("dev.qa", "alpha", { activity: "working" });
+    const sessionId = (db.prepare("SELECT id FROM sessions WHERE session_name = ?").get(bad) as { id: string }).id;
+    registry.updateStartupStatus(sessionId, "attention_required");
+    freshWatchdog();
+    const s = summarize();
+    expect(s.seats.attentionRequired).toBe(1);
+    expect([s.terminalInput.count, s.humanGates.count, s.stalledWork.count]).toEqual([0, 0, 0]);
+    expect(s.coverage.every((c) => c.status === "complete")).toBe(true);
+    expect(s.verdict).toBe("attention");
+  });
+
   it("an empty daemon with a fresh watchdog is clear only because every source was read", () => {
     freshWatchdog();
     const s = summarize();

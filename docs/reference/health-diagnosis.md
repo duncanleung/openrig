@@ -447,8 +447,9 @@ running seat with no arbitrated activity state, a missing repository, no active
 watchdog job, and a watchdog job that is stale (older than three of its own
 intervals) or never evaluated all make a source not `complete`.
 
-`verdict` is `attention` when any section has an entry, `clear` only when every
-source is `complete` and every count is zero, and `indeterminate` otherwise.
+`verdict` is `attention` when any section has an entry or any seat is
+`attention_required`, `clear` only when every source is `complete` and every
+count (including `seats.attentionRequired`) is zero, and `indeterminate` otherwise.
 `indeterminate` is not healthy. In rig scope, the 500-row queue reads are still
 fleet-wide before the rig filter, so a truncation applies to the whole daemon.
 

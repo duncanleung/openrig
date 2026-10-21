@@ -190,7 +190,8 @@ export function computeOperationalSummary(deps: OperationalSummaryDeps): Operati
     coverage.push({ source: "watchdog", status: "unavailable", examined: 0, reason: "watchdog repository is not wired" });
   }
 
-  const anyFinding = terminalSeats.length > 0 || gateItems.length > 0 || stalledItems.length > 0;
+  // An attention_required seat is a finding on its own (failed restore, startup or identity mismatch).
+  const anyFinding = terminalSeats.length > 0 || gateItems.length > 0 || stalledItems.length > 0 || attentionRequired > 0;
   const complete = coverage.every((c) => c.status === "complete");
   const verdict: OperationalVerdict = anyFinding ? "attention" : complete ? "clear" : "indeterminate";
 
