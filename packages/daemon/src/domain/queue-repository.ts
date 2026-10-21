@@ -21,6 +21,16 @@ import {
   type ClosureReason,
 } from "./hot-potato-enforcer.js";
 import { isHumanSeatSession, validateHumanPark, validateHumanRoute } from "./human-route-enforcer.js";
+import {
+  guardBlocker,
+  guardFieldAdmission,
+  guardInformationalPark,
+  guardReopen,
+  guardStateAndWake,
+  guardStatePreservingAppend,
+  type QueueGuardFailure,
+  type QueueGuardVocab,
+} from "./queue-update-guards.js";
 import type { AdvisorRequest, ValidationGateResult } from "./validation-gate-enforcer.js";
 import {
   QueueWakeRepository,
@@ -101,6 +111,14 @@ export function isTypedGateBlocker(value: unknown): boolean {
   const p = typedGateBlockerPrefix(value);
   return p != null && value.slice(p.length).trim().length > 0;
 }
+
+/** RIG-114: the vocabulary the update guards (queue-update-guards.ts) need, built once here so that module stays a leaf. */
+const queueGuardVocab: QueueGuardVocab = {
+  queueStates: QUEUE_STATES,
+  isBlockerLive,
+  typedGateBlockerPrefix,
+  isTypedGateBlocker,
+};
 
 /**
  * #165: a claim is the destination acting on the row, which is stronger evidence than
@@ -464,6 +482,11 @@ export class QueueRepositoryError extends Error {
     this.code = code;
     this.meta = meta;
   }
+}
+
+/** RIG-114: a guard failure from queue-update-guards.ts becomes the same QueueRepositoryError the inline guards threw. */
+function queueGuardError(f: QueueGuardFailure): QueueRepositoryError {
+  return new QueueRepositoryError(f.code, f.message, f.meta);
 }
 
 /** OPR.0.4.6.WF5 (guard-named fix shape): exported so the workflow
@@ -2594,30 +2617,8 @@ export class QueueRepository {
     const isStatePreservingAppend = input.state === undefined || (isGuardedTerminal && input.state === qitem.state);
 
     if (isStatePreservingAppend) {
-      if (input.state === undefined && !hasNote) {
-        throw new QueueRepositoryError(
-          "state_or_note_required",
-          "queue update requires --state or a non-empty --note; nothing was written",
-        );
-      }
-      const disallowed = input.reopen === true
-        || input.closureReason != null
-        || input.closureTarget != null
-        || input.handedOffTo != null
-        || input.blockedOn != null
-        || input.wakeWatchdogId != null
-        || input.wakeAfterSeconds != null
-        || input.wakeMaxSeconds != null
-        || input.wakeProgressEvidence != null
-        || input.wakeMessage != null
-        || input.summary != null
-        || input.evidenceRef != null;
-      if (disallowed) {
-        throw new QueueRepositoryError(
-          "note_append_fields_not_admitted",
-          "a state-preserving note append accepts only --note (and an optional same --state); state-write fields were supplied, so nothing was written",
-        );
-      }
+      const appendFailure = guardStatePreservingAppend(input, hasNote);
+      if (appendFailure) throw queueGuardError(appendFailure);
 
       this.transitionLog.append({
         qitemId: input.qitemId,
@@ -2641,75 +2642,13 @@ export class QueueRepository {
       });
       return { persistedEvent, persistedEvents: [persistedEvent] };
     }
-    if (!isQueueState(input.state)) {
-      throw new QueueRepositoryError(
-        "invalid_state",
-        `state=${input.state} not valid; valid: ${QUEUE_STATES.join(", ")}`
-      );
-    }
-    if ((input.wakeWatchdogId != null || input.wakeAfterSeconds != null) && input.state !== "blocked") {
-      throw new QueueRepositoryError(
-        "wake_not_admitted",
-        "a park wake persists only with state=blocked; park the row or drop the wake option",
-      );
-    }
-    if (input.wakeWatchdogId != null && input.wakeAfterSeconds != null) {
-      throw new QueueRepositoryError(
-        "wake_ambiguous",
-        "choose one explicit park wake: an existing watchdog id or an atomic timer",
-      );
-    }
-    if (input.wakeAfterSeconds != null && (!Number.isInteger(input.wakeAfterSeconds) || input.wakeAfterSeconds <= 0)) {
-      throw new QueueRepositoryError(
-        "wake_after_invalid",
-        `wakeAfterSeconds must be a positive integer (got ${input.wakeAfterSeconds})`,
-      );
-    }
-    if (input.wakeMessage != null && input.wakeAfterSeconds == null) {
-      throw new QueueRepositoryError(
-        "wake_message_not_admitted",
-        "wakeMessage is internal timer content and requires wakeAfterSeconds",
-      );
-    }
-    if (input.wakeMaxSeconds != null && (input.wakeAfterSeconds == null || !Number.isInteger(input.wakeMaxSeconds) || input.wakeMaxSeconds < input.wakeAfterSeconds)) {
-      throw new QueueRepositoryError("wake_max_invalid", "wakeMaxSeconds requires an initial delay and must be an integer at least as large");
-    }
-    if (input.wakeMessage != null && input.wakeMessage.trim().length === 0) {
-      throw new QueueRepositoryError(
-        "wake_message_invalid",
-        "wakeMessage must be non-empty when supplied",
-      );
-    }
+    const stateFailure = guardStateAndWake(input, queueGuardVocab);
+    if (stateFailure) throw queueGuardError(stateFailure);
+    assertValidatedQueueState(input.state);
 
     const isReopen = isGuardedTerminal && input.state !== qitem.state;
-    if (isReopen && !input.reopen) {
-      throw new QueueRepositoryError(
-        "terminal_reopen_requires_ack",
-        `qitem ${input.qitemId} is currently '${qitem.state}'; state='${input.state}' would reopen a terminal row. Re-run deliberately with --reopen --note <reason>.`,
-        { currentState: qitem.state, requestedState: input.state },
-      );
-    }
-    if (isReopen && !isBlockerLive(input.state)) {
-      throw new QueueRepositoryError(
-        "terminal_reopen_target_invalid",
-        `qitem ${input.qitemId} is currently '${qitem.state}'; --reopen requires an active target state (pending, in-progress, or blocked), not '${input.state}'.`,
-        { currentState: qitem.state, requestedState: input.state },
-      );
-    }
-    if (isReopen && !hasNote) {
-      throw new QueueRepositoryError(
-        "reopen_note_required",
-        `qitem ${input.qitemId} is currently '${qitem.state}'; deliberate reopen requires --note <reason> so the repair is auditable.`,
-        { currentState: qitem.state, requestedState: input.state },
-      );
-    }
-    if (input.reopen && !isReopen) {
-      throw new QueueRepositoryError(
-        "reopen_not_applicable",
-        `--reopen applies only when moving a terminal row to an active state; qitem ${input.qitemId} is currently '${qitem.state}'.`,
-        { currentState: qitem.state, requestedState: input.state },
-      );
-    }
+    const reopenFailure = guardReopen(input, qitem, hasNote, isReopen, queueGuardVocab);
+    if (reopenFailure) throw queueGuardError(reopenFailure);
 
     const validation = validateClosure({
       state: input.state,
@@ -2758,108 +2697,15 @@ export class QueueRepository {
       ? this.retainedClaimBlocker(input.qitemId)
       : null;
     const effectiveBlockedOn = input.blockedOn ?? qitem.blockedOn ?? previousClaimBlocker ?? null;
-    if (input.state === "blocked" && effectiveBlockedOn && this.getById(effectiveBlockedOn)?.humanIntent === "update") {
-      throw new QueueRepositoryError("invalid_human_notification", "An informational update is not an approval dependency. Create a separate decision request if a human decision is needed.");
-    }
-    if (qitem.humanIntent === "update" && input.state === "blocked" && isHumanSeatSessionRef(effectiveBlockedOn ?? "")) {
-      throw new QueueRepositoryError("invalid_human_notification", "An informational delivery cannot become a human approval park; author a separate decision request.");
-    }
+    const informationalFailure = guardInformationalPark(input, qitem, effectiveBlockedOn, (id) => this.getById(id));
+    if (informationalFailure) throw queueGuardError(informationalFailure);
     const isHumanPark = input.state === "blocked" && isHumanSeatSession(effectiveBlockedOn);
 
-    // OPR.0.5.1 slice-51-06 D2 — summary/evidence_ref are persist-able ONLY at a human-seat park
-    // (see the FR-6 note below). Silently ignoring them on any other transition is a data-loss trap
-    // (the operator believes the metadata was saved). HARD-REJECT before ANY UPDATE/log/event so the
-    // caller learns immediately and nothing is half-applied. null/undefined = absent (allowed);
-    // empty string = present (a deliberate value → rejected on a non-park transition).
-    if (!isHumanPark) {
-      const invalidFields: Array<"summary" | "evidenceRef"> = [];
-      if (input.summary != null) invalidFields.push("summary");
-      if (input.evidenceRef != null) invalidFields.push("evidenceRef");
-      if (invalidFields.length > 0) {
-        const flags = invalidFields.map((f) => (f === "summary" ? "--summary" : "--evidence-ref")).join(" / ");
-        throw new QueueRepositoryError(
-          "summary_evidence_not_persistable",
-          `${invalidFields.join(" + ")} persist only on a human-seat park (state=blocked on a human seat); the '${input.state}' transition cannot store them. Remove ${flags}, or park the item (rig queue block --on <human-seat> --summary … --evidence-ref …).`,
-          { invalidFields },
-        );
-      }
-    }
+    const fieldFailure = guardFieldAdmission(input, isHumanPark);
+    if (fieldFailure) throw queueGuardError(fieldFailure);
 
-    // SWEEP-a (shape f2576102) — closure/blocked-field COHERENCE, beside the reference
-    // reject above: an incoherent field must never silently persist (worse than a drop —
-    // the COALESCE below would write it). Admits-map, derived from LIVE schema use:
-    //   closure_reason/closure_target → state "done", OR the PARK-RECORD form
-    //     (state "blocked" with closureReason "blocked_on" — the workflow gate/park
-    //     writers' established shape, workflow-runtime.ts:587/1013);
-    //   blocked_on → state "blocked" only.
-    const isParkRecord = input.state === "blocked" && input.closureReason === "blocked_on";
-    // Third live form (found by the neighborhood suites): the transactional handoff
-    // closes its source as state "handed-off" with closureReason "handed_off_to".
-    const isHandoffClose = input.state === "handed-off" && input.closureReason === "handed_off_to";
-    // 0.5.1-53 Atom 2a — FOURTH admitted form: the supersession-cancel. A row corrected by
-    // cancel-and-replace records state=canceled + closureReason=superseded + closureTarget=<successor>,
-    // so superseded is distinguishable from abandoned (a plain cancel keeps closureReason=null).
-    const isSupersedeCancel = input.state === "canceled" && input.closureReason === "superseded";
-    if (input.state !== "done" && !isParkRecord && !isHandoffClose && !isSupersedeCancel && (input.closureReason != null || input.closureTarget != null)) {
-      throw new QueueRepositoryError(
-        "closure_fields_not_admitted",
-        `closure_reason/closure_target persist only on state=done, the blocked park-record form, the handoff close, or the superseded cancel; the '${input.state}' transition cannot store them. Close the item (--state done --closure-reason …) or drop the flags.`,
-        {},
-      );
-    }
-    // A supersession must name WHAT replaced this row — fail LOUD before any write (never a silent
-    // no-op leaving a stale row, the dead-signal class), symmetric with handed_off_to's target rule.
-    if (isSupersedeCancel && !input.closureTarget) {
-      throw new QueueRepositoryError(
-        "missing_closure_target",
-        `closure_reason=superseded requires closure_target (the successor qitem that replaced this row).`,
-        {},
-      );
-    }
-    if (input.blockedOn != null && input.state !== "blocked") {
-      throw new QueueRepositoryError(
-        "blocked_on_not_admitted",
-        `blocked_on persists only on state=blocked; the '${input.state}' transition cannot store it. Park the item (rig queue block --on …) or drop --blocked-on.`,
-        {},
-      );
-    }
-
-    // 0.5.1-53 Atom 1b(ii) + 1a — blocker validation at the park moment. Non-human blocker kinds:
-    //   qitem-ref ("qitem-…")        → must EXIST and be LIVE (1b-ii); a ghost or dead blocker never lifts.
-    //   typed gate (fold:/auth:/…)   → first-class (1a), but a bare prefix with no gate body is malformed
-    //                                   (a typo must not masquerade as a gate).
-    //   anything else (legacy gate-name) → left as-is; out of this slice.
-    // Human-seat parks (isHumanPark) enforce their own FR-6 contract above.
-    if (input.state === "blocked" && !isHumanPark && typeof effectiveBlockedOn === "string") {
-      if (effectiveBlockedOn.startsWith("qitem-")) {
-        const blocker = this.getById(effectiveBlockedOn);
-        if (!blocker) {
-          throw new QueueRepositoryError(
-            "blocker_not_found",
-            `blocked_on names a qitem that does not exist on this daemon: ${effectiveBlockedOn}. A qitem absent from this daemon cannot be a live blocker here. If it is stored on another host, use a typed gate such as external:<host>/<id> with --wake-watchdog or --wake-after.`,
-            // F1 (error-honesty): the rejected value is named rejectedBlocker — an error payload
-            // never carries the success-shaped blockedOn field (the field-filtered-misread class).
-            { rejectedBlocker: effectiveBlockedOn },
-          );
-        }
-        if (!isBlockerLive(blocker.state)) {
-          throw new QueueRepositoryError(
-            "blocker_not_live",
-            `blocked_on names a resolved qitem: ${effectiveBlockedOn} is '${blocker.state}'. A park must name a LIVE blocker — parking on a completed/closed row is a dead-blocker park that never self-clears.`,
-            { rejectedBlocker: effectiveBlockedOn, blockerState: blocker.state },
-          );
-        }
-      } else {
-        const typedPrefix = typedGateBlockerPrefix(effectiveBlockedOn);
-        if (typedPrefix && !isTypedGateBlocker(effectiveBlockedOn)) {
-          throw new QueueRepositoryError(
-            "blocker_malformed",
-            `blocked_on '${effectiveBlockedOn}' is a bare '${typedPrefix}' prefix with no gate body. A typed gate blocker must name its gate (e.g. fold:one-home+attestation).`,
-            { rejectedBlocker: effectiveBlockedOn },
-          );
-        }
-      }
-    }
+    const blockerFailure = guardBlocker(input, isHumanPark, effectiveBlockedOn, (id) => this.getById(id), queueGuardVocab);
+    if (blockerFailure) throw queueGuardError(blockerFailure);
 
     let effectiveSummary = qitem.summary;
     let effectiveEvidenceRef = qitem.evidenceRef;
@@ -4219,6 +4065,6 @@ export class QueueRepository {
   }
 }
 
-function isQueueState(value: unknown): value is QueueState {
-  return typeof value === "string" && (QUEUE_STATES as readonly string[]).includes(value);
-}
+/** RIG-114: guardStateAndWake already rejected an invalid state. This restores the type narrowing the inline state check used to give input.state. It checks nothing at run time. */
+function assertValidatedQueueState(_value: unknown): asserts _value is QueueState {}
+
