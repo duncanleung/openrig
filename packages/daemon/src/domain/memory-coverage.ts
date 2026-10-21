@@ -90,6 +90,34 @@ export function computeMemoryCoverage(db: Database.Database, opts: MemoryCoverag
   const truncated = rows.length > MAX_MANIFEST_EVENTS;
   const manifests = (truncated ? rows.slice(0, MAX_MANIFEST_EVENTS) : rows).reverse(); // oldest first
 
+  // Determine per-node whether the latest startup delivered files, using event seq
+  // (autoincrement) instead of created_at to avoid false positives when manifest and
+  // ready from the same startup straddle a second boundary.
+  // startup-orchestrator emits: pending (step 1) → manifest (step 8, optional) → ready (step 9).
+  // A manifest belongs to the latest startup iff its seq > the latest pending seq.
+  const startupSeqs = db.prepare(
+    `SELECT node_id,
+      max(CASE WHEN type = 'node.startup_ready' THEN seq END) AS latest_ready_seq,
+      max(CASE WHEN type = 'node.startup_ready' THEN created_at END) AS latest_ready_at,
+      max(CASE WHEN type = 'node.startup_delivery_manifest' THEN seq END) AS latest_manifest_seq,
+      max(CASE WHEN type = 'node.startup_pending' THEN seq END) AS latest_pending_seq
+    FROM events
+    WHERE type IN ('node.startup_ready', 'node.startup_delivery_manifest', 'node.startup_pending')${filter}
+    GROUP BY node_id
+    HAVING max(CASE WHEN type = 'node.startup_ready' THEN seq END) IS NOT NULL`,
+  ).all(...args) as Array<{ node_id: string; latest_ready_seq: number; latest_ready_at: string; latest_manifest_seq: number | null; latest_pending_seq: number | null }>;
+
+  const nodeStartupState = new Map<string, { latestReadyAt: string; latestIsEmpty: boolean }>();
+  for (const row of startupSeqs) {
+    if (row.latest_manifest_seq == null) {
+      nodeStartupState.set(row.node_id, { latestReadyAt: row.latest_ready_at, latestIsEmpty: true });
+    } else if (row.latest_pending_seq != null && row.latest_manifest_seq < row.latest_pending_seq) {
+      nodeStartupState.set(row.node_id, { latestReadyAt: row.latest_ready_at, latestIsEmpty: true });
+    } else {
+      nodeStartupState.set(row.node_id, { latestReadyAt: row.latest_ready_at, latestIsEmpty: false });
+    }
+  }
+
   const bySeat = new Map<string, Array<{ at: string; sessionName: string; files: ManifestFile[] }>>();
   let withDelivery = 0;
   for (const row of manifests) {
@@ -104,12 +132,21 @@ export function computeMemoryCoverage(db: Database.Database, opts: MemoryCoverag
     bySeat.set(key, list);
   }
 
+  // Seed seats that have startup_ready but no manifest at all.
+  for (const [nodeId, state] of nodeStartupState) {
+    if (!bySeat.has(nodeId)) {
+      bySeat.set(nodeId, [{ at: state.latestReadyAt, sessionName: nodeId, files: [] }]);
+    }
+  }
+
   const callerExpected = opts.expected && opts.expected.length > 0 ? [...new Set(opts.expected)].sort() : null;
   const seats: SeatCoverage[] = [];
   for (const [nodeId, list] of bySeat) {
     const latest = list[list.length - 1]!;
+    const startupState = nodeStartupState.get(nodeId);
+    const latestIsEmpty = startupState?.latestIsEmpty ?? false;
     const surfacesOf = (files: ManifestFile[]) => new Set(files.map((f) => asString(f.surface)).filter(Boolean));
-    const delivered = [...surfacesOf(latest.files)].sort();
+    const delivered = latestIsEmpty ? [] : [...surfacesOf(latest.files)].sort();
     let expected: string[];
     if (callerExpected) {
       expected = callerExpected;
@@ -119,17 +156,18 @@ export function computeMemoryCoverage(db: Database.Database, opts: MemoryCoverag
       expected = [...seen].sort();
     }
     const missing = expected.filter((s) => !delivered.includes(s));
+    const effectiveLatestAt = latestIsEmpty && startupState ? startupState.latestReadyAt : latest.at;
     seats.push({
       nodeId,
       sessionName: latest.sessionName,
       startups: list.length,
-      latestAt: latest.at,
+      latestAt: effectiveLatestAt,
       expectedSource: callerExpected ? "caller" : "history",
       expected,
       delivered,
       missing,
       coverage: expected.length === 0 ? null : (expected.length - missing.length) / expected.length,
-      latest: latest.files.map((f) => ({
+      latest: latestIsEmpty ? [] : latest.files.map((f) => ({
         [MEMORY_ATTR.surface]: asString(f.surface),
         [MEMORY_ATTR.deliveryHint]: asString(f.deliveryHint),
         [MEMORY_ATTR.contentHash]: asString(f.contentHash),
