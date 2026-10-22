@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+# RIG-125 — PostToolUse hook: cap very large tool output before the model sees it.
+#
+# Reads the PostToolUse JSON from stdin. Every string inside `tool_response` that is longer than
+# CAP bytes is cut to its first HEAD chars + a marker + its last TAIL chars. Strings are cut in
+# place, so the response keeps its shape (Bash {stdout,stderr,...}, Read {file:{content}},
+# MCP [{type,text}]). Emits `updatedToolOutput` only when something was cut.
+#
+# A string is cut only when it has more than HEAD+TAIL characters and the result is smaller in bytes
+# than the original (multi-byte text can otherwise grow). The marker counts the bytes actually removed.
+#
+# Fail-open: any error (no jq, bad JSON, no tool_response, image output) exits 0 with no output,
+# which leaves the tool output unchanged. The full output stays in the session transcript.
+# Tunables (environment): OPENRIG_TRUNCATE_CAP (8192), OPENRIG_TRUNCATE_HEAD (3072),
+# OPENRIG_TRUNCATE_TAIL (2048), OPENRIG_TRUNCATE_DISABLE=1 (turn the hook off).
+set -u
+trap 'exit 0' ERR
+[ "${OPENRIG_TRUNCATE_DISABLE:-}" = "1" ] && exit 0
+command -v jq >/dev/null 2>&1 || exit 0
+
+cap="${OPENRIG_TRUNCATE_CAP:-8192}"
+head="${OPENRIG_TRUNCATE_HEAD:-3072}"
+tail="${OPENRIG_TRUNCATE_TAIL:-2048}"
+case "$cap$head$tail" in *[!0-9]*) exit 0 ;; esac
+
+jq -c --argjson cap "$cap" --argjson head "$head" --argjson tail "$tail" '
+  def tailof: if $tail > 0 then .[length - $tail:] else "" end;
+  def cut: if type == "string" and utf8bytelength > $cap and length > ($head + $tail) then
+      (.[0:$head]) as $h | tailof as $t
+      | (utf8bytelength - ($h | utf8bytelength) - ($t | utf8bytelength)) as $gone
+      | ($h + "\n...[truncated " + ($gone | tostring)
+          + " bytes by post-tool-truncate; full output is in the session transcript]...\n" + $t) as $out
+      | if ($out | utf8bytelength) < utf8bytelength then $out else . end
+    else . end;
+  def has_image: any(.. ; type == "object" and (.type? == "image" or .isImage? == true));
+  if (.tool_response == null) or (.tool_response | has_image) then empty
+  else
+    (.tool_response) as $orig
+    | ($orig | walk(cut)) as $new
+    | if $new == $orig then empty
+      else {hookSpecificOutput: {hookEventName: "PostToolUse", updatedToolOutput: $new}} end
+  end
+' 2>/dev/null || true
+exit 0
