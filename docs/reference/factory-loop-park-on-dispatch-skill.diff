@@ -1,0 +1,44 @@
+--- a/factory-loop/SKILL.md	2026-10-22 11:10:46
++++ b/factory-loop/SKILL.md	2026-10-22 11:10:46
+@@ -991,6 +991,32 @@
+ 
+ The seat runs `/ticket-loop` in its own context. The orchestrator does not absorb the
+ implementation plan, code diffs, or review output — only the one-line result.
++
++**Park the queue item while the seat works (RIG-127).** The orchestrator makes no queue change
++while it waits, and its pane shows an idle prompt. An unparked claimed row then reads
++`stalled-after-claim` after `queue.pickup_stall_threshold_minutes` (3 min), and the stuck-sweep
++raises a false finding. A parked row reads `parked` and the sweep skips it. Park right after
++the `rig send`:
++
++```bash
++rig queue block ${QITEM_ID} \
++  --on "external:seat-result:${TICKET_ID}-${PHASE}" \
++  --continuation "awaiting ${SEAT} result for ${TICKET_ID} (${PHASE})" \
++  --wake-after 60m
++```
++
++- `${PHASE}` is `implement`, `validate` or `review`. The `external:` gate needs a body after the
++  prefix. A bare `external:` is refused.
++- `--wake-after` is the longest you will wait for this dispatch. The wake is the one nudge for the
++  park; when it fires, run the lease check below and re-park if the seat still works.
++- Send first, park second. If the result already arrived, do not park: the row is still
++  `in-progress`, so consume the result.
++- When the `TICKET_LOOP_RESULT` (or `REVIEW_RESULT`, `GATE_RESULT`) arrives, unpark before
++  anything else: `rig queue update ${QITEM_ID} --state in-progress --note "result: ${PHASE} ${OUTCOME}"`.
++- Several seats at once: park once, and unpark only when the continuation has what it needs
++  (any result or all results). Name which in `--continuation`.
++- A parked row still gets `unconsumed-wait` findings if a wake notice goes unread. Read wake
++  notices.
+ 
+ **Monitor for completion:** Poll the seat every 60 seconds until a `TICKET_LOOP_RESULT` message
+ arrives or the lease expires:
+@@ -1266,6 +1292,8 @@
+ rig send orch-lead@${RIG_NAME} \"REVIEW_RESULT: ticket=${TICKET_ID} pr=${PR_NUMBER} outcome=<merge-ready|escalated|failed> head_sha=<current_HEAD> review_sha=<sha> validation_sha=<sha|null> must_fix=<N> suggestions=<N> nitpicks=<N> fixes_applied=<N> ci=<green|red> conflicts=<yes|no> cycle=<N> error=<reason|null>\"
+ "
+ ```
++
++Park the queue item as in Step 2c (`PHASE=review`), and unpark when `REVIEW_RESULT` arrives.
+ 
+ The review seat runs the full review-fix loop in its own context: `/code-review-dual` →
+ `/code-review-validate-findings` → apply fixes → re-review (up to 3 cycles). The orchestrator
