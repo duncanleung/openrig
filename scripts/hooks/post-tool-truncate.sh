@@ -6,6 +6,9 @@
 # place, so the response keeps its shape (Bash {stdout,stderr,...}, Read {file:{content}},
 # MCP [{type,text}]). Emits `updatedToolOutput` only when something was cut.
 #
+# A string is cut only when it has more than HEAD+TAIL characters and the result is smaller in bytes
+# than the original (multi-byte text can otherwise grow). The marker counts the bytes actually removed.
+#
 # Fail-open: any error (no jq, bad JSON, no tool_response, image output) exits 0 with no output,
 # which leaves the tool output unchanged. The full output stays in the session transcript.
 # Tunables (environment): OPENRIG_TRUNCATE_CAP (8192), OPENRIG_TRUNCATE_HEAD (3072),
@@ -21,9 +24,13 @@ tail="${OPENRIG_TRUNCATE_TAIL:-2048}"
 case "$cap$head$tail" in *[!0-9]*) exit 0 ;; esac
 
 jq -c --argjson cap "$cap" --argjson head "$head" --argjson tail "$tail" '
-  def cut: if type == "string" and utf8bytelength > $cap
-    then .[0:$head] + "\n...[truncated " + ((utf8bytelength - $head - $tail) | tostring)
-      + " bytes by post-tool-truncate; full output is in the session transcript]...\n" + .[-$tail:]
+  def tailof: if $tail > 0 then .[length - $tail:] else "" end;
+  def cut: if type == "string" and utf8bytelength > $cap and length > ($head + $tail) then
+      (.[0:$head]) as $h | tailof as $t
+      | (utf8bytelength - ($h | utf8bytelength) - ($t | utf8bytelength)) as $gone
+      | ($h + "\n...[truncated " + ($gone | tostring)
+          + " bytes by post-tool-truncate; full output is in the session transcript]...\n" + $t) as $out
+      | if ($out | utf8bytelength) < utf8bytelength then $out else . end
     else . end;
   if (.tool_response == null) or (.tool_response | type == "object" and .isImage == true) then empty
   else

@@ -89,6 +89,25 @@ test("fails open when jq is missing from PATH", () => {
   assert.equal(r.stdout, "");
 });
 
+test("CJK text under head+tail characters is left alone (no growth)", { skip: !hasJq }, () => {
+  assert.equal(run(bash("漢".repeat(2800))).out, "");
+});
+
+test("CJK text never grows; a large one is cut and the marker counts removed bytes", { skip: !hasJq }, () => {
+  assert.equal(run(bash("漢".repeat(4000))).out, "", "4000 chars = 12000 bytes: the cut would be larger");
+  const text = "漢".repeat(30000);
+  const o = run(bash(text)).parsed.hookSpecificOutput.updatedToolOutput.stdout;
+  assert.ok(Buffer.byteLength(o) < Buffer.byteLength(text));
+  const gone = Number(o.match(/truncated (\d+) bytes/)[1]);
+  assert.equal(gone, Buffer.byteLength(text) - 3 * (3072 + 2048));
+});
+
+test("OPENRIG_TRUNCATE_TAIL=0 keeps no tail and does not append the whole string", { skip: !hasJq }, () => {
+  const o = run(bash("x".repeat(20000)), { OPENRIG_TRUNCATE_TAIL: "0" }).parsed.hookSpecificOutput.updatedToolOutput.stdout;
+  assert.ok(o.length < 3500);
+  assert.ok(o.endsWith("]...\n"));
+});
+
 test("runs in well under the 100 ms budget per call", { skip: !hasJq }, () => {
   const input = JSON.stringify(bash("x".repeat(40000)));
   const t0 = process.hrtime.bigint();

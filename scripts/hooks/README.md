@@ -51,8 +51,10 @@ Roll back: remove the settings entry.
 - The cut is lossy for the model. A needed line in the middle of a long log or file is
   hidden. The marker says how many bytes were cut. Read the file again with an offset, or
   read the transcript, when you need it.
-- The cap counts bytes; the head and tail count characters. Text with many multi-byte
-  characters can keep more than 5120 bytes.
+- The cap counts bytes; the head and tail count characters. A string is cut only when it has more
+  than head + tail characters and the cut result is smaller in bytes than the original, so
+  multi-byte text is never made larger. The marker counts the bytes actually removed.
+  `OPENRIG_TRUNCATE_TAIL=0` keeps no tail.
 - `updatedToolOutput` is checked against Claude Code 2.1.308 (`hookSpecificOutput`,
   `hookEventName: "PostToolUse"`, any JSON value). It accepts any value, but only the
   strings-in-place shape was verified against the transcript record shapes, not against a
