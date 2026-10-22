@@ -108,6 +108,16 @@ test("OPENRIG_TRUNCATE_TAIL=0 keeps no tail and does not append the whole string
   assert.ok(o.endsWith("]...\n"));
 });
 
+test("MCP array with an image block passes through unchanged", { skip: !hasJq }, () => {
+  const r = { tool_name: "mcp__x__y", tool_response: [{ type: "text", text: "t".repeat(20000) }, { type: "image", data: "A".repeat(20000), mimeType: "image/png" }] };
+  assert.equal(run(r).out, "");
+});
+
+test("nested image source data passes through unchanged", { skip: !hasJq }, () => {
+  const r = { tool_name: "mcp__x__y", tool_response: { content: [{ type: "image", source: { type: "base64", data: "B".repeat(20000) } }] } };
+  assert.equal(run(r).out, "");
+});
+
 test("runs in well under the 100 ms budget per call", { skip: !hasJq }, () => {
   const input = JSON.stringify(bash("x".repeat(40000)));
   const t0 = process.hrtime.bigint();

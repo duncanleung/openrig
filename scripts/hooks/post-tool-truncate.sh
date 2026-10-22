@@ -32,7 +32,8 @@ jq -c --argjson cap "$cap" --argjson head "$head" --argjson tail "$tail" '
           + " bytes by post-tool-truncate; full output is in the session transcript]...\n" + $t) as $out
       | if ($out | utf8bytelength) < utf8bytelength then $out else . end
     else . end;
-  if (.tool_response == null) or (.tool_response | type == "object" and .isImage == true) then empty
+  def has_image: any(.. ; type == "object" and (.type? == "image" or .isImage? == true));
+  if (.tool_response == null) or (.tool_response | has_image) then empty
   else
     (.tool_response) as $orig
     | ($orig | walk(cut)) as $new

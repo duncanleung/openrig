@@ -59,6 +59,8 @@ Roll back: remove the settings entry.
   `hookEventName: "PostToolUse"`, any JSON value). It accepts any value, but only the
   strings-in-place shape was verified against the transcript record shapes, not against a
   live hook run. Confirm once after you activate it.
+- A response that holds an image block (`type: "image"` or `isImage: true`, at any depth) passes through
+  unchanged, so base64 data is never cut.
 - Hooks for one event run in parallel on the original output. Another hook that also
   rewrites output competes with this one (last write wins).
 - Measured on one 1142-result session: 133 results (12%) were over 8 KB. Cutting them
