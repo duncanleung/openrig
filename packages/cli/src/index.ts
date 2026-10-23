@@ -32,6 +32,7 @@ import { gatewayCommand } from "./commands/gateway.js";
 import type { GatewayCommandDeps } from "./commands/gateway.js";
 import { parkedCommand } from "./commands/parked.js";
 import { mcpCommand } from "./commands/mcp.js";
+import { acpCommand } from "./commands/acp.js";
 import { agentCommand, type AgentDeps } from "./commands/agent.js";
 import { rigCommand, type RigDeps } from "./commands/rig.js";
 import { transcriptCommand } from "./commands/transcript.js";
@@ -62,6 +63,7 @@ import { expandCommand } from "./commands/expand.js";
 import { addMemberCommand } from "./commands/add.js";
 import { createCommand } from "./commands/create.js";
 import { growCommand } from "./commands/grow.js";
+import { edgeCommand } from "./commands/edge.js";
 import { reconcileSessionCommand } from "./commands/reconcile-session.js";
 import { envCommand } from "./commands/env.js";
 import { askCommand } from "./commands/ask.js";
@@ -120,6 +122,7 @@ export interface ProgramDeps {
   unarchiveDeps?: StatusDeps;
   psDeps?: StatusDeps;
   mcpDeps?: StatusDeps;
+  acpDeps?: StatusDeps;
   agentDeps?: AgentDeps;
   rigDeps?: RigDeps;
   transcriptDeps?: StatusDeps;
@@ -151,6 +154,7 @@ export interface ProgramDeps {
   addDeps?: StatusDeps;
   createDeps?: StatusDeps;
   growDeps?: StatusDeps;
+  edgeDeps?: StatusDeps;
   reconcileSessionDeps?: StatusDeps;
   envDeps?: StatusDeps;
   unclaimDeps?: StatusDeps;
@@ -204,6 +208,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(psCommand(depsOverride?.psDeps));
   program.addCommand(rosterCommand());
   program.addCommand(mcpCommand(depsOverride?.mcpDeps));
+  program.addCommand(acpCommand(depsOverride?.acpDeps));
   program.addCommand(agentCommand(depsOverride?.agentDeps));
   program.addCommand(rigCommand(depsOverride?.rigDeps));
   program.addCommand(transcriptCommand(depsOverride?.transcriptDeps));
@@ -248,6 +253,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(addMemberCommand(depsOverride?.addDeps));
   program.addCommand(createCommand(depsOverride?.createDeps));
   program.addCommand(growCommand(depsOverride?.growDeps));
+  program.addCommand(edgeCommand(depsOverride?.edgeDeps));
   program.addCommand(reconcileSessionCommand(depsOverride?.reconcileSessionDeps));
   program.addCommand(envCommand(depsOverride?.envDeps));
   program.addCommand(unclaimCommand(depsOverride?.unclaimDeps));

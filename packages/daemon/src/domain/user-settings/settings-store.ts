@@ -106,6 +106,8 @@ export const SETTINGS_VALID_KEYS = [
   "context.root",
   "context.system_world",
   "skills.root",
+  // OPR.0.7.0.13 (router): the person's recorded yes to OpenRig's one-line seat-skills bootstrap in AGENTS.md / CLAUDE.md.
+  "skills.router_line.enabled",
   "onboarding.default_pack.enabled",
   "launch.non_interruptive",
   "health.context_pressure.warning_percent",
@@ -149,7 +151,7 @@ export const SETTINGS_VALID_KEYS = [
   "runtime.codex.hooks_enabled",
   "runtime.readiness_timeout_seconds",
   // Slice 27 — Claude auto-compaction policy. SC-29 EXCEPTION #10:
-  // 7 keys (lockstep with cli/src/config-store.ts VALID_KEYS).
+  // 8 keys (lockstep with cli/src/config-store.ts VALID_KEYS).
   // Opt-in default-off; daemon ContextMonitor reads `enabled` +
   // `threshold_percent` to decide when to send pre-compact prep +
   // /compact. The daemon wraps `pre_compact_instruction` with usage
@@ -157,6 +159,7 @@ export const SETTINGS_VALID_KEYS = [
   // the actual compaction phase, uses `message_inline` +
   // `message_file_path` for post-compaction restore guidance, then
   // wraps `post_restore_audit_instruction` as the read-depth nudge.
+  "policies.claude_compaction.preparation_root",
   "policies.claude_compaction.enabled",
   "policies.claude_compaction.threshold_percent",
   "policies.claude_compaction.pre_compact_instruction",
@@ -252,6 +255,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "context.root": { primary: "OPENRIG_CONTEXT_ROOT" },
   "context.system_world": { primary: "OPENRIG_CONTEXT_SYSTEM_WORLD" },
   "skills.root": { primary: "OPENRIG_SKILLS_ROOT" },
+  "skills.router_line.enabled": { primary: "OPENRIG_SKILLS_ROUTER_LINE_ENABLED" },
   "onboarding.default_pack.enabled": { primary: "OPENRIG_ONBOARDING_DEFAULT_PACK_ENABLED" },
   "launch.non_interruptive": { primary: "OPENRIG_LAUNCH_NON_INTERRUPTIVE" },
   "health.context_pressure.warning_percent": { primary: "OPENRIG_HEALTH_CONTEXT_PRESSURE_WARNING_PERCENT" },
@@ -285,6 +289,7 @@ const ENV_MAP: Record<SettingsValidKey, { primary: string; legacy?: string }> = 
   "runtime.readiness_timeout_seconds": { primary: "OPENRIG_RUNTIME_READINESS_TIMEOUT_SECONDS" },
   // Slice 27 — Claude auto-compaction policy. Net-new keys; OPENRIG_X
   // primary only.
+  "policies.claude_compaction.preparation_root": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_PREPARATION_ROOT" },
   "policies.claude_compaction.enabled": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_ENABLED" },
   "policies.claude_compaction.threshold_percent": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_THRESHOLD_PERCENT" },
   "policies.claude_compaction.pre_compact_instruction": { primary: "OPENRIG_POLICIES_CLAUDE_COMPACTION_PRE_COMPACT_INSTRUCTION" },
@@ -348,6 +353,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "context.root": ["context", "root"],
   "context.system_world": ["context", "systemWorld"],
   "skills.root": ["skills", "root"],
+  "skills.router_line.enabled": ["skills", "routerLine", "enabled"],
   "onboarding.default_pack.enabled": ["onboarding", "defaultPack", "enabled"],
   "launch.non_interruptive": ["launch", "nonInterruptive"],
   "health.context_pressure.warning_percent": ["health", "contextPressure", "warningPercent"],
@@ -375,6 +381,7 @@ const KEY_TO_PATH: Record<SettingsValidKey, string[]> = {
   "feed.subscriptions.audit_log": ["feed", "subscriptions", "auditLog"],
   "runtime.codex.hooks_enabled": ["runtime", "codex", "hooksEnabled"],
   "runtime.readiness_timeout_seconds": ["runtime", "readinessTimeoutSeconds"],
+  "policies.claude_compaction.preparation_root": ["policies", "claudeCompaction", "preparationRoot"],
   "policies.claude_compaction.enabled": ["policies", "claudeCompaction", "enabled"],
   "policies.claude_compaction.threshold_percent": ["policies", "claudeCompaction", "thresholdPercent"],
   "policies.claude_compaction.pre_compact_instruction": ["policies", "claudeCompaction", "preCompactInstruction"],
@@ -635,6 +642,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     case "context.root": return DEFAULT_CONTEXT_ROOT;
     case "context.system_world": return "default";
     case "skills.root": return DEFAULT_SKILLS_ROOT;
+    case "skills.router_line.enabled": return false;
     case "onboarding.default_pack.enabled": return true;
     case "launch.non_interruptive": return false;
     case "health.context_pressure.warning_percent": return 95;
@@ -671,6 +679,7 @@ function getDefaultValue(key: SettingsValidKey, workspaceRoot: string): string |
     // the canonical restore skill; compact_instruction is intentionally
     // blank because Claude's native compact summary is less reliable
     // than the explicit pre-compact and post-compact user-channel flow.
+    case "policies.claude_compaction.preparation_root": return "";
     case "policies.claude_compaction.enabled": return false;
     case "policies.claude_compaction.threshold_percent": return 80;
     case "policies.claude_compaction.pre_compact_instruction": return DEFAULT_CLAUDE_COMPACTION_PRE_COMPACT_INSTRUCTION;
@@ -832,6 +841,11 @@ const KEY_CONSTRAINTS: Partial<Record<SettingsValidKey, (raw: string, coerced: s
   // "80.5" → 80) is not safe for a key the daemon's compaction trigger
   // reads at every poll tick; runtime validator rejects what the
   // contract forbids per banked feedback_static_gates_mirror_runtime_validators.
+  "policies.claude_compaction.preparation_root": (_raw, value) => {
+    if (typeof value !== "string" || (value !== "" && (!path.isAbsolute(value) || value.includes("\0")))) {
+      throw new Error("Invalid policies.claude_compaction.preparation_root: use an absolute path or an empty string for the default");
+    }
+  },
   "policies.claude_compaction.threshold_percent": (raw, coerced) => {
     const trimmed = (raw ?? "").trim();
     if (!/^-?\d+$/.test(trimmed)) {
@@ -950,6 +964,8 @@ function validateTypedFileValue(key: SettingsValidKey, value: string | number | 
  * shape via direct config.json read (without depending on the daemon).
  */
 export interface ClaudeCompactionPolicy {
+  /** Empty or absent keeps workspace-first preparation; read for each new attempt. */
+  preparationRoot?: string;
   enabled: boolean;
   thresholdPercent: number;
   preCompactInstruction: string;
@@ -1108,6 +1124,7 @@ export class SettingsStore {
     const fc = this.readConfigFile();
     const wr = this.resolveWorkspaceRootRaw(fc);
     return {
+      preparationRoot: this.resolveOne("policies.claude_compaction.preparation_root", fc, wr).value as string,
       enabled: this.resolveOne("policies.claude_compaction.enabled", fc, wr).value as boolean,
       thresholdPercent: this.resolveOne("policies.claude_compaction.threshold_percent", fc, wr).value as number,
       preCompactInstruction: this.resolveOne("policies.claude_compaction.pre_compact_instruction", fc, wr).value as string,

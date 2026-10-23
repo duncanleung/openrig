@@ -140,6 +140,7 @@ function noticeFor(ended: ModeApplication, scheduledEnd: string, qitemId: string
       summary: `Your ${ended.modeName} ended at its scheduled time`,
       body: `Your ${ended.modeName} ended at its scheduled time. Its account: \`${account}\`; ask your operator to go through it.`,
       tags: ["mode-scheduled-end"],
+      wakeTrigger: "openrig",
     };
   }
   const where = ended.settings.delivery.account ?? "their registered channel";
@@ -155,8 +156,12 @@ function noticeFor(ended: ModeApplication, scheduledEnd: string, qitemId: string
       `Applied by ${ended.startedBy}.${recipient.why ? ` Sent to ${recipient.to} because ${recipient.why}.` : ""}`,
     ].join("\n"),
     tags: ["mode-scheduled-end"],
+    wakeTrigger: "openrig",
   };
 }
+
+/** The waiting skip: a quiet reason in the engine, so a mode waiting to end leaves no history row or event each minute. */
+export const MODE_END_NOT_YET = "mode_end_not_yet";
 
 /** Watchdog-engine wrapper: the scheduler's cadence drives evaluation; the application's own record owns the timing. */
 export function makeModeScheduledEndPolicy(deps: Omit<ModeScheduledEndInput, "jobId" | "now">): Policy {
@@ -164,7 +169,7 @@ export function makeModeScheduledEndPolicy(deps: Omit<ModeScheduledEndInput, "jo
     name: MODE_SCHEDULED_END_POLICY,
     async evaluate(job: PolicyJob): Promise<PolicyEvaluation> {
       const r = await runModeScheduledEnd({ ...deps, jobId: job.jobId });
-      if (r.state === "not-yet") return { action: "skip", reason: "before its scheduled end" };
+      if (r.state === "not-yet") return { action: "skip", reason: MODE_END_NOT_YET };
       if (r.state === "notice-pending") return { action: "skip", reason: `ended; the notice is still to be created${r.why ? `: ${r.why}` : ""}` };
       return { action: "terminal", reason: r.state === "ended" ? "mode ended at its scheduled time" : "mode had already ended" };
     },

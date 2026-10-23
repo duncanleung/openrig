@@ -1,3 +1,4 @@
+import { isPerSeatRoleStartupFile } from "./managed-blocks.js";
 import type { Binding, StartupFile } from "./types.js";
 import type { ProjectionPlan } from "./projection-planner.js";
 import type { ClaudeResumeRotation } from "./native-process-lineage.js";
@@ -10,7 +11,11 @@ export interface NodeBinding extends Binding {
   cwd: string;
   model?: string;
   effort?: string;
+  /** Claude-only, session-scoped Advisor model. */
+  advisor?: string;
   codexConfigProfile?: string;
+  /** Rebuild only: a process/conversation-bound native predecessor policy. */
+  codexRebuildPermissions?: import("./codex-rebuild-permissions.js").CodexPermissionEnvelope;
   /** OPR.0.4.8.3 Seam B: the seat's RESOLVED launch posture from its permission_policy
    * attachment (member > rig precedence, resolved by the core resolver at materialize /
    * restore). Absent = no policy attached → the env-driven floor/YOLO decision stands.
@@ -26,6 +31,14 @@ export interface NodeBinding extends Binding {
   teamPermissionDefault?: boolean;
   /** Reserved successor generation; current tenure remains the input fence until commit. */
   launchGeneration?: string;
+  /** OPR.0.7.0.13: where this seat's skills go, its own storage outside the project (the plugin there is already on the
+   *  seat's CLAUDE_CODE_PLUGIN_DIRS). Absent = the project, as before. Only the Claude adapter reads it. */
+  seatSkillsRoot?: string;
+  /** OPR.0.7.0.13: set when `seatSkillsRoot` is a seat's storage that a link refused: why. Every skill meant for it is then
+   *  refused and named (none is written there or into the project), and a selected plugin's bundled skills are named lost. */
+  seatSkillsRefused?: string;
+  /** OPR.0.7.0.9: this seat's own launch additions, copies in its seat storage. Only the Claude adapters read them. */
+  launchAdditions?: import("./seat-launch-additions.js").SeatLaunchAdditions;
   /** #25: the rig's `managed_blocks.claude-code` file. Absent = CLAUDE.md. Only the Claude adapter reads it. */
   claudeManagedBlockFile?: import("./managed-blocks.js").ClaudeManagedBlockFile;
 }
@@ -105,6 +118,10 @@ export type HarnessLaunchRecovery = "retry_fresh" | "attention_required";
 // pinned as the one it started, kept even when a later sample saw it replaced (#1077).
 export type HarnessLaunchResult =
   | { ok: true; resumeToken?: string; resumeType?: string; appliedLaunch?: import("./permission-drift.js").AppliedLaunchObservation;
+    /** Where resumeToken came from, when not a pane scrape: a community harness's launcher reported it. */
+    resumeProvenance?: "launcher";
+    /** Launch notes for the person, such as a community harness whose launch identity is unavailable. */
+    warnings?: string[];
     launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess;
     /** Codex (#1524): the native process a managed resume was proven on from Codex's own records. Restore's join
      *  compares the process it verifies later against this one before it reports the seat resumed. */
@@ -116,6 +133,7 @@ export type HarnessLaunchResult =
   // conversation doesn't exist; other `retry_fresh` failures (such as a pane back at its shell)
   // leave it unset.
   | { ok: false; error: string; recovery?: HarnessLaunchRecovery; evidence?: string; missingConversation?: true;
+    probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence;
     /** The native resume probe's code for the startup gate that stopped the launch (for example `hook_trust_gate`),
      *  when one did. Reporting only: it changes no recovery decision. */
     gate?: string;
@@ -147,7 +165,10 @@ export type HarnessLaunchResult =
 export function resolveConcreteHint(
   path: string,
   content: string,
+  orientation?: string,
 ): "guidance_merge" | "skill_install" | "send_text" {
+  // A seat's own role never merges into the file its pod-mates share.
+  if (isPerSeatRoleStartupFile(path, orientation)) return "send_text";
   if (path.endsWith("SKILL.md") || content.startsWith("# SKILL")) return "skill_install";
   if (path.endsWith(".md")) return "guidance_merge";
   return "send_text";
@@ -210,6 +231,8 @@ export interface RuntimeAdapter {
   launchHarness(
     binding: NodeBinding,
     opts: { name: string; resumeToken?: string; forkSource?: ForkSource;
+      /** The saved token's type, when known (a community harness resumes only its own `community:<name>` ids). */
+      resumeType?: string;
       /** Fresh successor in the retired occupant's pane; not an adopt, resume or fork. */
       freshInPlace?: boolean },
   ): Promise<HarnessLaunchResult>;

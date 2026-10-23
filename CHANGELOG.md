@@ -8,6 +8,180 @@ deprecations, and behavioral changes. Breaking changes are called out explicitly
 
 ---
 
+## [0.7.0] - 2026-10-23
+
+Published 2026-10-23 as `@openrig/cli@0.7.0`, built from the commit tagged
+`v0.7.0` (`c99450f3`). This entry is its release notes.
+
+0.7.0 makes a running team easier to live with. A person can set quiet hours
+and modes ("asleep", "out of office") so routine questions wait until they're
+back. Agents can pass a rig's name almost everywhere instead of looking up its
+id. A machine that reboots brings its kernel back by itself, a rig with one
+broken seat still restores the rest, and a busy daemon gets your request
+instead of a refusal. Under the hood, the core got smaller and simpler, and a
+long list of contributor fixes landed. The changes since 0.6.14:
+
+### Before you upgrade
+
+- Restart the daemon after installing (`npm install -g @openrig/cli@0.7.0`,
+  then `rig daemon stop && rig daemon start`). Six database updates apply on
+  its first start.
+- If you pass accounts or API keys to new agents through tmux's global
+  environment (`tmux set-environment -g …`), new agents no longer inherit it.
+  Put the values in the seat's `env`, pass `rig up --env KEY=VALUE`, or keep the
+  old behaviour with `rig config set terminal.inherit_tmux_environment true`.
+  `rig setup` warns when it sees a custom tmux configuration. Running agents
+  aren't affected.
+- Startup replaces OpenRig's own plugin and skill files with 0.7.0's copies.
+  It first copies each file it replaces under
+  `$OPENRIG_HOME/backups/managed-refresh/` and logs where, whether or not you
+  edited it: about 22 copies on the first start after upgrading from 0.6.14, so
+  a copy doesn't mean you changed anything. If you did edit one, your change
+  may stop working until you reapply it from the copy; the log line names the
+  original file.
+- If you write queue rows to another machine by its own id
+  (`member@rig@<self-id>`), run `rig host doctor <alias>` once per host so the
+  binding learns its address.
+- If a script uses `rig provider moves`, change it: the command and its setting
+  are gone (see "Behaviour that changed").
+
+### What's new and fixed
+
+Quiet hours and modes for the person:
+
+- `rig gateway human quiet set <id> --daily HH:MM-HH:MM` (or `--until`) holds
+  routine asks while the person is away and posts each one once when they're
+  back. Escalations still go through
+  ([#1584](https://github.com/mvschwarz/openrig/pull/1584),
+  [#1606](https://github.com/mvschwarz/openrig/pull/1606),
+  [#1649](https://github.com/mvschwarz/openrig/pull/1649),
+  [#1720](https://github.com/mvschwarz/openrig/pull/1720)).
+- `rig gateway human mode` saves and applies a person's modes, ends them on a
+  schedule with `--until`, and reports what each one changed. Inside a mode's
+  agreed "decision room", the agent that asked can record a delegated
+  decision; permission prompts are never decided this way
+  ([#1656](https://github.com/mvschwarz/openrig/pull/1656),
+  [#1715](https://github.com/mvschwarz/openrig/pull/1715),
+  [#1705](https://github.com/mvschwarz/openrig/pull/1705)).
+
+Rig names everywhere:
+
+- `archive`, `unarchive`, `release`, `shrink`, `expand`, `snapshot`, `export`,
+  `restore --rig` and the matching MCP tools take a rig's name. A name two rigs
+  share says so ([#1681](https://github.com/mvschwarz/openrig/pull/1681) and
+  siblings, @Nikhi00718).
+
+Restore and launch:
+
+- After a reboot, the daemon restores a kernel whose seats are all detached
+  ([#1081](https://github.com/mvschwarz/openrig/pull/1081), @haralez).
+- A seat missing a startup file no longer blocks the whole rig's restore; the
+  other seats come back
+  ([#1696](https://github.com/mvschwarz/openrig/pull/1696)).
+- Seats added to a running rig get its culture and startup files (rigs created
+  on 0.7.0) ([#1632](https://github.com/mvschwarz/openrig/pull/1632)).
+- `rig up --env` reaches every launch shape
+  ([#1511](https://github.com/mvschwarz/openrig/pull/1511)).
+- Before a new Claude agent's first startup message, OpenRig looks briefly (up
+  to about five seconds) for Claude's input box, and keeps its checks on the
+  submission. It doesn't guarantee delivery; see Known issues
+  ([#1730](https://github.com/mvschwarz/openrig/pull/1730)).
+- Codex seats that select `openrig-core` get its refocus and skills: OpenRig
+  installs the plugin into Codex and, on a first install, trusts its own six
+  hooks after checking their files, so a fresh Codex seat starts without
+  Codex's hook review. The file check happens only when trust is granted: a
+  later edit to the cached hook scripts keeps that trust, as with any hook
+  trusted in Codex. The trust covers that Codex home, so your own Codex
+  sessions there load the plugin too; its hooks do nothing outside an OpenRig
+  seat. A plugin or hook you already disabled, or left untrusted, keeps your
+  choice ([#1824](https://github.com/mvschwarz/openrig/pull/1824)).
+- A new agent's first startup message says it's OpenRig's identity context, not
+  a task, and a seat with nothing else to start with is asked to confirm its
+  identity and wait for an assignment
+  ([#1754](https://github.com/mvschwarz/openrig/pull/1754)).
+
+Seeing what's happening:
+
+- The TUI's agent table shows each seat's configured effort
+  ([#1529](https://github.com/mvschwarz/openrig/pull/1529), @tianxingjian2406).
+- `rig queue show --json` says why a wake didn't land
+  ([#1555](https://github.com/mvschwarz/openrig/pull/1555), @1solomonwakhungu).
+- A long-open TUI says when its build differs from the daemon's, and refreshes
+  less often ([#1600](https://github.com/mvschwarz/openrig/pull/1600)).
+- `rig ps --rig` and `--host --rig` report an unknown rig and filter correctly
+  ([#1690](https://github.com/mvschwarz/openrig/pull/1690),
+  [#1698](https://github.com/mvschwarz/openrig/pull/1698),
+  [#1706](https://github.com/mvschwarz/openrig/pull/1706), @Nikhi00718).
+
+Reliability:
+
+- A busy daemon gets the real request; the CLI refuses only when it's confirmed
+  down, and a timed-out write says its outcome is unknown
+  ([#1650](https://github.com/mvschwarz/openrig/pull/1650)).
+- `rig compact --cancel` stops a managed compaction that already sent
+  `/compact`, with no daemon restart
+  ([#1660](https://github.com/mvschwarz/openrig/pull/1660)).
+- Watchdog deliveries are recorded as they happened, and repeated refusals at a
+  prompt raise an alert
+  ([#1713](https://github.com/mvschwarz/openrig/pull/1713)).
+- Slack: a thread reply answers only a question posted before it, and a
+  rejected message isn't re-posted
+  ([#1568](https://github.com/mvschwarz/openrig/pull/1568),
+  [#1703](https://github.com/mvschwarz/openrig/pull/1703), @Aschenbath).
+- Team agents are asked for permission less often: 15 housekeeping commands no
+  longer prompt ([#1665](https://github.com/mvschwarz/openrig/pull/1665)).
+
+### Behaviour that changed
+
+- New agents start from a clean environment, not tmux's global one (above)
+  ([#1573](https://github.com/mvschwarz/openrig/pull/1573)).
+- `rig provider moves` and `provider.subscription_moves` are removed; report a
+  subscription move as a queue item instead. `rig slack verify` lost
+  `--reason` and `--actor`
+  ([#1672](https://github.com/mvschwarz/openrig/pull/1672),
+  [#1674](https://github.com/mvschwarz/openrig/pull/1674)).
+- A `done` close can't use `--closure-reason blocked_on`; use
+  `rig queue block <id> --on <child>`
+  ([#1704](https://github.com/mvschwarz/openrig/pull/1704), @Aschenbath).
+- `rig setup` keeps 10,000 rows of tmux history, down from 50,000
+  ([#1264](https://github.com/mvschwarz/openrig/pull/1264), @Quentin-M).
+- `rig up --plan` waits as long as an apply. `rig seat restart`, and
+  `policy permissions apply`, now ask for permission.
+- Output shapes: `rig gateway human list` prints `availability`
+  (`available|focus|away|off`); `rig attach` prints `Sender:`; a reused
+  `deliveryId` no longer deduplicates a send.
+
+### Known issues
+
+- A new Claude agent's startup text can stay in its input box unsent. If a
+  fresh Claude seat sits idle with text at its prompt, open its terminal and
+  press Enter.
+- The TUI's terminal button refuses inside a Herdr pane reached over SSH (also
+  in 0.6.14). Start the TUI with
+  `env -u SSH_CONNECTION -u SSH_CLIENT -u SSH_TTY rig tui`, or run
+  `rig terminal open '<view>' --provider herdr`. A fix is on its way.
+- Claude seats on a macOS native install can read as needing attention after a
+  restore ([#86](https://github.com/mvschwarz/openrig/issues/86)). A fix is in
+  progress and isn't in this release.
+- A Slack channel-mapping change needs a daemon restart
+  (`rig daemon stop && rig daemon start`). Don't use `rig slack disable` then
+  `enable` for it: enabling marks any alerts waiting to post to Slack as
+  already seen, so open exchanges miss them.
+- Ubuntu 22.04's stock tmux 3.2a can crash its whole server when OpenRig checks
+  a pane that has just closed, interrupting the other sessions on that server.
+  Avoid tmux 3.2a for OpenRig; check your version with `tmux -V`. A replacement
+  version has not been verified against this crash.
+
+### Credits
+
+Thank you to everyone whose work is in this release: @Nikhi00718, @Aschenbath,
+@PROACTIVA-US, @jayhemnani9910, @rudycelekli, @markankamaransheogarat-sys,
+@haralez, @tianxingjian2406, @1solomonwakhungu, @AdamWhitehurst, @Quentin-M,
+@arxh80, @DeryFerd, @okle100, @zichen0116 and @13pgpg.
+
+Tested on our own machines, and with first-time setups on Claude and on Codex,
+before release. A first-time setup on a Mac wasn't completed.
+
 ## [0.6.14]
 
 0.6.14 is the last planned release of the 0.6 line: a small set of stability

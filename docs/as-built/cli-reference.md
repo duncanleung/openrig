@@ -25,7 +25,8 @@ below `rig` (including groups and the hidden `restore apply` command), and
 **1,084 explicitly registered option objects**, including the root version
 option. Aliases do not add command objects; short/long spellings of one
 option do not add option objects. Commander-generated help is additional.
-These are source counts, not a claim about a deployed release.
+These are counts for that source snapshot, not a claim about a deployed release.
+The terminal rows below also include the later named-session options.
 
 ## Reading this reference
 
@@ -299,7 +300,7 @@ the sections that were not read are `null`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig up <source>` | — | `--non-interruptive`<br>`--no-non-interruptive`<br>`--plan`<br>`--yes`<br>`--cwd <path>`<br>`--env <KEY=VALUE>` (repeatable)<br>`--target <root>`<br>`--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--existing`<br>`--fresh <seats...>`<br>`--json`<br>`--host <id>` |
+| `rig up <source>` | — | `--non-interruptive`<br>`--no-non-interruptive`<br>`--plan`<br>`--yes`<br>`--cwd <path>`<br>`--env <KEY=VALUE>` (repeatable)<br>`--name <rig>`<br>`--target <root>`<br>`--preset <name>`<br>`--seat <member=runtime>` (repeatable)<br>`--existing`<br>`--fresh <seats...>`<br>`--json`<br>`--host <id>` |
 
 ### down
 
@@ -351,7 +352,20 @@ the sections that were not read are `null`.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig mcp` | — | — |
-| `rig mcp serve` | — | `--port <port>` |
+| `rig mcp serve` | — | `--port <port>`<br>`--http`<br>`--bind <host:port>` |
+| `rig mcp token` | — | — |
+| `rig mcp token add <name>` | — | `--seat <session>`<br>`--rig <name...>`<br>`--root <name...>`<br>`--workspace`<br>`--owner` |
+| `rig mcp token list` | — | `--json` |
+| `rig mcp token revoke <name>` | — | — |
+
+### acp
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig acp` | — | — |
+| `rig acp run <qitemId> <agent...>` | — | `--cwd <dir>`<br>`--permissions-to <session>`<br>`--load-session <id>`<br>`--poll-seconds <n>` |
+| `rig acp cancel <runId>` | — | — |
+| `rig acp stop <runId> [stopCommand...]` | — | — |
 
 ### agent
 
@@ -380,7 +394,7 @@ the sections that were not read are `null`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig send [session] [text]` | — | `--to <sessions>` (repeatable)<br>`--pod <name>`<br>`--rig <name>`<br>`--verify`<br>`--force`<br>`--wait-for-idle <seconds>`<br>`--raw`<br>`--dangerously-interact`<br>`--reason <text>`<br>`--host <id>`<br>`--from <session>`<br>`--context <ref>`<br>`--json` |
+| `rig send [session] [text]` | — | `--to <sessions>` (repeatable)<br>`--pod <name>`<br>`--rig <name>`<br>`--verify`<br>`--force`<br>`--wait-for-idle <seconds>`<br>`--raw`<br>`--dangerously-interact`<br>`--reason <text>`<br>`--urgent`<br>`--host <id>`<br>`--from <session>`<br>`--context <ref>`<br>`--json` |
 
 ### stream
 
@@ -475,20 +489,24 @@ the sections that were not read are `null`.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig terminal` | — | — |
-| `rig terminal open <view>` | — | `--provider <name>`<br>`--window`<br>`--expected-plan <id>`<br>`--json` |
+| `rig terminal open <view>` | — | `--provider <name>`<br>`--session <name>`<br>`--window`<br>`--expected-plan <id>`<br>`--json` |
 | `rig terminal views` | — | `--json` |
-| `rig terminal status` | — | `--provider <name>`<br>`--json` |
+| `rig terminal status` | — | `--provider <name>`<br>`--session <name>`<br>`--json` |
+
+See [named terminal sessions](../reference/terminal-sessions.md) to select a
+Herdr session per request, including session-bound previews and window reuse.
 
 ### watchdog
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig watchdog` | — | — |
-| `rig watchdog register` | — | `--spec <path>`<br>`--policy <policy>` **required**<br>`--target-session <session>` **required**<br>`--interval-seconds <n>` **required**<br>`--registered-by <session>` **required**<br>`--threshold-bytes <n>`<br>`--threshold-mb <n>`<br>`--watched-file <path>`<br>`--requires-job <jobId>`<br>`--message <text>`<br>`--active-wake-interval-seconds <n>`<br>`--scan-interval-seconds <n>`<br>`--json` |
+| `rig watchdog register` | — | `--spec <path>`<br>`--policy <policy>` **required**<br>`--target-session <session>` **required**<br>`--interval-seconds <n>` **required**<br>`--registered-by <session>` **required**<br>`--threshold-bytes <n>`<br>`--threshold-mb <n>`<br>`--threshold-tokens <n>`<br>`--threshold-percent <n>`<br>`--watched-file <path>`<br>`--requires-job <jobId>`<br>`--message <text>`<br>`--active-wake-interval-seconds <n>`<br>`--scan-interval-seconds <n>`<br>`--json` |
 | `rig watchdog list` | — | `-a, --all`<br>`--full`<br>`--limit <n>`<br>`--json` |
 | `rig watchdog show <jobId>` | — | `--json` |
 | `rig watchdog status <jobId>` | — | `--json` |
 | `rig watchdog stop <jobId>` | — | `--reason <text>`<br>`--json` |
+| `rig watchdog update <jobId>` | — | `--interval-seconds <n>`<br>`--message <text>`<br>`--spec <path>`<br>`--json` |
 
 ### workflow
 
@@ -501,7 +519,7 @@ the sections that were not read are `null`.
 | `rig workflow operation <key>` | — | `--json` |
 | `rig workflow instantiate-lifecycle <missionPath>` | — | `--operation-key <key>` **required**<br>`--root-objective <text>` **required**<br>`--created-by <session>` **required**<br>`--entry-owner <session>`<br>`--rig <name>`<br>`--json` |
 | `rig workflow instantiate <specPath>` | — | `--root-objective <text>` **required**<br>`--created-by <session>` **required**<br>`--entry-owner <session>`<br>`--rig <name>`<br>`--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--tags <tags>`<br>`--json` |
-| `rig workflow project` | — | `--instance <id>` **required**<br>`--current-packet <qitem-id>` **required**<br>`--exit <kind>` **required**<br>`--actor-session <session>` **required**<br>`--result-note <text>`<br>`--evidence-ref <ref>`<br>`--wait-for-proof <scope>`<br>`--blocked-on <ref>`<br>`--next-owner <session>`<br>`--acceptance-candidate <identity>`<br>`--acceptance-verdict <verdict>`<br>`--acceptance-evidence-ref <path>`<br>`--json` |
+| `rig workflow project` | — | `--instance <id>` **required**<br>`--current-packet <qitem-id>` **required**<br>`--exit <kind>` **required**<br>`--actor-session <session>` (only when the caller's session can't be derived)<br>`--result-note <text>`<br>`--evidence-ref <ref>`<br>`--wait-for-proof <scope>`<br>`--blocked-on <ref>`<br>`--next-owner <session>`<br>`--acceptance-candidate <identity>`<br>`--acceptance-verdict <verdict>`<br>`--acceptance-evidence-ref <path>`<br>`--json` |
 | `rig workflow list` | — | `--status <s>`<br>`--json` |
 | `rig workflow specs` | — | `--json` |
 | `rig workflow guidance <instanceId>` | — | `--packet <id>`<br>`--component <id>`<br>`--full`<br>`--json` |
@@ -510,9 +528,9 @@ the sections that were not read are `null`.
 | `rig workflow continue <instanceId>` | — | `--json` |
 | `rig workflow run <specPath>` | — | `--root-objective <text>` **required**<br>`--created-by <session>` **required**<br>`--entry-owner <session>`<br>`--rig <name>`<br>`--project <id>`<br>`--mission <id>`<br>`--slice <id>`<br>`--tags <tags>`<br>`--json` |
 | `rig workflow watch <instanceId>` | — | `--json` |
-| `rig workflow route <instanceId>` | — | `--to <session>` **required**<br>`--actor-session <session>` **required**<br>`--packet <qitem-id>`<br>`--reason <text>`<br>`--json` |
-| `rig workflow resume <instanceId>` | — | `--actor-session <session>` **required**<br>`--occurrence <failed-qitem-id>`<br>`--decision <text>`<br>`--json` |
-| `rig workflow abort <instanceId>` | — | `--reason <text>` **required**<br>`--actor-session <session>` **required**<br>`--json` |
+| `rig workflow route <instanceId>` | — | `--to <session>` **required**<br>`--actor-session <session>` (only when the caller's session can't be derived)<br>`--packet <qitem-id>`<br>`--reason <text>`<br>`--json` |
+| `rig workflow resume <instanceId>` | — | `--actor-session <session>` (only when the caller's session can't be derived)<br>`--occurrence <failed-qitem-id>`<br>`--decision <text>`<br>`--json` |
+| `rig workflow abort <instanceId>` | — | `--reason <text>` **required**<br>`--actor-session <session>` (only when the caller's session can't be derived)<br>`--json` |
 | `rig workflow status` | — | `--json` |
 
 ### capture
@@ -605,7 +623,7 @@ Only Claude and Codex tenures can be woken.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig skill` | — | — |
-| `rig skill loadout` | — | `--runtime <runtime>` **required**<br>`--cwd <path>`<br>`--project-root <path>`<br>`--topology <ids>`<br>`--apply`<br>`--json` |
+| `rig skill loadout` | — | `--runtime <runtime>` (folder mode; **required** there)<br>`--seat <session>` (seat mode; `self` is this seat)<br>`--wait-for-idle <ms>`<br>`--cwd <path>`<br>`--project-root <path>`<br>`--topology <ids>`<br>`--apply`<br>`--json` |
 | `rig skill audit` | — | `--json` |
 
 ### agent-image
@@ -627,7 +645,7 @@ Only Claude and Codex tenures can be woken.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig fork <source-session>` | — | `--rig <rig-id>` **required**<br>`--pod <pod-namespace>` **required**<br>`--member <member-id>` **required**<br>`--keep-image`<br>`--image-name <name>`<br>`--image-version <version>`<br>`--rig-root <path>`<br>`--json` |
+| `rig fork <source-session>` | — | `--rig <rig>` **required**<br>`--pod <pod-namespace>` **required**<br>`--member <member-id>` **required**<br>`--keep-image`<br>`--image-name <name>`<br>`--image-version <version>`<br>`--rig-root <path>`<br>`--json` |
 
 ### workspace
 
@@ -700,10 +718,10 @@ Only Claude and Codex tenures can be woken.
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig auth` | — | — |
-| `rig auth status` | — | `--runtime <runtime>` |
-| `rig auth list` | — | `--runtime <runtime>` |
+| `rig auth status` | — | `--runtime <runtime>`<br>`--codex-home <dir>`<br>`--host <id>` |
+| `rig auth list` | — | `--runtime <runtime>`<br>`--codex-home <dir>`<br>`--host <id>` |
 | `rig auth save <profile>` | — | `--runtime <runtime>` |
-| `rig auth switch <profile>` | — | `--runtime <runtime>` |
+| `rig auth switch <profile>` | — | `--runtime <runtime>`<br>`--codex-home <dir>`<br>`--host <id>` |
 | `rig auth validate <profile>` | — | `--runtime <runtime>` |
 | `rig auth seats` | — | — |
 | `rig auth seats list` | — | `--runtime <runtime>` |
@@ -722,6 +740,8 @@ Only Claude and Codex tenures can be woken.
 | `rig provider signals` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider precheck` | — | `--seat <s>` **required**<br>`--to-account <a>` **required**<br>`--json` |
 | `rig provider switch` | — | `--seat <s>` **required**<br>`--to-account <a>` **required**<br>`--force-unsafe`<br>`--json` |
+| `rig provider moves` | — | `--seat <seat>`<br>`--limit <n>`<br>`--json` |
+| `rig provider moves report` | — | `--file <path>` **required**<br>`--to <seat>` **required**<br>`--follows <qitemId>`<br>`--evidence-ref <ref>`<br>`--json` |
 
 ### usage
 
@@ -785,6 +805,20 @@ Only Claude and Codex tenures can be woken.
 |---|---|---|
 | `rig grow <rig-id> <members...>` | — | `--pod <pod>`<br>`--new-pod <pod>`<br>`--runtime <runtime>`<br>`--cwd <path>`<br>`--json` |
 
+### edge
+
+| Invocation | Aliases | Declared options |
+|---|---|---|
+| `rig edge` | — | — |
+| `rig edge add <rig> [from] [to]` | — | `--kind <kind>`<br>`--plan`<br>`--json` |
+| `rig edge remove <rig> <edge-id>` | — | `--plan`<br>`--json` |
+
+`add` requires `from`, `to` and `--kind`, and is idempotent: a repeat reports the
+existing edge and writes nothing. `remove` deletes the edge with that ID; a repeat changes nothing and
+returns `edge_not_found` (exit 1). See
+[changing edges on an existing rig](../reference/rig-spec.md#changing-edges-on-an-existing-rig)
+for input and receipt examples, rollback, and snapshot behavior.
+
 ### reconcile-session
 
 | Invocation | Aliases | Declared options |
@@ -840,7 +874,7 @@ Only Claude and Codex tenures can be woken.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig setup` | — | `--dry-run`<br>`--json`<br>`--full`<br>`--no-herdr`<br>`--ghostty`<br>`--no-ghostty`<br>`--providers <list>`<br>`--policy <name>`<br>`--spec <path>` |
+| `rig setup` | — | `--dry-run`<br>`--json`<br>`--full`<br>`--no-herdr`<br>`--ghostty`<br>`--no-ghostty`<br>`--providers <list>`<br>`--policy <name>`<br>`--spec <path>`<br>`--router-line <answer>` |
 
 ### restore-check
 

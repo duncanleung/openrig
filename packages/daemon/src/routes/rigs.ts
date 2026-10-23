@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import { observeInventoryHandler, observeInventoryQuery } from "../domain/request-phase-observer.js";
 import type Database from "better-sqlite3";
 import type { RigRepository } from "../domain/rig-repository.js";
+import { resolveRigRepresentativeById } from "../domain/queue-owner.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { EventBus } from "../domain/event-bus.js";
 import { summarizeSnapshot, type SnapshotRepository } from "../domain/snapshot-repository.js";
@@ -38,8 +39,10 @@ import type { Pod, ExpansionPodFragment, RestoreOutcome, Snapshot } from "../dom
 import type { RigExpansionService } from "../domain/rig-expansion-service.js";
 import type { PodRigInstantiator } from "../domain/rigspec-instantiator.js";
 import { convergeOp } from "../domain/topology-converge.js";
+import type { EdgeOpOutcome } from "../domain/rig-edge-ops.js";
 import type { RigLifecycleService } from "../domain/rig-lifecycle-service.js";
 import type { SelfAttachService } from "../domain/self-attach-service.js";
+import { reserveOperation, validOperationId } from "../domain/operation-correlation.js";
 
 export const rigsRoutes = new Hono();
 
@@ -318,13 +321,22 @@ rigsRoutes.post("/:id/launch-plan", async (c) => {
 });
 
 rigsRoutes.post("/", async (c) => {
+  const header = c.req.header("X-OpenRig-Operation-Id");
+  if (!validOperationId(header)) return c.json({ error: "Invalid X-OpenRig-Operation-Id" }, 400);
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const text = await c.req.text();
   const name = body["name"];
   if (!name || typeof name !== "string") {
     return c.json({ error: "name is required" }, 400);
   }
-  const rig = getRepo(c).createRig(name);
-  return c.json(rig, 201);
+  const repo = getRepo(c);
+  const operation = reserveOperation(repo.db, header, "rig.create", [], text);
+  if (operation.state === "conflict") return c.json({ code: "operation_id_conflict" }, 409);
+  if (operation.state === "replay") return c.json({ replayed: true, operation: operation.operation }, 200);
+  const rig = operation.state === "fresh"
+    ? repo.db.transaction(() => { const created = repo.createRig(name); operation.recordCreated(created.id); return created; })()
+    : repo.createRig(name);
+  return c.json(operation.state === "fresh" ? { ...rig, operation: operation.read() } : rig, 201);
 });
 
 rigsRoutes.get("/", observeInventoryHandler, (c) => {
@@ -336,11 +348,13 @@ rigsRoutes.get("/", observeInventoryHandler, (c) => {
 });
 
 rigsRoutes.get("/:id", (c) => {
-  const rig = getRepo(c).getRig(c.req.param("id"));
+  const repo = getRepo(c);
+  const rig = repo.getRig(c.req.param("id"));
   if (!rig) {
     return c.json({ error: "rig not found" }, 404);
   }
-  return c.json(rig);
+  // The rig's one delegates_to root at its session: null when there's none or several, or the root has no session.
+  return c.json({ ...rig, representative: resolveRigRepresentativeById(repo.db, rig.rig.id) });
 });
 
 rigsRoutes.get("/:id/graph", async (c) => {
@@ -811,6 +825,8 @@ rigsRoutes.post("/:rigId/expand", async (c) => {
 // the converge interface; identity-migration-free. The member fragment uses the
 // spec snake_case field names (id, runtime, agent_ref, profile, cwd, ...).
 rigsRoutes.post("/:rigId/pods/:podNamespace/members", async (c) => {
+  const header = c.req.header("X-OpenRig-Operation-Id");
+  if (!validOperationId(header)) return c.json({ error: "Invalid X-OpenRig-Operation-Id" }, 400);
   const rigId = c.req.param("rigId")!;
   const podNamespace = c.req.param("podNamespace")!;
   const podInstantiator = c.get("podInstantiator" as never) as PodRigInstantiator | undefined;
@@ -819,6 +835,7 @@ rigsRoutes.post("/:rigId/pods/:podNamespace/members", async (c) => {
   }
 
   const body: Record<string, unknown> = await c.req.json().catch(() => ({}));
+  const text = await c.req.text();
   const member = body["member"];
   if (!member || typeof member !== "object" || Array.isArray(member)) {
     return c.json({ error: "member is required (a member fragment with id, runtime, agent_ref)" }, 400);
@@ -837,11 +854,16 @@ rigsRoutes.post("/:rigId/pods/:podNamespace/members", async (c) => {
     ? (rawEdges as Array<{ from: string; to: string; kind: string }>)
     : undefined;
 
+  const operation = reserveOperation(getRepo(c).db, header, "member.add", [rigId, podNamespace], text);
+  if (operation.state === "conflict") return c.json({ code: "operation_id_conflict" }, 409);
+  if (operation.state === "replay") return c.json({ replayed: true, operation: operation.operation }, 200);
+
   const converged = await convergeOp(
     { instantiator: podInstantiator },
     rigId,
     { kind: "add_member", pod: podNamespace, member: member as Record<string, unknown>, edges },
     rigRoot,
+    operation.state === "fresh" ? { recordCreated: operation.recordCreated } : undefined,
   );
   // This route is the add_member sugar over the converge interface.
   if (converged.kind !== "add_member" || !converged.supported) {
@@ -853,21 +875,68 @@ rigsRoutes.post("/:rigId/pods/:podNamespace/members", async (c) => {
     switch (outcome.code) {
       case "rig_not_found":
       case "pod_not_found":
-        return c.json(outcome, 404);
+        return c.json(operation.state === "fresh" ? { ...outcome, operation: operation.read() } : outcome, 404);
       case "member_conflict":
-        return c.json(outcome, 409);
+        return c.json(operation.state === "fresh" ? { ...outcome, operation: operation.read() } : outcome, 409);
       case "edge_unresolved":
       case "validation_failed":
       case "preflight_failed":
-        return c.json(outcome, 400);
+        return c.json(operation.state === "fresh" ? { ...outcome, operation: operation.read() } : outcome, 400);
       default:
-        return c.json(outcome, 500);
+        return c.json(operation.state === "fresh" ? { ...outcome, operation: operation.read() } : outcome, 500);
     }
   }
 
   // 201 created. The node may still be failed/attention_required at launch; that
   // is carried in outcome.result.node.status (mirrors expand's per-node status).
-  return c.json(outcome, 201);
+  return c.json(operation.state === "fresh" ? { ...outcome, operation: operation.read() } : outcome, 201);
+});
+
+function edgeOpStatus(outcome: EdgeOpOutcome): 200 | 201 | 400 | 404 | 500 {
+  if (outcome.ok) return outcome.outcome === "added" ? 201 : 200;
+  if (outcome.code === "rig_not_found" || outcome.code === "edge_not_found") return 404;
+  return outcome.code === "unavailable" ? 500 : 400;
+}
+
+// POST /api/rigs/:rigId/edges — add one typed edge between two seats, by rig-scoped logical ids (same-pod
+// edges included). A repeat returns the existing edge. `plan: true` writes nothing.
+rigsRoutes.post("/:rigId/edges", async (c) => {
+  const rigId = c.req.param("rigId")!;
+  const raw: unknown = await c.req.json().catch(() => null);
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return c.json({ ok: false, code: "validation_failed", message: "body must be an object { from, to, kind }" }, 400);
+  }
+  const { from, to, kind, plan } = raw as Record<string, unknown>;
+  if (plan !== undefined && typeof plan !== "boolean") {
+    return c.json({ ok: false, code: "validation_failed", message: "plan must be a boolean" }, 400);
+  }
+  if (typeof from !== "string" || typeof to !== "string" || typeof kind !== "string") {
+    return c.json({ ok: false, code: "validation_failed", message: "from, to and kind are required strings" }, 400);
+  }
+  const converged = await convergeOp(
+    { instantiator: c.get("podInstantiator" as never) as PodRigInstantiator, rigRepo: getRepo(c) },
+    rigId,
+    { kind: "add_edge", from, to, edgeKind: kind, plan },
+    ".",
+  );
+  if (converged.kind !== "add_edge" || !converged.supported) return c.json({ error: "Unexpected converge result for add_edge" }, 500);
+  return c.json(converged.outcome, edgeOpStatus(converged.outcome));
+});
+
+// DELETE /api/rigs/:rigId/edges/:edgeId — remove exactly that edge. `?plan=1` writes nothing.
+rigsRoutes.delete("/:rigId/edges/:edgeId", async (c) => {
+  const plan = c.req.query("plan");
+  if (plan !== undefined && plan !== "0" && plan !== "1") {
+    return c.json({ ok: false, code: "validation_failed", message: "plan must be 0 or 1" }, 400);
+  }
+  const converged = await convergeOp(
+    { instantiator: c.get("podInstantiator" as never) as PodRigInstantiator, rigRepo: getRepo(c) },
+    c.req.param("rigId")!,
+    { kind: "remove_edge", edgeId: c.req.param("edgeId")!, plan: plan === "1" },
+    ".",
+  );
+  if (converged.kind !== "remove_edge" || !converged.supported) return c.json({ error: "Unexpected converge result for remove_edge" }, 500);
+  return c.json(converged.outcome, edgeOpStatus(converged.outcome));
 });
 
 // DELETE /api/rigs/:rigId/pods/:podRef

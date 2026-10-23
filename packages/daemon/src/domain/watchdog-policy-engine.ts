@@ -124,6 +124,21 @@ interface WatchdogPolicyEngineDeps {
    * SKIPPING, so an unknown target-generation must never skip a legitimate wake (note-2 inversion).
    */
   resolveTargetGeneration?: (sessionName: string) => string | null;
+  /**
+   * Issue #1180 — the target seat's latest context-usage sample under its live
+   * occupant generation (generation-guarded by the jobs repository). Null = no
+   * usable sample; token/percent context jobs then tell their target once instead of firing.
+   */
+  resolveContextUsage?: (
+    sessionName: string,
+    occupantGeneration: string | null,
+  ) => {
+    usedTokens: number | null;
+    usedPercentage: number | null;
+    contextWindowSize: number | null;
+    sampledAt: string | null;
+    fresh: boolean;
+  } | null;
   /** Last defense before transport for persisted jobs whose owning domain can
    *  prove they are no longer actionable. A reason terminals the job without
    *  delivering; null preserves the existing send path. */
@@ -175,6 +190,8 @@ const QUIET_SKIP_REASONS = new Set<string>([
   "not_due",
   // Quiet hours: the window's release job while quiet is still on. Nothing changed, so no history row or event per minute.
   "quiet_hours_still_on",
+  // A person's mode before its scheduled end (mode-scheduled-end): the same, for every minute it waits.
+  "mode_end_not_yet",
   "queue_wait_already_presented",
   "queue_wait_owner_working",
   "workflow_healthy_deadline_gated",
@@ -185,6 +202,8 @@ const QUIET_SKIP_REASONS = new Set<string>([
   "active_wake_not_due",
   "context_usage_below_threshold",
   "threshold_receipt_stable",
+  // A context watch that already told its target it can't read the sample, and still can't: told once, not every scan.
+  "context_sample_unreadable_notified",
   // OPR.0.4.3.16 idle-gate-qitem routine no-ops — analogues of
   // no_actionable_artifacts. Suppressed from history/SSE so a per-second
   // scan does not spam when there is simply nothing to wake about. The
@@ -238,6 +257,7 @@ export class WatchdogPolicyEngine {
   private readonly now: () => Date;
   private readonly policies: Map<string, Policy>;
   private readonly resolveTargetGeneration?: (sessionName: string) => string | null;
+  private readonly resolveContextUsage?: WatchdogPolicyEngineDeps["resolveContextUsage"];
   private readonly resolvePreDeliveryTerminalReason?: (input: { jobId: string }) => string | null;
   private readonly resolveQueueWait?: WatchdogPolicyEngineDeps["resolveQueueWait"];
   private readonly onWakeAttempt?: (attempt: { jobId: string; deliveryStatus: string }) => void;
@@ -249,6 +269,7 @@ export class WatchdogPolicyEngine {
     this.eventBus = deps.eventBus;
     this.deliver = deps.deliver;
     this.resolveTargetGeneration = deps.resolveTargetGeneration;
+    this.resolveContextUsage = deps.resolveContextUsage;
     this.resolvePreDeliveryTerminalReason = deps.resolvePreDeliveryTerminalReason;
     this.onWakeAttempt = deps.onWakeAttempt;
     this.resolveQueueWait = deps.resolveQueueWait;
@@ -312,16 +333,18 @@ export class WatchdogPolicyEngine {
 
     const parsed = this.parseSpec(job.specYaml);
     const isContextUsageThreshold = job.policy === "context-usage-threshold";
-    const target = isContextUsageThreshold
-      ? { session: job.targetSession }
-      : (parsed.target ?? { session: job.targetSession });
+    const target = watchdogJobTarget(job, parsed.target);
     const occupantGeneration = isContextUsageThreshold
       ? (this.resolveTargetGeneration?.(job.targetSession) ?? null)
       : null;
     let watchedFilePath = job.watchedFilePath;
     let currentGenerationTranscriptPending = false;
+    // Issue #1180 — token/percent jobs measure the seat's sampled context use,
+    // so only byte-gated jobs need a transcript-file binding.
+    const byteGated = job.thresholdBytes != null;
     if (
       isContextUsageThreshold &&
+      byteGated &&
       occupantGeneration &&
       job.watchedFileGeneration !== occupantGeneration
     ) {
@@ -379,8 +402,16 @@ export class WatchdogPolicyEngine {
       registeredAt: job.registeredAt,
       watchedFilePath,
       thresholdBytes: job.thresholdBytes,
+      thresholdTokens: job.thresholdTokens,
+      thresholdPercent: job.thresholdPercent,
+      // Issue #1180 — sampled context use for the target seat under its live
+      // occupant generation; only fetched for token/percent jobs.
+      contextUsageSample: isContextUsageThreshold && !byteGated
+        ? (this.resolveContextUsage?.(job.targetSession, occupantGeneration) ?? null)
+        : null,
       requiresJobId: job.requiresJobId,
       lastFiredGeneration: job.lastFiredGeneration,
+      lastFiredCondition: job.lastFiredCondition,
       occupantGeneration,
       currentGenerationTranscriptPending,
       requiredReceiptSatisfied,
@@ -533,7 +564,9 @@ export class WatchdogPolicyEngine {
     const preDeliveryTerminal = this.terminalBeforeDelivery(job, evaluatedAt);
     if (preDeliveryTerminal) return preDeliveryTerminal;
 
-    const continuityAction = parseContinuityAction(
+    // A notice about the watch itself is not the threshold: no fire receipt and no continuity action.
+    const thresholdFire = isContextUsageThreshold && !outcome.notice;
+    const continuityAction = outcome.notice ? undefined : parseContinuityAction(
       parsed.context["continuity_action"],
       job,
       occupantGeneration,
@@ -561,10 +594,10 @@ export class WatchdogPolicyEngine {
     // Plain wakes retain the proven at-most-once ordering. Structured
     // continuity custody is retry-safe by deterministic qitem id, so its
     // receipt waits until the durable action has completed.
-    if (isContextUsageThreshold && occupantGeneration && !continuityAction) {
+    if (thresholdFire && occupantGeneration && !continuityAction) {
       this.jobsRepo.recordThresholdFire(job.jobId, occupantGeneration, evaluatedAt);
     }
-    const deliverySchedule = this.jobsRepo.getByIdOrThrow(job.jobId);
+    const deliverySchedule = this.jobsRepo.deliverySchedule(job.jobId);
     const delivery = await this.deliver(
       {
         targetSession: outcome.target.session,
@@ -581,7 +614,7 @@ export class WatchdogPolicyEngine {
     ) {
       this.jobsRepo.recordThresholdFire(job.jobId, occupantGeneration, evaluatedAt);
     }
-    return this.recordAttempt({ job, outcome, evaluatedAt, deliverySchedule, delivery, isContextUsageThreshold, sentMessage: message });
+    return this.recordAttempt({ job, outcome, evaluatedAt, deliverySchedule, delivery, isContextUsageThreshold: thresholdFire, notice: outcome.notice === true, sentMessage: message });
   }
 
   /** The pre-transport guard: a job its owning domain can prove is no longer actionable is terminaled, not sent. */
@@ -665,7 +698,7 @@ export class WatchdogPolicyEngine {
   }
 
   private async deliverDigest(seat: string, digest: HeldReminder[]): Promise<void> {
-    const schedules = digest.map((held) => this.jobsRepo.getByIdOrThrow(held.job.jobId));
+    const schedules = digest.map((held) => this.jobsRepo.deliverySchedule(held.job.jobId));
     const members = digest.map((held) => ({ jobId: held.job.jobId, occurrenceId: held.occurrenceId }));
     const digestId = `digest-${createHash("sha256").update(JSON.stringify(members.map((m) => m.occurrenceId).sort())).digest("hex")}`;
     const lines = digest.map(({ entry }) => {
@@ -691,7 +724,7 @@ export class WatchdogPolicyEngine {
   /** A held reminder sent on its own, exactly as `evaluate` would have sent it: an ordinary park reminder with its
    *  continuation's preview, anything else verbatim. */
   private async deliverAlone(seat: string, held: HeldReminder, entry: ParkReminderEntry | null): Promise<void> {
-    const schedule = this.jobsRepo.getByIdOrThrow(held.job.jobId);
+    const schedule = this.jobsRepo.deliverySchedule(held.job.jobId);
     const message = entry ? withContinuationPreview(held.outcome.message, entry.qitemId, entry.continuation) : held.outcome.message;
     const delivery = await this.deliver(
       { targetSession: seat, message },
@@ -708,6 +741,8 @@ export class WatchdogPolicyEngine {
     deliverySchedule: WatchdogJob;
     delivery: DeliveryOutcome;
     isContextUsageThreshold: boolean;
+    /** A notice about the watch itself (PolicyEvaluation `notice`), not its condition firing. */
+    notice?: boolean;
     /** Set when this job's reminder went out inside a digest with others: the digest, its size and this job's line. */
     digest?: { deliveryId: string; size: number; line: string };
     /** The text a lone send delivered, when it differs from the outcome's message (a park wake's continuation preview). */
@@ -735,7 +770,11 @@ export class WatchdogPolicyEngine {
           ? { ...(deliveryNotes ?? {}), deliveryReason: delivery.error }
           : delivery.status === "retained" ? { ...(deliveryNotes ?? {}), outboxIds: delivery.outboxIds ?? [], retainedNotDelivered: true } : deliveryNotes ?? null,
     });
-    if (!isContextUsageThreshold) {
+    // A notice stamps no fire time and leaves the job not actionable, so the active-wake throttle can't hold
+    // back the watched condition's own send after it.
+    if (input.notice) {
+      this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, false);
+    } else if (!isContextUsageThreshold) {
       this.jobsRepo.recordEvaluation(job.jobId, evaluatedAt, true, deliverySchedule);
     }
     // OPR.0.5.8.1 S2 — a policy's condition receipt is banked ONLY on positive
@@ -746,7 +785,8 @@ export class WatchdogPolicyEngine {
     if (outcome.conditionReceipt !== undefined && delivery.status === "ok") {
       this.jobsRepo.recordConditionReceipt(job.jobId, outcome.conditionReceipt);
     }
-    this.jobsRepo.setActionable(job.jobId, true, evaluatedAt, job.lastActionableAt);
+    if (input.notice) this.jobsRepo.setActionable(job.jobId, false, evaluatedAt);
+    else this.jobsRepo.setActionable(job.jobId, true, evaluatedAt, job.lastActionableAt);
     this.eventBus.emit({
       type: "watchdog.evaluation_fired",
       jobId: job.jobId,
@@ -757,11 +797,11 @@ export class WatchdogPolicyEngine {
     // The history above audits the actual attempt. A newer park/blocker change
     // must not receive its receipt or be backed off as though we sent for it.
     const current = this.jobsRepo.getByIdOrThrow(job.jobId);
-    if (current.state === "active" && current.specYaml === deliverySchedule.specYaml
-      && current.intervalSeconds === deliverySchedule.intervalSeconds
+    if (current.state === "active" && this.jobsRepo.scheduleUnchanged(current, deliverySchedule)
       && (isContextUsageThreshold || current.lastEvaluationAt === evaluatedAt)) {
       this.onWakeAttempt?.({ jobId: job.jobId, deliveryStatus: delivery.status });
     }
+    this.jobsRepo.deliveryAccounted(job.jobId);
     return {
       job: this.jobsRepo.getByIdOrThrow(job.jobId),
       outcome,
@@ -795,6 +835,17 @@ function parseContinuityAction(
     destination: value["destination"],
     body: value["body"],
   };
+}
+
+/** The seat a job is addressed to, before delivery resolves the name: a context-usage job measures and wakes its
+ *  stored target; every other policy prefers its spec's `target:`. A seat swap compares the same value (#1775). */
+export function watchdogJobTarget(
+  job: { policy: string; targetSession: string },
+  specTarget: { session: string } | null,
+): { session: string } {
+  return job.policy === "context-usage-threshold"
+    ? { session: job.targetSession }
+    : (specTarget ?? { session: job.targetSession });
 }
 
 /** Parse the operator-authored watchdog YAML before it reaches persistence. */

@@ -25,6 +25,10 @@ import { SettingsStore } from "./user-settings/settings-store.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { observeClaudeResumeLaunch, type ClaudeLaunchedProcess, type NativeProcessLister } from "./native-process-lineage.js";
 import { CommunityHarnessRuntimeAdapter } from "../adapters/community-harness-runtime-adapter.js";
+import { join } from "node:path";
+import { guidanceFileIsLink, readFootprintAnswer, readGuidanceFile, routerLineSkipReason, type FootprintAnswer, type RouterLineWriteResult } from "./footprint-choice.js";
+import { SEAT_SKILLS_BOOTSTRAP_BLOCK_ID, describeSkillRouterFootprint, seatSkillsLineEdited, refusedSeatSkillsRootForNode, seatCatalogKeptNote, seatRouterKeptNote, seatSkillPathsForNode, seatSkillPluginDirForNode, writeSeatSkillCatalog, writeSeatSkillRouter } from "./seat-skill-storage.js";
+import { recordConversationPromptForNode, recordForkConversationPromptForNode, seatLaunchAdditionsForLaunch, systemPromptPendingNoteForNode } from "./seat-launch-additions.js";
 
 // Expanded startup text can put the current input marker above 50 scrollback lines.
 const STARTUP_SUBMIT_CAPTURE_LINES = 200;
@@ -157,6 +161,12 @@ export function isRecoverableStartupFailure(db: Database.Database, nodeId: strin
 
 // -- Types --
 
+/** The seat-skills bootstrap line among a seat's startup files: the built-in guidance merged into its managed block
+ *  (never the Codex catalog, which shares the logical name but is sent as text). */
+export function isSeatSkillsBootstrapLine(file: Pick<ResolvedStartupFile, "path" | "deliveryHint">): boolean {
+  return file.path === SEAT_SKILLS_BOOTSTRAP_BLOCK_ID && file.deliveryHint === "guidance_merge";
+}
+
 export interface StartupInput {
   rigId: string;
   nodeId: string;
@@ -167,6 +177,11 @@ export interface StartupInput {
   resolvedStartupFiles: ResolvedStartupFile[];
   startupActions: StartupAction[];
   isRestore: boolean;
+  /**
+   * OPR.0.7.0.13: a fresh relaunch's decisions about the seat's own skills (seatSkillReplay): saved skill entries and
+   * startup skill files that this start must not project or install again. They stay in the saved startup context.
+   */
+  replaySkip?: { entryIds: ReadonlySet<string>; files: ReadonlySet<string> };
   /** Session name for harness launch (used as --name flag). */
   sessionName?: string;
   /** Resume token for restore path. Mutually exclusive with forkSource. */
@@ -217,13 +232,16 @@ type StartupDeliveryInput = StartupInput & {
 
 export type StartupResult = { warnings?: string[] } & (
   | { ok: true; startupStatus: "ready"; continuityOutcome: "resumed" | "fresh" | "forked" | "rebuilt"; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string; diagnostics?: StartupSubmissionDiagnostic[] };
+    /** OPR.0.7.0.13 (router): what happened to the one-line bootstrap at this start, when the seat has one. */
+    routerLine?: RouterLineWriteResult;
     /** Codex (#1524): the native process the managed resume was proven on, carried to restore's join. */
     resumedProcess?: { pid: number; startedAt: string } }
   // `evidence` carries the last-N pane lines for `attention_required`
   // outcomes so restore-orchestrator's per-node mapping can populate
   // `attentionEvidence` on the RestoreNodeResult. Internal type only;
   // not persisted on the failure event.
-  | { ok: false; startupStatus: "attention_required" | "failed"; errors: string[]; evidence?: string; recovery?: string; missingConversation?: true });
+  | { ok: false; startupStatus: "attention_required" | "failed"; errors: string[]; evidence?: string; recovery?: string; missingConversation?: true;
+    probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence });
 
 interface StartupOrchestratorDeps {
   db: Database.Database;
@@ -333,6 +351,30 @@ export class StartupOrchestrator {
     input = { ...input, binding: { ...input.binding, nonInterruptive: rigRepo.getRigNonInterruptive(input.rigId) } };
     const claudeManagedBlockFile = rigRepo.getRigClaudeManagedBlockFile(input.rigId);
     if (claudeManagedBlockFile) input = { ...input, binding: { ...input.binding, claudeManagedBlockFile } };
+    // OPR.0.7.0.13: a Claude seat whose plugin OpenRig keeps (already on its CLAUDE_CODE_PLUGIN_DIRS) gets every skill
+    // there, profile resources and startup skill files too. A seat without one keeps the project, as before, so a
+    // skill never lands where nothing points.
+    if (input.adapter.runtime === "claude-code" && !input.binding.seatSkillsRoot) {
+      const seatPlugin = seatSkillPluginDirForNode(this.db, input.nodeId);
+      if (seatPlugin) input = { ...input, binding: { ...input.binding, seatSkillsRoot: join(seatPlugin, "skills") } };
+    }
+    // OPR.0.7.0.13 (Codex C2): a Codex seat with its own storage gets its skills there, and its catalog, rebuilt after
+    // this launch's projection, is what its per-seat startup text delivers.
+    const codexSeatSkills = input.adapter.runtime === "codex" ? seatSkillPathsForNode(this.db, input.nodeId) : undefined;
+    if (codexSeatSkills && !input.binding.seatSkillsRoot) input = { ...input, binding: { ...input.binding, seatSkillsRoot: codexSeatSkills.skillsRoot } };
+    // A seat whose storage a link refused keeps its skills' target there, where each is refused and named; they never
+    // fall back into the project.
+    if (!input.binding.seatSkillsRoot && (input.adapter.runtime === "claude-code" || input.adapter.runtime === "codex")) {
+      const refused = refusedSeatSkillsRootForNode(this.db, input.nodeId);
+      if (refused) input = { ...input, binding: { ...input.binding, seatSkillsRoot: refused.skillsRoot, seatSkillsRefused: refused.reason } };
+    }
+    // OPR.0.7.0.9: a Claude seat's own launch additions, the copies present in its seat storage; a missing copy is named.
+    if (input.adapter.runtime === "claude-code" && !input.binding.launchAdditions) {
+      const { additions, missing, refused } = seatLaunchAdditionsForLaunch(this.db, input.nodeId);
+      if (additions) input = { ...input, binding: { ...input.binding, launchAdditions: additions } };
+      for (const file of missing) warnings.push(`${input.sessionName ?? input.nodeId}: seat_launch_addition_missing: ${file} is not in this seat's storage; launched without it`);
+      for (const reason of refused) warnings.push(`${input.sessionName ?? input.nodeId}: seat_launch_addition_refused: ${reason}; launched without it`);
+    }
     const deliveryInput: StartupDeliveryInput = { ...input, warnings, submissionWarnings: [], startupAttemptId: randomUUID(), sendOrder: 0, submissionDiagnostics: [] };
     const errors: string[] = [];
     let continuityOutcome: "resumed" | "fresh" | "forked" | "rebuilt" = input.resumeToken
@@ -366,7 +408,11 @@ export class StartupOrchestrator {
     // native resume. Fresh launches still project empty plans to support removal.
     let projectionResult: ProjectionResult;
     if (!(input.preserveStartupContext && input.adapter.runtime === "claude-code" && input.plan.entries.length === 0)) try {
-      projectionResult = await input.adapter.project(input.plan, input.binding);
+      const skip = input.replaySkip;
+      const projectedPlan = skip && skip.entryIds.size > 0
+        ? { ...input.plan, entries: input.plan.entries.filter((e) => !(e.category === "skill" && skip.entryIds.has(e.effectiveId))) }
+        : input.plan;
+      projectionResult = await input.adapter.project(projectedPlan, input.binding);
       warnings.push(...(projectionResult.warnings ?? []));
       if (projectionResult.failed.length > 0) {
         for (const f of projectionResult.failed) {
@@ -390,12 +436,18 @@ export class StartupOrchestrator {
     const sourceFiles = input.rebuildArtifacts && input.rebuildArtifacts.length > 0
       ? [...input.rebuildArtifacts, ...input.resolvedStartupFiles]
       : input.resolvedStartupFiles;
-    const applicableFiles = sourceFiles.filter((f) => f.appliesOn.includes(context));
+    // OPR.0.7.0.13 (router, R1.1): the one-line bootstrap is delivered on its own (below), only with a yes, and never
+    // stops the launch. Every start reads the answer, so a saved context from before the line was opt-in (or from while
+    // it was on) delivers it only while the yes stands. Nothing already written is removed.
+    const bootstrapLine = sourceFiles.filter((f) => f.appliesOn.includes(context) && !input.replaySkip?.files.has(f.absolutePath)
+      && isSeatSkillsBootstrapLine(f));
+    const applicableFiles = sourceFiles.filter((f) => f.appliesOn.includes(context) && !input.replaySkip?.files.has(f.absolutePath)
+      && !isSeatSkillsBootstrapLine(f));
     const preLaunchFiles: ResolvedStartupFile[] = [];
     let postLaunchFiles: ResolvedStartupFile[] = [];
     for (const f of applicableFiles) {
       const hint = f.deliveryHint === "auto"
-        ? resolveConcreteHint(f.path, this.safeReadFile(f.absolutePath))
+        ? resolveConcreteHint(f.path, this.safeReadFile(f.absolutePath), f.orientation)
         : f.deliveryHint;
       if (hint === "send_text") {
         postLaunchFiles.push(f);
@@ -418,6 +470,61 @@ export class StartupOrchestrator {
     } catch (err) {
       errors.push(`Pre-launch delivery error: ${(err as Error).message}`);
       return this.fail(input, "failed", errors, undefined, false, undefined, false, "pre_launch_files", true);
+    }
+
+    // OPR.0.7.0.13 (router, R1.1): the bootstrap line, on its own: with a yes it is delivered into the seat's guidance file;
+    // otherwise it is skipped with the answer's reason. A line that can't be written is this start's named result (from
+    // the delivery's own error), never a failed launch.
+    let routerLine: RouterLineWriteResult | undefined;
+    if (bootstrapLine.length > 0) {
+      let answer: FootprintAnswer | null = null;
+      try { answer = readFootprintAnswer(this.readinessSettings); } catch { /* unreadable: reported as such */ }
+      const target = describeSkillRouterFootprint([{ seat: input.sessionName ?? input.nodeId, runtime: input.adapter.runtime,
+        cwd: input.binding.cwd ?? ".", claudeManagedBlockFile: input.binding.claudeManagedBlockFile ?? null }]).files[0]?.path;
+      if (target) {
+        const skip = routerLineSkipReason(answer);
+        if (skip) routerLine = { answer, files: [{ path: target, outcome: "skipped", reason: skip }] };
+        else if (guidanceFileIsLink(target)) {
+          // A linked guidance file is someone's layout, often a file outside the project: the line isn't written through it.
+          routerLine = { answer, files: [{ path: target, outcome: "linked" }] };
+          warnings.push(`seat_skills_line_linked: ${target} is a link, so the line wasn't written through it; the seat started without it`);
+        } else if (seatSkillsLineEdited(readGuidanceFile(target))) {
+          // Someone edited the line: a start leaves their block as it is, as rig down does.
+          routerLine = { answer, files: [{ path: target, outcome: "edited" }] };
+          warnings.push(`seat_skills_line_edited: ${target} holds an edited seat-skills line, so this start left it as it is`);
+        } else {
+          try {
+            // The saved line is optional, and the adapters swallow an optional file's write error; for this one isolated
+            // call, mark it required so the adapter reports the real error, which is handled here without failing the start.
+            const delivered = await input.adapter.deliverStartup(bootstrapLine.map((f) => ({ ...f, required: true })), input.binding);
+            const failed = delivered.failed.find((f) => f.path === bootstrapLine[0]!.path) ?? delivered.failed[0];
+            routerLine = { answer, files: [failed ? { path: target, outcome: "unwritable", error: failed.error } : { path: target, outcome: "delivered" }] };
+          } catch (err) {
+            routerLine = { answer, files: [{ path: target, outcome: "unwritable", error: (err as Error).message }] };
+          }
+          const unwritable = routerLine.files.find((f) => f.outcome === "unwritable");
+          if (unwritable && unwritable.outcome === "unwritable") warnings.push(`seat_skills_line_unwritable: ${unwritable.path}: ${unwritable.error}; the seat started without it`);
+        }
+      }
+    }
+
+    // OPR.0.7.0.13 (router): the seat's one generated router skill, after every pre-launch skill writer, so it lists
+    // every skill the seat starts with. A router that can't be written is this seat's named result; the launch goes on.
+    const routerSeatSkills = input.adapter.runtime === "claude-code" ? seatSkillPathsForNode(this.db, input.nodeId) : codexSeatSkills;
+    if (routerSeatSkills) {
+      try {
+        const router = writeSeatSkillRouter(routerSeatSkills);
+        if (router.kept) warnings.push(seatRouterKeptNote(router));
+      } catch (err) { warnings.push(`seat_router_not_written: ${(err as Error).message}`); }
+    }
+
+    // OPR.0.7.0.13 (Codex C2): the seat's catalog, built after every pre-launch skill writer (projection and startup
+    // skill files) and before the post-launch text that sends it, so it lists every skill the seat starts with.
+    if (codexSeatSkills) {
+      try {
+        const catalog = writeSeatSkillCatalog(codexSeatSkills);
+        if (catalog.kept) warnings.push(`${seatCatalogKeptNote(catalog)}${catalog.reason === "edited" ? ", and that file is what the seat's startup text sends" : ""}`);
+      } catch (err) { warnings.push(`seat skill catalog not written: ${(err as Error).message}`); }
     }
 
     // 7. Persist startup context for restore replay
@@ -458,6 +565,7 @@ export class StartupOrchestrator {
           const launchResult = await input.adapter.launchHarness(input.binding, {
             name: input.sessionName ?? input.binding.tmuxSession ?? "",
             resumeToken: launchResumeToken,
+            ...(launchResumeToken && input.resumeType ? { resumeType: input.resumeType } : {}),
             ...(input.forkSource && !launchResumeToken ? { forkSource: input.forkSource } : {}),
           });
           if (launchResult.ok) {
@@ -468,11 +576,30 @@ export class StartupOrchestrator {
             }
             const notice = nonInterruptiveNotice(input.adapter.runtime, input.binding);
             if (notice) warnings.push(`${input.sessionName ?? input.nodeId}: ${notice}`);
+            for (const note of launchResult.warnings ?? []) warnings.push(`${input.sessionName ?? input.nodeId}: ${note}`);
             const normalizedResumeToken = launchResult.resumeToken?.trim();
             if (normalizedResumeToken) {
               try {
-                this.sessionRegistry.updateResumeToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken, "scrape");
+                if (launchResult.resumeProvenance === "launcher") {
+                  this.sessionRegistry.recordLauncherReportedToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken);
+                } else {
+                  this.sessionRegistry.updateResumeToken(input.sessionId, launchResult.resumeType ?? "", normalizedResumeToken, "scrape");
+                }
               } catch { /* best-effort */ }
+            }
+            // OPR.0.7.0.9: the prompt a new conversation starts with; on a resume, a changed prompt is pending.
+            if (input.adapter.runtime === "claude-code" && input.binding.launchAdditions?.appendSystemPromptFile) {
+              const resumed = launchResumeToken?.trim();
+              if (resumed) {
+                const pending = systemPromptPendingNoteForNode(this.db, input.nodeId, resumed);
+                if (pending) warnings.push(`${input.sessionName ?? input.nodeId}: ${pending}`);
+              } else if (normalizedResumeToken) {
+                // A fork starts from its parent's conversation: it takes the parent's recorded start (or none).
+                try {
+                  if (input.forkSource?.value) recordForkConversationPromptForNode(this.db, input.nodeId, normalizedResumeToken, input.forkSource.value);
+                  else recordConversationPromptForNode(this.db, input.nodeId, normalizedResumeToken);
+                } catch { /* best-effort */ }
+              }
             }
             break;
           }
@@ -522,11 +649,11 @@ export class StartupOrchestrator {
             // unverified fork keeps its unsent context for a verified continuation.
             return this.fail(input, "attention_required", errors, launchResult.evidence,
               launchResult.forkIdentityPending ? forkContext ?? false : continuityOutcome === "fresh",
-              undefined, false, "harness_launch", true);
+              undefined, false, "harness_launch", true, launchResult.probe);
           }
 
           errors.push(`Harness launch failed: ${launchResult.error}`);
-          return this.fail(input, "failed", errors, undefined, false, launchResult.recovery, launchResult.missingConversation === true, "harness_launch", true);
+          return this.fail(input, "failed", errors, undefined, false, launchResult.recovery, launchResult.missingConversation === true, "harness_launch", true, launchResult.probe);
         }
       } catch (err) {
         errors.push(`Harness launch error: ${(err as Error).message}`);
@@ -777,7 +904,7 @@ export class StartupOrchestrator {
       : undefined;
     this.eventBus.emit({ type: "node.startup_ready", rigId: input.rigId, nodeId: input.nodeId, ...(submission ? { submission } : {}) });
 
-    return { ok: true, startupStatus: "ready", continuityOutcome, ...(submission ? { submission } : {}), ...(resumedProcess ? { resumedProcess } : {}) };
+    return { ok: true, startupStatus: "ready", continuityOutcome, ...(submission ? { submission } : {}), ...(routerLine ? { routerLine } : {}), ...(resumedProcess ? { resumedProcess } : {}) };
   }
 
   /** A failed attempt can continue only when it stopped before sending context.
@@ -836,6 +963,7 @@ export class StartupOrchestrator {
     missingConversation = false,
     stage?: StartupFailureStage,
     hasPendingWork?: boolean,
+    probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence,
   ): StartupResult {
     if (status === "attention_required" && typeof pendingContext === "object") {
       // The reasons above stay visible; this only says what the status means for the fork.
@@ -858,8 +986,10 @@ export class StartupOrchestrator {
       ...(hasPendingWork !== undefined ? { hasPendingWork } : {}),
       requestedResumeToken: input.resumeToken ?? null,
       requestedResumeType: input.resumeType ?? null,
+      ...(probe ? { probe } : {}),
     });
     return { ok: false, startupStatus: status, errors, evidence, ...(recovery ? { recovery } : {}),
+      ...(probe ? { probe } : {}),
       ...(missingConversation ? { missingConversation: true as const } : {}) };
   }
 
@@ -1086,6 +1216,7 @@ export class StartupOrchestrator {
         phase = "guarded_retry";
         diagnostic.retry = "threw"; // Replaced when the transport returns normally.
         retry = await this.sessionTransport.send(tmuxSession, "", {
+          openrigNotice: true,
           submitOnly: true,
           expectedStagedText: text,
           submitOnlyCaptureLines: STARTUP_SUBMIT_CAPTURE_LINES,

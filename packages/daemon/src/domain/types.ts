@@ -34,6 +34,8 @@ export interface Node {
   runtime: string | null;
   model: string | null;
   effort?: string | null;
+  /** Session-scoped Claude Advisor model; never written to shared Claude settings. */
+  advisor?: string | null;
   /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
   effortChoice?: string | null;
   codexConfigProfile?: string | null;
@@ -126,6 +128,8 @@ export type RigEvent =
       pinnedModel: string;
       effectiveModel: string;
       diagnosis: string | null;
+      /** Absent on events written before this field existed. When present, a restarted daemon doesn't proclaim it again. */
+      occurrenceId?: string;
       channels: Array<{ channel: string; target: string | null; status: string; detail?: string }>;
     }
   | { type: "rig.deleted"; rigId: string }
@@ -136,9 +140,10 @@ export type RigEvent =
   | { type: "session.detached"; rigId: string; nodeId: string; sessionName: string }
   // S5 (OPR.0.5.4.7) — seat-lifecycle audit trail: the three supported seat verbs each persist
   // their mutation with actor + reason in the same transaction as the mutation itself.
-  | { type: "node.model_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
+  | { type: "node.terminal_policy_changed"; rigId: string; nodeId: string; scope: "seat" | "rig_default"; config: unknown; actor: string; reason: string }
+  | { type: "node.model_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
   | { type: "node.cwd_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
-  | { type: "node.effort_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
+  | { type: "node.effort_changed"; actorClass?: string; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; source: "seat_selection"; effect: "future_launches_only" }
   | { type: "node.policy_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; launchPosture: "floor" | "full_bypass" | "auto"; reason: string; operator: string }
   | { type: "session.stopped"; rigId: string; nodeId: string; sessionName: string; reason: string; operator: string | null }
@@ -149,8 +154,8 @@ export type RigEvent =
   // a request that waited behind it, or a restart that never recorded a result, is refused rather than repeated.
   | { type: "seat.restart_in_place_started"; rigId: string; nodeId: string; logicalId: string; sessionName: string; pane: string; paneShape: "shell_backed" | "direct_native"; oldPid: number; oldStartedAt: string | null; codexHome: string; reason: string; operator: string | null }
   | { type: "seat.restart_in_place_finished"; rigId: string; nodeId: string; logicalId: string; sessionName: string; outcome: "restarted_account_unverified" | "not_started" | "incomplete" | "native_unknown"; newPid: number | null; newStartedAt: string | null; codexHome: string; paneHeld: boolean; accountLinesAtRestart?: Record<string, number> | null; accountTextAtRestart?: { anchor: string[]; counts: Record<string, number> } | null; finishedAt: string }
-  | { type: "seat.fresh_launched"; rigId: string; nodeId: string; logicalId: string; sessionName: string; sessionId: string; supersededSessionIds: string[]; retiringGeneration: string | null; newGeneration: string; nativeSessionId: string | null; nativeSessionIdReason?: string; model: string | null; effort?: string | null; startupPolicyHash: string; reason: string; operator: string | null; status: "ready" | "attention_required" }
-  | { type: "seat.fresh_launch_failed"; rigId: string; nodeId: string; logicalId: string; sessionName: string; sessionId: string; supersededSessionIds: string[]; retiringGeneration: string | null; newGeneration: string | null; model: string | null; effort?: string | null; startupPolicyHash: string; reason: string; operator: string | null; errors: string[] }
+  | { type: "seat.fresh_launched"; rigId: string; nodeId: string; logicalId: string; sessionName: string; sessionId: string; supersededSessionIds: string[]; retiringGeneration: string | null; newGeneration: string; nativeSessionId: string | null; nativeSessionIdReason?: string; model: string | null; effort?: string | null; advisor?: string | null; startupPolicyHash: string; reason: string; operator: string | null; status: "ready" | "attention_required" }
+  | { type: "seat.fresh_launch_failed"; rigId: string; nodeId: string; logicalId: string; sessionName: string; sessionId: string; supersededSessionIds: string[]; retiringGeneration: string | null; newGeneration: string | null; model: string | null; effort?: string | null; advisor?: string | null; startupPolicyHash: string; reason: string; operator: string | null; errors: string[] }
   | { type: "snapshot.created"; rigId: string; snapshotId: string; kind: string }
   | { type: "restore.started"; rigId: string; snapshotId: string; snapshotSelection?: RestoreSnapshotSelection; intendedRoster?: Array<{ nodeId: string; logicalId: string }>; excludedNodes?: RestoreExcludedNode[] }
   | { type: "restore.completed"; rigId: string; snapshotId: string; result: RestoreResult }
@@ -189,6 +194,7 @@ export type RigEvent =
   // 2026-07-02 founder ruling).
   | { type: "session.resume_token_captured"; rigId: string; nodeId: string; sessionName: string; sessionId: string; runtime: string; outcome: "captured" | "preserved" | "skipped"; resumeType?: string; provenance?: "adoption"; reason?: "missing_sidecar" | "parse_error" | "probe_timeout" | "process_unreadable" | "invalid_token" | "stale_sidecar" | "higher_rank_present"; redacted: true }
   | { type: "seat.attention_cleared"; rigId: string; nodeId: string; sessionName: string; from: string; to: "ready"; clearedBy: "evidence" | "operator_attestation"; evidence?: { kind: string; state?: string; reason?: string }; reason?: string; previousError: string | null }
+  | { type: "seat.attention_clear_refused"; rigId: string; nodeId: string; sessionId: string; sessionName: string; attentionClass: "restore_outcome"; code: string; attemptId?: number; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence }
   | { type: "rig.imported"; rigId: string; specName: string; specVersion: string }
   // Package events (cross-rig, no rigId)
   | { type: "package.validated"; packageName: string; valid: boolean }
@@ -229,7 +235,7 @@ export type RigEvent =
   | { type: "pod.deleted"; rigId: string; podId: string }
   | { type: "node.startup_pending"; rigId: string; nodeId: string; startupProof?: StartupProofSelection }
   | { type: "node.startup_ready"; rigId: string; nodeId: string; previousStatus?: "failed" | "attention_required"; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string; diagnostics?: StartupSubmissionDiagnostic[] } }
-  | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean; forkContextPending?: { parentToken: string; isRestore: boolean }; submissionDiagnostics?: StartupSubmissionDiagnostic[]; stage?: StartupFailureStage; hasPendingWork?: boolean; requestedResumeToken?: string | null; requestedResumeType?: string | null }
+  | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean; forkContextPending?: { parentToken: string; isRestore: boolean }; submissionDiagnostics?: StartupSubmissionDiagnostic[]; stage?: StartupFailureStage; hasPendingWork?: boolean; requestedResumeToken?: string | null; requestedResumeType?: string | null; probe?: import("./native-resume-probe-evidence.js").NativeResumeProbeEvidence }
   // OPR.0.4.3.06 — startup proof (challenge-verified orientation). Append-only.
   // `node.startup_challenged` freezes this launch's challenge ground truth
   // (challengeId + contractHash; the expected answer is recomputed, never
@@ -295,6 +301,7 @@ export type RigEvent =
   | { type: "watchdog.evaluation_terminal"; jobId: string; policy: string; terminalReason: string }
   | { type: "watchdog.job_registered"; jobId: string; policy: string; targetSession: string; registeredBy: string }
   | { type: "watchdog.job_stopped"; jobId: string; reason: string }
+  | { type: "watchdog.job_updated"; jobId: string; changed: string[] }
   // PL-004 Phase D: daemon-native Workflow Runtime events. Step closure
   // and next-qitem projection are emitted within the SAME daemon
   // transaction (transactional-scribe contract). Subscribers see the
@@ -484,8 +491,9 @@ export interface RestoreNodeResult {
   // `failed` (genuine harness error only). `awaiting-decision` is never
   // emitted while a session is live. (`fresh` is retained for the legacy
   // continuity-restoring skip path only; `rebuilt`/`operator_recovered` sit
-  // outside the five-term split.)
-  status: "resumed" | "rebuilt" | "fresh" | "fresh-primed" | "awaiting-decision" | "failed" | "attention_required" | "operator_recovered";
+  // outside the five-term split.) `left_attached`: a seat joined with `rig attach` as an external CLI, which
+  // restore leaves as it is; nothing was launched, and OpenRig can't see whether that app still runs.
+  status: "resumed" | "rebuilt" | "fresh" | "fresh-primed" | "awaiting-decision" | "failed" | "attention_required" | "operator_recovered" | "left_attached";
   error?: string;
   /** Pane evidence captured when status is `attention_required` (L3, optional). */
   attentionEvidence?: string | null;
@@ -549,6 +557,8 @@ export interface AgentActivity {
   eventAt?: string | null;
   /** The emitter's own order for its posts (OpenRig's pi/omp runner), when it sent one. */
   sourceSequence?: number | null;
+  /** How often the emitter promises to report while idle; an idle report older than two of these no longer holds. */
+  livenessSeconds?: number | null;
   rawEvent?: string | null;
   rawSubtype?: string | null;
   runtime?: string | null;
@@ -979,7 +989,7 @@ export interface AgentResources {
 
 export interface ProfileSpec {
   summary?: string;
-  preferences?: { runtime?: string; model?: string; effort?: string };
+  preferences?: { runtime?: string; model?: string; effort?: string; advisor?: string };
   startup?: StartupBlock;
   lifecycle?: LifecycleDefaults;
   uses: {
@@ -1010,6 +1020,7 @@ export interface AgentSpec {
     runtime?: string;
     model?: string;
     effort?: string;
+    advisor?: string;
     lifecycle?: LifecycleDefaults;
   };
   startup: StartupBlock;
@@ -1034,6 +1045,7 @@ export interface LegacyRigSpecNode {
   role?: string;
   model?: string;
   effort?: string;
+  advisor?: string;
   cwd?: string;
   surfaceHint?: string;
   workspace?: string;
@@ -1141,6 +1153,7 @@ export interface RigSpecPodMember {
   codexConfigProfile?: string;
   model?: string;
   effort?: string;
+  advisor?: string;
   /**
    * OPR.0.4.6.FAC1: optional seat-side role declaration (writes the
    * existing `nodes.role` column via createMemberNode → addNode). The
@@ -1152,6 +1165,11 @@ export interface RigSpecPodMember {
   /** OPR.0.4.8.3 Seam B: optional per-seat permission_policy REF (builtin:<name> or a spec-relative
    *  custom path). Absent = the floor. Overrides the rig-level ref. */
   permissionPolicy?: string;
+  /** OPR.0.7.0.9 — Claude members only: their own agent file, appended system prompt file and plugin folders,
+   *  as paths beside the spec. Copied into the seat's own storage at launch. */
+  agentFile?: string;
+  appendSystemPromptFile?: string;
+  pluginDirs?: string[];
   /** Non-secret launch environment for this seat; overrides the rig-level `env`. */
   env?: Record<string, string>;
   cwd: string;

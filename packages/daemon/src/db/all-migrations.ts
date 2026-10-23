@@ -4,6 +4,7 @@
 // trap). Append new migrations to the END, in order.
 
 import { coreSchema } from "./migrations/001_core_schema.js";
+import { terminalPolicySchema } from "./migrations/128_terminal_policy.js";
 import { bindingsSessionsSchema } from "./migrations/002_bindings_sessions.js";
 import { eventsSchema } from "./migrations/003_events.js";
 import { snapshotsSchema } from "./migrations/004_snapshots.js";
@@ -124,6 +125,9 @@ import { seatIdentityPanePidSchema } from "./migrations/119_seat_identity_pane_p
 import { rigStartupLayersSchema } from "./migrations/121_rig_startup_layers.js";
 import { humanOperatingModesSchema } from "./migrations/122_human_operating_modes.js";
 import { queueDelegatedDecisionSchema } from "./migrations/123_queue_delegated_decision.js";
+import { contextUsageWatchdogUnitsSchema } from "./migrations/124_context_usage_watchdog_units.js";
+import { nodeAdvisorSchema } from "./migrations/125_node_advisor.js";
+import { operationCorrelationSchema } from "./migrations/127_operation_correlation.js";
 
 /** Ordered migrations; numbers may be reserved by independent changes. */
 
@@ -247,4 +251,8 @@ export const ALL_MIGRATIONS: Migration[] = [
   rigStartupLayersSchema,
   humanOperatingModesSchema,
   queueDelegatedDecisionSchema,
+  contextUsageWatchdogUnitsSchema,
+  nodeAdvisorSchema,
+  operationCorrelationSchema,
+  terminalPolicySchema,
 ];
