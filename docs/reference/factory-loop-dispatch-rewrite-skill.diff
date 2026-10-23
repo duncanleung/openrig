@@ -1,0 +1,250 @@
+--- a/factory-loop/SKILL.md	2026-10-23 02:47:56
++++ b/factory-loop/SKILL.md	2026-10-23 02:48:25
+@@ -43,9 +43,9 @@
+                                             │           └──────────────────────────┘
+                                             │
+                                    /phase-gate(post)
+-                             (detects advisor_seat via
+-                              rig whoami; routes to it
+-                              or runs inline; produces
++                             (sent to advisor_seat with
++                              rig send; blocks if the
++                              seat is missing; produces
+                               gate:validation evidence)
+                                             │
+                                    concise result only
+@@ -59,8 +59,13 @@
+ and updates state. This keeps the orchestrator's context small enough to process multiple tickets
+ in one run without compacting.
+ 
+-When no topology is configured, the orchestrator falls back to running skills inline (single-seat
+-mode). Single-seat mode works but limits the run to ~1 ticket before context pressure forces a stop.
++**The orchestrator never loads a dispatched skill (RIG-128).** `/ticket-loop`, `/phase-gate`,
++`/code-review-dual`, `/ticket-enrich` and `/codex-second-opinion` run in the seats, not in the
++orchestrator. Do not call the `Skill` tool for any of them. A `Skill` call puts the full skill body
++in the orchestrator's context, and the body stays there through every compaction (about 22K tokens
++for these five). Send a brief with `rig send`, park, and parse the one-line result. The skill names
++in this file are text for the briefs. When a seat is missing, block and retry. Do not run the skill
++inline.
+ 
+ This skill composes with — does not override — the existing orchestrator validation gate
+ (`role.md:23-40`). The gate says "validate every non-mechanical plan." The `/ticket-loop` classifier
+@@ -590,16 +595,17 @@
+ Must return a valid seat position. If it fails, warn that state tracking will use status files
+ instead of the queue (degraded mode).
+ 
+-### 5. Skill availability
++### 5. Seat availability
+ 
+-Verify `/ticket-loop`, `/pr-review-lifecycle`, and `/phase-gate` are available. Check:
++The seats run `/ticket-loop`, `/pr-review-lifecycle` and `/phase-gate`, so the orchestrator does
++not need the skill files. Verify the seats exist. Do NOT call the `Skill` tool to test a skill.
++
+ ```bash
+-ls ~/.claude/skills/ticket-loop/SKILL.md 2>/dev/null && echo "ticket-loop: available"
+-ls ~/Documents/Develop/openrig/packages/daemon/assets/plugins/openrig-core/skills/pr-review-lifecycle/SKILL.md 2>/dev/null && echo "pr-review-lifecycle: available"
+-ls ~/.claude/skills/phase-gate/SKILL.md 2>/dev/null && echo "phase-gate: available"
++rig whoami --json | jq -r '.peers[].logicalId'
+ ```
+ 
+-All three must exist. If any is missing, stop.
++The implement seat, the review seat and (for non-AUTO tickets) the advisor seat must appear in the
++list. If one is missing, stop.
+ 
+ ### 6. Configuration file (auto-generate if missing)
+ 
+@@ -974,8 +980,8 @@
+ # Verify seat exists and is responsive
+ SEAT_STATUS=$(rig whoami --json 2>/dev/null | jq -r --arg s "${TOPOLOGY_IMPLEMENT_SEAT}" '.peers[] | select(.name == $s) | .status')
+ if [ -z "$SEAT_STATUS" ]; then
+-  echo "WARN: implement seat ${IMPLEMENT_SEAT} not found — falling back to inline dispatch"
+-  # Fall through to single-seat mode below
++  echo "BLOCKED: implement seat ${IMPLEMENT_SEAT} not found — do not run /ticket-loop inline"
++  # Transition to blocked (block_phase: implementing). Retry the dispatch after the seat returns.
+ fi
+ ```
+ 
+@@ -1053,14 +1059,12 @@
+ The orchestrator does not poll continuously. It waits for input (the result message) and runs
+ the lease check only at the heartbeat interval.
+ 
+-**Single-seat fallback (no topology configured):**
++**No implement seat (no topology configured, or the seat is missing):**
+ 
+-```
+-/ticket-loop ${TICKET_ID}
+-```
+-
+-Runs inline. The full output stays in the orchestrator's context. This works for single-ticket
+-runs but limits multi-ticket runs due to context pressure.
++Do NOT run `/ticket-loop` inline. An inline run loads the full skill body into the orchestrator and
++keeps it there through compaction. Transition to `blocked` with `block_phase: implementing`, report
++"implement seat unavailable" to the human, and retry the dispatch (re-check
++`rig whoami --json`) on the next wake.
+ 
+ **Processing the result (both modes):**
+ 
+@@ -1172,28 +1176,36 @@
+ HEAD_SHA=$(gh pr view ${PR_NUMBER} --repo ${GH_REPO} --json headRefOid --jq '.headRefOid')
+ ```
+ 
+-**Invoke `/phase-gate`:**
++**Dispatch the gate to the advisor seat (RIG-128).** The orchestrator does NOT call the `Skill`
++tool for `/phase-gate`. It sends the gate request to the advisor seat. The seat runs `/phase-gate`
++in its own context and reports a `GATE_RESULT`.
+ 
+-The orchestrator dispatches `/phase-gate` with the post-implement boundary. `/phase-gate` detects
+-the advisor seat via `rig whoami --json` and routes accordingly — the orchestrator does not need
+-to manage advisor seat dispatch directly.
++```bash
++ADVISOR_SEAT="${TOPOLOGY_ADVISOR_SEAT}@${RIG_NAME}"
+ 
++rig send ${ADVISOR_SEAT} "/phase-gate boundary=post-implement subject=${TICKET_ID} evidence=pr:${PR_NUMBER}@${HEAD_SHA} classification=${CLASSIFICATION} work_type=implementation caller=factory-loop@orch.lead
++
++Run the validator that /phase-gate selects for this classification. Do not merge or push.
++
++When complete, report back to the orchestrator with EXACTLY this format:
++rig send orch-lead@${RIG_NAME} \"GATE_RESULT: subject=${TICKET_ID} boundary=post-implement result=<PASS|FAIL|WARN> findings=<N> high=<N> blocking=<N> validator=<skill> qitem=<gate_qitem_id|null> note=<one-line>\"
++"
+ ```
+-/phase-gate boundary=post-implement subject=${TICKET_ID} evidence=pr:${PR_NUMBER}@${HEAD_SHA} classification=${CLASSIFICATION} work_type=implementation caller=factory-loop@orch.lead
+-```
+ 
+-**Seat dispatch:** When the orchestrator runs `/phase-gate` and `/phase-gate` detects the advisor
+-seat, it dispatches via `rig send` and waits for the `GATE_RESULT`. The orchestrator waits for
+-`/phase-gate` to return its assessment. If `/phase-gate` runs inline (no advisor seat or standalone
+-mode), the validation runs in the orchestrator's context.
++Park the queue item as in Step 2c (`PHASE=validate`), and unpark when `GATE_RESULT` arrives.
+ 
++**No advisor seat (not configured, or missing):** Do NOT run `/phase-gate` or a validator inline.
++Transition to `blocked` with `block_phase: validating`, report "advisor seat unavailable" to the
++human, and retry the dispatch on the next wake. The gate stays mandatory. An inline run would load
++the skill body into the orchestrator and would also remove the seat boundary.
++
+ **Wait-for-result procedure:** Same as Steps 2c and 2f — poll every 60s, run lease checks. If the
+-validation stalls (advisor seat goes idle), `/phase-gate` reports the failure and the orchestrator
+-transitions to `blocked` with `block_phase: validating`.
++advisor seat goes idle without reporting (`rig capture` shows an idle prompt), transition to
++`blocked` with `block_phase: validating`.
+ 
+ **Processing the gate result:**
+ 
+-Parse the `GATE_RESULT` from `/phase-gate`:
++Parse the `GATE_RESULT` message from the advisor seat:
+ 
+ | Gate result | Action |
+ |-------------|--------|
+@@ -1227,13 +1239,17 @@
+ `ADVISOR_RESULT` for non-AUTO tickets. If the advisor seat is unavailable, the orchestrator blocks
+ — it does not skip validation. This is a mandatory gate, not an optional check.
+ 
+-**Advisor routing is handled by `/phase-gate`.** The orchestrator does not manage advisor seat
+-dispatch directly. `/phase-gate` detects the advisor seat via `rig whoami --json` and routes to it
+-when available. When no advisor seat exists, `/phase-gate` runs the validator inline (Codex exec
+-or fresh subagent). The independence guarantee comes from the validator (cross-family Codex or
+-fresh agent), not the seat boundary. If `/phase-gate` cannot find any validator, it reports failure
+-and the orchestrator transitions to `blocked`.
++**Validator selection stays inside `/phase-gate`.** The orchestrator dispatches to the advisor
++seat and does not select a validator. The advisor seat runs `/phase-gate`, which picks the
++validator (cross-family Codex or structured debate) and produces the daemon queue evidence. If the
++seat cannot find any validator, it reports `result=FAIL` and the orchestrator transitions to
++`blocked`.
+ 
++**Enrichment (`/ticket-enrich`) follows the same rule.** The orchestrator never calls the `Skill`
++tool for `/ticket-enrich` or `/codex-second-opinion`. To enrich a ticket, send
++`/ticket-enrich ${TICKET_ID}` to the advisor seat with `rig send` and park (`PHASE=enrich`). The
++seat writes the `## Approach` section into the ticket and reports one line.
++
+ ---
+ 
+ ### 2f — Dispatch review (state: `reviewing`)
+@@ -1309,10 +1325,11 @@
+ crash. If the review seat goes idle without reporting, transition to `blocked` with
+ `block_phase: reviewing`.
+ 
+-**Single-seat fallback (no topology configured):**
++**No review seat (not configured, or missing):**
+ 
+-Invoke `/pr-review-lifecycle` inline starting from Step 2 (check review status) with the PR
+-number. The lifecycle skill's decision matrix determines next actions.
++Do NOT run `/pr-review-lifecycle` or `/code-review-dual` inline. Transition to `blocked` with
++`block_phase: reviewing`, report "review seat unavailable" to the human, and retry the dispatch on
++the next wake.
+ 
+ **Merge-stop contract (both modes):** When invoked from `/factory-loop`, the review evaluates
+ merge readiness (Steps 5a–5d) but **does not execute Step 5e** (the merge command). The review
+@@ -1321,8 +1338,7 @@
+ human approval (or after confirming the merge policy permits auto-merge for this ticket's
+ classification and advisor outcome).
+ 
+-In seat dispatch mode, the merge-stop instruction is embedded in the `rig send` prompt. In
+-single-seat mode, the orchestrator adds it to the skill invocation context.
++The merge-stop instruction is embedded in the `rig send` prompt to the review seat.
+ 
+ This is a composition boundary, not a logic override. The review still evaluates all five merge
+ conditions. The factory loop adds the sixth condition: recorded human approval (or policy-based
+@@ -1330,7 +1346,7 @@
+ 
+ ### 2f — Handle review result
+ 
+-Parse the `REVIEW_RESULT` message (seat mode) or the inline skill output (single-seat mode).
++Parse the `REVIEW_RESULT` message from the review seat.
+ 
+ | `outcome` field | State transition | Action |
+ |-----------------|-----------------|--------|
+@@ -1780,11 +1796,10 @@
+ **When:** `TICKET_LOOP_RESULT` arrives with `classification=ADJUDICATE_LIGHT` or
+ `classification=ADJUDICATE_HEAVY`. AUTO-classified tickets skip this gate.
+ 
+-**Enforcement:** The orchestrator invokes `/phase-gate boundary=post-implement` and waits for the
+-`GATE_RESULT`. `/phase-gate` detects the advisor seat via `rig whoami --json` and routes to it
+-when available — the orchestrator does not manage advisor dispatch directly. The orchestrator
+-MUST NOT dispatch to the review seat without a recorded `GATE_RESULT`. If `/phase-gate` cannot
+-find a validator (no advisor seat, no Codex, no fallback), the orchestrator blocks and reports.
++**Enforcement:** The orchestrator sends `/phase-gate boundary=post-implement` to the advisor seat
++with `rig send` and waits for the `GATE_RESULT`. The orchestrator does not call the `Skill` tool
++for it. The orchestrator MUST NOT dispatch to the review seat without a recorded `GATE_RESULT`. If
++the advisor seat is missing or no validator is available, the orchestrator blocks and reports.
+ 
+ **Why mandatory.** In human-out-of-the-loop autonomous operation, the implementation seat plans
+ and builds the first approach it finds. `/phase-gate` provides an independent second opinion via
+@@ -1955,9 +1970,9 @@
+     │   (includes /phase-gate pre-implement)   │                   │
+     │◀── TICKET_LOOP_RESULT ──│                │                   │
+     │                         │                │                   │
+-    │── /phase-gate post-implement ───────────▶│ (if advisor       │
+-    │   (detects advisor via rig whoami;        │  detected, routes │
+-    │    routes to advisor or runs inline)      │  here; produces   │
++    │── rig send /phase-gate post-implement ──▶│ (runs the gate in │
++    │   (blocks if no advisor seat)             │  its own context; │
++    │                                           │  produces         │
+     │◀── GATE_RESULT ─────────────────────────-│  gate:validation) │
+     │                         │                │                   │
+     │── rig send /code-review-dual ───────────────────────────────▶│
+@@ -1979,7 +1994,7 @@
+ GATE_RESULT: subject=<ID> boundary=post-implement result=<PASS|FAIL|WARN> findings=<N> high=<N> blocking=<N> validator=<skill> qitem=<gate_qitem_id|null> note=<one-line>
+ ```
+ 
+-`/phase-gate` handles validator selection, advisor seat routing, and daemon queue evidence
++The advisor seat runs `/phase-gate`, which handles validator selection and daemon queue evidence
+ production. The orchestrator receives the gate result and uses `result` to determine the
+ state transition (see Step 2e).
+ 
+@@ -2001,11 +2016,13 @@
+ SEAT_STATUS=$(rig whoami --json 2>/dev/null | jq -r --arg s "${SEAT_NAME}" '.peers[] | select(.name == $s) | .status')
+ ```
+ 
+-If the seat is unavailable, fall back to running in the current session (single-seat mode) and
+-log a warning.
++If the seat is unavailable, transition the ticket to `blocked` for the current phase, log a
++warning, and retry the dispatch on the next wake. Do NOT run the seat's skill in the current
++session: that loads the skill body into the orchestrator's context and keeps it there through
++compaction (RIG-128).
+ 
+-When no topology is configured, the factory loop runs everything in the current session. This
+-works for single-ticket runs but limits multi-ticket runs due to context pressure.
++When no topology is configured, the factory loop cannot dispatch. It stops with "no topology
++configured" and does not run any skill inline.
+ 
+ ### Merge policy
+ 
