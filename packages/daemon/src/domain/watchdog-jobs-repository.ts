@@ -41,13 +41,10 @@ export const PHASE_D_POLICIES = [
   // additionalPolicies like parked-owner-consumer.
   "delivery-deferral",
   "delivery-digest-flush",
-  // RIG-88 — recurring ticket-factory backlog poll. Injected via additionalPolicies; the
-  // policy only wakes the controller, which polls in a detached single-flight worker.
-  "ticket-factory-poll",
-  // RIG-118 — per-seat watch of one managed compaction attempt (marker_pending ->
-  // delivered -> acknowledged). Registered by the enforcer's onCompactSent; injected via
-  // additionalPolicies like parked-owner-consumer.
-  "compaction-lifecycle",
+  // Quiet hours: one release job per quiet window, posting what was held once quiet is off.
+  "quiet-release",
+  // A person's mode ends at its scheduled end: one job per application.
+  "mode-scheduled-end",
 ] as const;
 
 /** @deprecated since Phase D — use PHASE_D_POLICIES. */

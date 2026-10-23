@@ -148,7 +148,7 @@ export type RigEvent =
   // OPR.0.7.0.5 — in-place restart (same conversation, same pane). Started is persisted before any signal, so
   // a request that waited behind it, or a restart that never recorded a result, is refused rather than repeated.
   | { type: "seat.restart_in_place_started"; rigId: string; nodeId: string; logicalId: string; sessionName: string; pane: string; paneShape: "shell_backed" | "direct_native"; oldPid: number; oldStartedAt: string | null; codexHome: string; reason: string; operator: string | null }
-  | { type: "seat.restart_in_place_finished"; rigId: string; nodeId: string; logicalId: string; sessionName: string; outcome: "restarted_account_unverified" | "not_started" | "incomplete" | "native_unknown"; newPid: number | null; newStartedAt: string | null; codexHome: string; paneHeld: boolean; accountLinesAtRestart: Record<string, number> | null; finishedAt: string }
+  | { type: "seat.restart_in_place_finished"; rigId: string; nodeId: string; logicalId: string; sessionName: string; outcome: "restarted_account_unverified" | "not_started" | "incomplete" | "native_unknown"; newPid: number | null; newStartedAt: string | null; codexHome: string; paneHeld: boolean; accountLinesAtRestart?: Record<string, number> | null; accountTextAtRestart?: { anchor: string[]; counts: Record<string, number> } | null; finishedAt: string }
   | { type: "seat.fresh_launched"; rigId: string; nodeId: string; logicalId: string; sessionName: string; sessionId: string; supersededSessionIds: string[]; retiringGeneration: string | null; newGeneration: string; nativeSessionId: string | null; nativeSessionIdReason?: string; model: string | null; effort?: string | null; startupPolicyHash: string; reason: string; operator: string | null; status: "ready" | "attention_required" }
   | { type: "seat.fresh_launch_failed"; rigId: string; nodeId: string; logicalId: string; sessionName: string; sessionId: string; supersededSessionIds: string[]; retiringGeneration: string | null; newGeneration: string | null; model: string | null; effort?: string | null; startupPolicyHash: string; reason: string; operator: string | null; errors: string[] }
   | { type: "snapshot.created"; rigId: string; snapshotId: string; kind: string }
@@ -219,8 +219,6 @@ export type RigEvent =
         | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string } }
   // Bundle events (cross-rig)
   | { type: "bundle.created"; bundleName: string; bundleVersion: string; archiveHash: string }
-  // OPR.0.7.0.18 — a subscription move an agent made or attempted, as it reported it (fleet-wide, no rig).
-  | { type: "subscription.move_recorded"; move: import("./provider/subscription-moves.js").SubscriptionMoveEventPayload }
   // Teardown events
   | { type: "rig.stopped"; rigId: string }
   // OPR.0.3.3.19 - rig archive affordance (soft, reversible; NOT a delete)
@@ -549,6 +547,8 @@ export interface AgentActivity {
   sampledAt: string;
   evidence: string | null;
   eventAt?: string | null;
+  /** The emitter's own order for its posts (OpenRig's pi/omp runner), when it sent one. */
+  sourceSequence?: number | null;
   rawEvent?: string | null;
   rawSubtype?: string | null;
   runtime?: string | null;
@@ -613,7 +613,10 @@ export interface SeatIdentityVerdict {
     | null;
   evidence: {
     registeredPane: string | null;
+    /** PID of the matched process (a native child for wrapper launches). */
     observedPid: number | null;
+    /** Pane root observed in the same verdict; absent on legacy verdicts. */
+    observedPanePid?: number | null;
     observedCommand: string | null;
     matchedLayer: number | null;
   };
@@ -695,6 +698,11 @@ export interface NodeInventoryEntry {
   latestError: string | null;
   // Extended fields
   model: string | null;
+  /** The effort a managed launch sends: the seat's explicit choice, else the authored value.
+   *  null = no configured value (the runtime's own default). Never a guess at what the model ran. */
+  effort: string | null;
+  /** Where `effort` came from. `runtime_default` means no configured level is known. */
+  effortSource: "seat_choice" | "authored" | "runtime_default";
   agentRef: string | null;
   profile: string | null;
   codexConfigProfile?: string | null;

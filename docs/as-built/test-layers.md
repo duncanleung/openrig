@@ -71,8 +71,13 @@ are not yet runnable checks.
   database, workspace and topology roots, seat identity, bearer tokens), forces a fixture
   `OPENRIG_HOME` and fails if the home is not fixture-scoped. It also wraps `fetch`, so a real
   request to anything other than a loopback ephemeral-port fixture or a registered target fails.
-  Unless `OPENRIG_E2E_REAL_CODEX=1`, it points `HOME` and the XDG directories at a fixture user
-  home and clears `CODEX_HOME`; that opt-in keeps the real homes. A test can still set its own
+  It points `HOME` and the XDG directories at a fixture user home and clears `CODEX_HOME` and
+  `CLAUDE_CONFIG_DIR`. `OPENRIG_E2E_REAL_CODEX=1` keeps native homes and binaries only for
+  `seat-handover-model-fidelity-e2e.test.ts` and `seat-lifecycle-set-model-resume-e2e.test.ts`;
+  all other files remain isolated. The scenario scaffold always uses fixture homes and runtime stubs.
+  The two native files rely on Vitest's default per-file isolation; runs without it are unsupported.
+  Scenario scaffolds scrub inherited provider roots but preserve those passed in an explicit `baseEnv`.
+  A test can still set its own
   overrides after setup. The UI suite (jsdom) uses its own `packages/ui/test/setup.ts`.
 
 - **Stale vendored daemon.** `npm run build:package` leaves an assembled copy of the daemon at
@@ -264,8 +269,11 @@ The most useful next pieces of harness work, roughly in dependency order:
 2. A model-free test entry point shaped like a provider, that goes through the real native
    adapter and managed launch. Package tests such as `claude-interactive-launch.test.ts` and
    the `*-native.test.ts` files already drive the real adapters through tmux against an
-   offline recorder; they prove command resolution and arguments, not readiness, history or
-   answers.
+   offline recorder; they prove command resolution and arguments.
+   `claude-executable-foreground.test.ts` holds that recorder open in private Bash, zsh, dash and ksh panes
+   to check parent PID, process-group ownership, tmux's pane command and parent-shell
+   restoration for unmanaged fresh, fork and resume launches. These fixtures do not prove
+   native readiness, history or answers.
 3. Lifecycle and identity steps (tmux reset, archive/remove).
 4. Then pickup, wake and restore scenarios.
 

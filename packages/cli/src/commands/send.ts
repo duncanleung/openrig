@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { Command } from "commander";
 import { resolveEffectiveHost } from "../host-selection.js";
 import { DaemonClient, DaemonConnectionError, DaemonTimeoutError, terminalAuthHeaders } from "../client.js";
@@ -264,6 +263,15 @@ Targeting: a bare seat (single send), OR one of --to / --pod / --rig (fan-out).
 Fan-out reports per-recipient results + an "N/M delivered" summary; one recipient's
 guard refusal does NOT block the others. Each recipient gets its own From/To envelope.
 
+Sender: the From: line names the seat this shell belongs to; from anywhere else
+a message arrives from <unknown sender>. To say who it's from, send a queue item
+with a declared source (recorded as declared; a registered human in
+rig gateway human list gets a reply route):
+  rig queue create --source <you>@external --destination <seat> --summary "<one line>" --body-file <file>
+or join this shell to a seat so its sends carry the seat's name
+(rig attach --help covers adding the shell as a new member):
+  eval "$(rig attach --self --rig <rigId> --node <logicalId> --print-env)"
+
 The two-step send pattern (paste text, wait, submit Enter) is handled
 automatically. By default a send is REFUSED only on POSITIVE evidence the target
 is at an interactive prompt or permission block (so a message can never
@@ -496,7 +504,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       let res: { status: number; data: Record<string, unknown> };
       try {
         res = await client.post<Record<string, unknown>>("/api/transport/send", {
-          session, text: outboundText, deliveryId: randomUUID(), verify: opts.verify, force: opts.force, waitForIdleMs,
+          session, text: outboundText, verify: opts.verify, force: opts.force, waitForIdleMs,
           dangerouslyInteract: opts.dangerouslyInteract, reason: opts.reason, actorSession: senderSession ?? null,
         }, transportRequestOptions(waitForIdleMs));
       } catch (err) {
@@ -512,8 +520,12 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
         throw err;
       }
 
+      // Context beside the send's own result: the seat was in a managed compaction or restore when it ran.
+      const compactionNotice = (res.data["managedCompaction"] as { notice?: unknown } | undefined)?.notice;
+      const printCompactionNotice = (write: (line: string) => void) => { if (typeof compactionNotice === "string") write(`Notice: ${compactionNotice}`); };
       if (res.data["outcome"] === "retained") {
         console.log(opts.json ? JSON.stringify(res.data) : `Retained, not delivered to ${session}. ${String(res.data["warning"] ?? "")}`);
+        if (!opts.json) printCompactionNotice(console.log);
         return;
       }
 
@@ -543,6 +555,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       if (res.status >= 400) {
         const error = res.data["error"] as string | undefined;
         console.error(error ?? `Send failed (HTTP ${res.status})`);
+        printCompactionNotice(console.error);
         // MH-4 §4 loud-failure hint: the target was 3-part-shaped but its
         // suffix matched no registered host — name the near-miss.
         if (crossHostHint) console.error(`hint: ${crossHostHint}`);
@@ -551,6 +564,7 @@ agent@rig@host is sugar for --host when the suffix is a REGISTERED host id
       }
 
       console.log(`Sent to ${session}`);
+      printCompactionNotice(console.log);
       // OPR.0.4.3.28 correction — an `unknown`-telemetry send now PROCEEDS with a non-blocking
       // advisory (was a fail-closed refusal). Surface it on the human output, not only in --json.
       const advisory = res.data["warning"] as string | undefined;
@@ -915,7 +929,7 @@ async function runHttpHostSend(
   const outboundText = raw ? text : wrapSendBody(originSender, session, text, { stampISO: new Date().toISOString() });
 
   const result = await runRemoteHttpOp(host.id, "POST", "/api/transport/send", {
-    session, text: outboundText, deliveryId: randomUUID(), verify: opts.verify, force: opts.force, waitForIdleMs,
+    session, text: outboundText, verify: opts.verify, force: opts.force, waitForIdleMs,
     dangerouslyInteract: opts.dangerouslyInteract, reason: opts.reason, actorSession: senderSession ?? null,
   }, deps, { timeoutMs: (waitForIdleMs ?? 0) + CROSS_HOST_SEND_TIMEOUT_MS });
 
@@ -1096,14 +1110,19 @@ async function runFanOutSend(params: {
   }
 
   const data = res.data;
-  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; outcome?: string }>) ?? [];
+  const results = (data["results"] as Array<{ sessionName: string; ok: boolean; error?: string; outcome?: string; managedCompaction?: { notice?: unknown } }>) ?? [];
+  // Context beside a recipient's own result: it was in a managed compaction or restore when the send ran.
+  const printNotice = (r: (typeof results)[number]) => {
+    if (typeof r.managedCompaction?.notice === "string") console.log(`Notice: ${r.managedCompaction.notice}`);
+  };
   // Round-2 F1 (desk-binding): ONE verdict line per recipient. A
   // staged-unresolved recipient gets its staged verdict INSTEAD of "sent" —
   // the false delivery claim is suppressed entirely, not qualified.
   for (const r of results) {
-    if (r.outcome === "retained") { console.log(`${r.sessionName}: retained, not delivered; inspect with rig seat held-messages`); continue; }
+    if (r.outcome === "retained") { console.log(`${r.sessionName}: retained, not delivered; inspect with rig seat held-messages`); printNotice(r); continue; }
     if (!r.ok) {
       console.log(`${r.sessionName}: FAILED — ${r.error ?? "unknown error"}`);
+      printNotice(r);
       continue;
     }
     const ec = effectBySeat.get(r.sessionName);
@@ -1118,6 +1137,7 @@ async function runFanOutSend(params: {
     } else {
       console.log(`${r.sessionName}: sent`);
     }
+    printNotice(r);
   }
   // The delivered count never includes a staged-unresolved recipient.
   const deliveredCount = Math.max(0, ((data["sent"] as number) ?? 0) - unresolvedCount);

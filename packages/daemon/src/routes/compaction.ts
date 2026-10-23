@@ -1,3 +1,4 @@
+import { physicalSessionName } from "../domain/session-registry.js";
 import { Hono } from "hono";
 import { shellQuote } from "../adapters/shell-quote.js";
 import type Database from "better-sqlite3";
@@ -41,7 +42,7 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
       return c.json({ ok: false, error: "Missing required field: session" }, 400);
     }
     if (body.skipMap !== undefined && typeof body.skipMap !== "boolean") return c.json({ ok: false, error: "skipMap must be boolean" }, 400);
-    const sessionName = body.session;
+    const sessionName = physicalSessionName(db, body.session);
 
     // Ambiguity / existence check — mirror /send (409 ambiguous, 404 not found).
     const resolved = await transport.resolveSessions({ session: sessionName });
@@ -123,7 +124,11 @@ export function compactionRoutes(opts?: { bearerToken?: string | null }): Hono {
     if (!body.session) return c.json({ ok: false, error: "Missing required field: session" }, 400);
     const resolved = await transport.resolveSessions({ session: body.session });
     if (!resolved.ok) return c.json({ ok: false, error: resolved.error }, resolved.code === "ambiguous" ? 409 : 404);
-    return c.json({ ok: true, session: body.session, preparation: enforcer.cancelPreparation(body.session) });
+    const preparation = enforcer.cancelPreparation(body.session);
+    return c.json({ ok: true, session: body.session, preparation,
+      ...(preparation ? { compact: compactResultText(preparation.compact) } : {}),
+      guidance: "Managed preparation and pending restore/audit are disarmed. Cancellation sent no input. It cannot undo a submitted /compact or confirm whether it ran. No restore request follows cancellation: check the pane before retrying. If it compacted or you cannot tell, send a normal restore request naming preparation.mapPath from --state, asking it to skip reading if it did not compact; a retry would compact it again. An explicit retry still requires the live pane to be idle.",
+    });
   });
 
   router.get("/state", (c) => {

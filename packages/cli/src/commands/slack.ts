@@ -204,7 +204,8 @@ export function slackCommand(deps: SlackDeps = {}): Command {
         log(`slack-connector configuration checks (config: ${cfg.enabled ? "enabled" : "disabled"}; delivery runs IN-DAEMON — S10 subsystem)`);
         for (const r of readiness) log(`  ${r.ok ? "✓" : "✗"} ${r.label}: ${r.detail}`);
         log(`Daemon: ${observation.state}${observation.reason ? ` (${observation.reason})` : ""}`);
-        const connector = observation.connector as { configurationDigest?: string;
+        const connector = observation.connector as { configurationDigest?: string; inboundReady?: boolean; outboundReady?: boolean;
+          inboundRouting?: { fallback: string; destination: string };
           deadLetterBacklog?: number | null; deadLetterBacklogState?: string; deadLetterBacklogReason?: string;
           inbound?: InboundDeliveryStatus & { state?: string; generation?: number; lastEventAt?: string };
           recovery?: { state?: string; reason?: string; lastScanAt?: string; acceptedThisProcess?: number; deadLetteredThisProcess?: number;
@@ -215,6 +216,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
               backoff?: Record<string, number>; incomplete?: Record<string, number> };
             limits?: string[] } } | undefined;
         if (connector) {
+          if (connector.inboundRouting?.fallback === "local") log(`  Configured routing fallback: local to ${connector.inboundRouting.destination} (after forwarding, thread and channel routes)`);
           log(`  Socket: ${connector.inbound?.state ?? "unknown"}; generation ${connector.inbound?.generation ?? "unknown"}; last event ${connector.inbound?.lastEventAt ?? "unknown"}`);
           for (const line of socketDeliveryLines(connector.inbound)) log(`  ${line}`);
           const recovery = connector.recovery;
@@ -246,7 +248,7 @@ export function slackCommand(deps: SlackDeps = {}): Command {
               // not be read, so the line must not read as an empty backlog.
               log(`  Inbound dead-letter backlog: unknown (could not read the ${scope} dead-letter records: ${connector.deadLetterBacklogReason ?? "unreadable"})`);
             } else {
-              log(`  Inbound dead-letter backlog: ${connector.deadLetterBacklog ?? 0} retained record(s) awaiting retry (${scope}; durable, kept across restarts)`);
+              log(`  Inbound dead-letter backlog: ${connector.deadLetterBacklog ?? 0} retained record(s)${connector.inboundReady === false && connector.outboundReady === false ? "; retry paused" : " awaiting retry"} (${scope}; durable, kept across restarts)`);
             }
           }
           if (connector.configurationDigest) log(`  Observed configuration digest: ${connector.configurationDigest} (local configuration above)`);
@@ -296,44 +298,29 @@ export function slackCommand(deps: SlackDeps = {}): Command {
     .command("verify")
     .description("Live-verify GRANTED Slack scopes (from response headers) + channel membership")
     .option("--json", "JSON output")
-    .option("--reason <reason>", "Reason recorded with the verification", "verify human delivery")
-    .option("--actor <actor>", "Named operator when outside a managed seat")
     .action(async (opts) => {
       const surface = await loadSurface();
       const cfg = surface.loadConfig(deps.home);
       const s = resolveSecrets(surface, cfg);
-      const { runChannelOperation, channelStateDigest } = await import("@openrig/daemon/gateway-slack");
-      const verification = await runChannelOperation({
-        actor: resolveSenderSession() ?? opts.actor ?? SENDER_FALLBACK, provenance: "claimed:v1",
-        reason: opts.reason, action: "verify", subject: "slack", before: { digest: channelStateDigest(cfg) },
-        run: async () => {
-          const scope = s.bot ? await surface.verifyScopes(s.bot, cfg.requiredScopes, deps.fetchImpl) : null;
-          // #192: membership in every channel the connector uses — the default and each mapped one.
-          const channels = [];
-          for (const c of s.bot ? surface.mappedChannels(cfg) : []) {
-            channels.push({ ...c, member: await surface.verifyChannelMembership(s.bot!, c.channel, deps.fetchImpl) });
-          }
-          const member = channels.find((c) => c.isDefault)?.member ?? null;
-          const ready = scope === null || scope.error || channels.some((c) => c.member.error) ? null
-            : scope.ok && member !== null && channels.every((c) => c.member.isMember);
-          return { value: { scope, member, channels }, after: { ready }, effect: "observed" };
-        },
-      }, deps.home);
       if (!s.bot) {
         log("✗ bot token unresolved — set SLACK_BOT_TOKEN (env or secrets env file). Cannot verify.");
         process.exitCode = 1;
         return;
       }
-      const scope = verification.value.scope!;
-      const member = verification.value.member;
-      const channels = verification.value.channels;
+      const scope = await surface.verifyScopes(s.bot, cfg.requiredScopes, deps.fetchImpl);
+      // #192: membership in every channel the connector uses — the default and each mapped one.
+      const channels = [];
+      for (const c of surface.mappedChannels(cfg)) {
+        channels.push({ ...c, member: await surface.verifyChannelMembership(s.bot, c.channel, deps.fetchImpl) });
+      }
+      const member = channels.find((c) => c.isDefault)?.member ?? null;
       const ready = scope.ok && member !== null && channels.every((c) => c.member.isMember);
       // Failed scope requests or an absent/empty grant header cannot prove
       // which optional features are available. Baseline readiness is unchanged.
       const missingFeatures = scope.error || scope.granted.length === 0 ? null
         : surface.FEATURE_SCOPES.filter((feature) => !scope.granted.includes(feature.scope));
       if (opts.json) {
-        log(JSON.stringify({ scope, member, ...(cfg.channelMap?.length ? { channels } : {}), ready, missingFeatures, receipt: verification.receipt }));
+        log(JSON.stringify({ scope, member, ...(cfg.channelMap?.length ? { channels } : {}), ready, missingFeatures }));
       } else {
         log(`granted scopes: ${scope.granted.join(", ") || "(none)"}`);
         if (!scope.ok) log(`✗ MISSING scopes (configured != granted — reinstall the app): ${scope.missing.join(", ")}${scope.error ? ` [${scope.error}]` : ""}`);

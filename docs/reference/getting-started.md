@@ -72,12 +72,16 @@ you aren't an administrator, or where Homebrew belongs to another account (its
 `brew install` is refused), install Node.js in your own home folder with
 [nvm](https://github.com/nvm-sh/nvm): run `touch ~/.zshrc` (a new Mac account
 has none, and nvm's installer only adds itself to a profile file that already
-exists), then the install command on nvm's page, open a new terminal, and run
-`nvm install 22`. That needs no administrator password, and `npm install -g`
-then installs into your nvm folder. Native
-Windows isn't supported. On Windows, use WSL2: it's the Windows route OpenRig
-supports, though OpenRig's automated tests don't run on it yet. One user's
-[working setup](#wsl2-a-reported-working-setup) is below. Node 20 and
+exists), then nvm's install command, for nvm v0.40.8
+`curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash`
+([nvm's page](https://github.com/nvm-sh/nvm#install--update-script) has the
+newest), open a new terminal, and run `nvm install 22`. nvm itself needs no
+administrator password, and `npm install -g` then installs into your nvm folder.
+If nvm's installer says you need Apple's command line tools, run
+`xcode-select --install`, then its install command again. Native Windows isn't
+supported. On Windows, use WSL2: it's the Windows route
+OpenRig supports, though OpenRig's automated tests don't run on it yet. One
+user's [working setup](#wsl2-a-reported-working-setup) is below. Node 20 and
 odd-numbered releases (23, 25 and so on) are not supported; Node 26 and later
 even-numbered releases are untested.
 
@@ -177,20 +181,19 @@ You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
 script will do and changes nothing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.14/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.0/scripts/install.sh | sh -s -- --dry-run
 ```
 
 The same command without `--dry-run`,
-`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.14/scripts/install.sh | sh`, installs the
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.0/scripts/install.sh | sh`, installs the
 latest published `@openrig/cli` with `npm install -g`,
 runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
-Codex and may install a missing one, as described below. A failed step among the first three prints
-`FAILED [n/4] <command or check> (exit <code>)`. When `rig setup` (step 4) doesn't finish ready, for example because a
-provider isn't signed in yet, the script ends with `INSTALLED, SETUP NOT COMPLETE (exit <code>)`: the CLI is
-installed, and `rig setup` lists what's left under "Some steps need attention". If the only items left are provider
-sign-ins, sign in to each selected provider as below, then continue at
-[Start the kernel](#start-the-kernel-and-check-its-state); run `rig setup` again rather than reinstalling the CLI. To
-install only what the selected providers need, go step by step instead:
+Codex and may install a missing one, as described below. A failed step prints
+`FAILED [n/4] <command or check> (exit <code>)`. Where a provider isn't signed in yet, step 4 ends that way and
+`rig setup` lists each sign-in under "Some steps need attention". If the only remaining failures are provider
+sign-ins, the install steps finished: sign in to each selected provider as below, then continue at
+[Start the kernel](#start-the-kernel-and-check-its-state). To install only what the selected providers need, go step
+by step instead:
 
 ### Choose your providers
 
@@ -219,6 +222,26 @@ macOS and Linux; pass `--no-herdr` to decline it. Setup also
 writes an OpenRig-managed block (mouse on, a longer history) into `~/.tmux.conf`.
 It is optional for this selected-provider path, not a requirement to fix an unused
 provider.
+
+The block keeps `terminal.history_limit` rows of scrollback per pane (default
+10000). To keep more, run `rig config set terminal.history_limit 50000`, then
+`rig setup` again. A running tmux server keeps its old limit until it restarts
+or you run `tmux source-file ~/.tmux.conf`; before tmux 3.7 that changes new
+panes only.
+
+New managed agents and handover successors on macOS/Linux start from the daemon's
+selected launch environment and declared seat values, rather than stored tmux globals.
+Values named by tmux's `update-environment` option, including its default SSH-agent
+and display variables, come from the daemon's environment.
+Normal shell startup and configured tmux shell commands still run. If your custom setup
+intentionally supplies values through tmux's global environment, opt in with
+`rig config set terminal.inherit_tmux_environment true`. Setup points out this option
+when it detects custom tmux configuration; it never enables it automatically. The setting
+applies to future launches and successors, not running agents or your personal tmux server.
+If the scoped environment cannot be prepared, launch keeps its previous environment and
+reports a warning in fresh launch results and the daemon log. For handovers, check
+that log for this warning. This is not a promise that shell startup cannot add or override values.
+
 
 ## Start the kernel and check its state
 
@@ -251,9 +274,51 @@ A missing or unknown readiness signal is not proof of readiness. Follow
 startup or missing-seat problems.
 
 `rig setup` itself does not start the daemon. Preserve a daemon and kernel that
-already exist: ordinary daemon startup skips a managed kernel, and
-`OPENRIG_NO_KERNEL=1` skips automatic kernel startup. If neither runtime is
-authenticated, kernel boot reports `auth_blocked`. Do not restart or recreate an
+already exist: daemon startup does not boot a second kernel when one is managed,
+and `OPENRIG_NO_KERNEL=1` (`--no-kernel`) skips automatic kernel startup,
+including the restore below. If neither runtime is authenticated, kernel boot
+reports `auth_blocked`.
+
+Daemon startup restores one existing kernel by itself: a managed kernel whose
+seats are all `detached` and still bound to their newest session, which is what
+startup reconcile leaves when every kernel terminal is gone, for example after a
+reboot. It does not detect a reboot as such. It uses the same restore as
+`rig up kernel --existing`, and `rig status` reports it as `Kernel: booting`
+until the seats are ready. A kernel stopped with `rig down kernel`, including
+one whose seats were already detached, stays down on later starts. So do a kernel
+with only some seats stopped and seats you unclaimed. Start one again with
+`rig up kernel --existing`.
+When the tmux server is gone, an explicit `rig down` of any rig can start an
+empty server and probe again. It records the stop and clears eligible bindings
+only after confirming the sessions are absent. This can leave an empty tmux
+server running; it never launches an agent or provider session. Unreadable or
+permission results and changed occupants leave the stop bookkeeping unchanged.
+
+While that automatic restore runs, `rig start` continues to your other rigs and
+says the kernel is still restoring (`kernelRestore.state: "restoring"` with
+`--json`). Its exit status 0 then does not mean the kernel is ready; check
+`rig status`. When the restore has returned without a ready kernel, `rig start`
+still goes on to your other rigs but exits 1 (`kernelRestore.state: "failed"`),
+so `rig start && next` does not run `next`. A `rig down kernel` made during the
+restore waits for it to return and then stops the kernel, which stays down on
+later starts. A `rig up kernel --existing` with no fresh seats and no change to
+the saved non-interruptive choice, made during the restore, or after it restored
+every seat while those seats still run the sessions it started, reports that
+restore's outcome instead of starting another. Explicitly repeating the saved
+`--non-interruptive` or `--no-non-interruptive` choice also joins that restore.
+
+An explicit `rig up kernel --existing --fresh <seat...>` waits for startup's
+restore to finish, then replaces only the named seats that still hold the exact
+sessions startup launched. Other seats keep running. An operator's conversation
+correction also takes effect for that seat on the next explicit `up` or
+`restore`, using the corrected target; editing the token alone restarts nothing.
+Each replacement takes new seat leases, rechecks the managed occupant and terminal,
+and reports its own per-seat outcome. If the occupant changed, it is left alone.
+A different `--non-interruptive` or `--no-non-interruptive` choice after startup
+launched the seats is refused: the running launch choice stays unchanged. Stop
+the rig, then rerun with the desired choice.
+
+Do not restart or recreate an
 existing kernel merely to open its view. The startup TUI (`rig`) offers its own
 kernel setup and individual-seat recovery; it does not automatically boot agents
 when it starts the daemon.
@@ -690,7 +755,7 @@ the lifecycle API without booting a new kernel, then stop the remaining rigs.
 | Shared terminal is absent | Inspect the existing kernel binding and recovery state; use standalone `rig tui` while resolving it. |
 | Viewing terminal was closed | Open the conversations again with `rig terminal open saved:kernel --window`; `rig tui --shared` is only the dashboard fallback if that window cannot open. Do not relaunch the team. |
 | Daemon restarted but tmux survived | Re-read `rig status` and the existing queue; a daemon restart is not a fresh project. |
-| Host reboot lost tmux sessions | Open `rig`, start the daemon if needed (press **S** if it opens on the work views), and select the existing rig and seats. Resume is the default; a fresh conversation needs a separate decision. |
+| Host reboot lost tmux sessions | Starting the daemon restores the kernel by itself when all of its seats were lost; check `rig status`, and if it reports the restore failed, run `rig up kernel --existing`. For other rigs, open `rig`, start the daemon if needed (press **S** if it opens on the work views), and select the existing rig and seats. Resume is the default; a fresh conversation needs a separate decision. |
 | Launch reports no usable snapshot | Inspect the existing rig and retained project files, then follow the same-seat recovery below. |
 | Work is waiting on a prompt or decision | Read the row, transition and named prompt; preserve the obligation until the missing decision arrives. |
 
@@ -721,8 +786,9 @@ This recovery is for the case the reporter hit: the kernel's seats failed and no
 IDs, for example `advisor.lead operator.agent operator.human queue.worker` when all four failed. `--fresh` starts a
 new conversation for each seat you name. Seats you don't name follow their normal recovery policy and may remain
 awaiting a decision if their old conversation can't be resumed. A later `rig daemon start` doesn't retry the failed
-seats by itself: once a kernel exists, startup skips the built-in kernel boot, and `rig status` then reads
-`Kernel: skipped` whatever its seats' state, so check `rig ps --nodes --rig kernel --full`.
+seats by itself: once a kernel exists, startup skips the built-in kernel boot and restores only a kernel whose seats
+were all lost, not seats that failed. `rig status` then reads `Kernel: skipped` unless some of its seats are running
+and ready, so check `rig ps --nodes --rig kernel --full`.
 
 If a snapshot is unavailable, the startup view checks the selected seat's
 retained startup source and authoritative occupant relation. It reports a

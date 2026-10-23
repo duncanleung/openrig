@@ -464,9 +464,9 @@ not have to tear one down to change it, and you rarely have to start from nothin
   the system see the live process **without launching anything**. A running seat that refuses every
   send because its tmux pane was never recorded (one launched by an older OpenRig) takes
   `rig reconcile-session <seat> --repair-missing-pane --no-launch`: it fills only the missing pane,
-  keeps the session and resume token, never adopts, and refuses while typing protection is on.
-  Plain reconcile adopts the seat into a new session without its resume token; use the repair even
-  where a protected seat's compaction refusal still suggests plain reconcile.
+  keeps the session and resume token, and never adopts. Plain reconcile adopts: a new session row
+  (any running row for the seat is superseded); it re-captures the resume token if it can, and
+  conversation continuity stays unverified. Both refuse while typing protection is on.
 - **`rig unclaim` / `rig release`** — stop managing one adopted session, or all of them,
   **without killing the process or the agent inside it**. Handing something back to its human is a
   first-class move, not an abandonment.
@@ -926,9 +926,7 @@ your circumstances is configuration, and the ones that are not, another agent ca
   better than `unknown`. A Codex account's last reading, its reset and its last observed exhaustion
   survive a daemon restart as history (`retained: "before_restart"`), never a current reading; a
   window whose reset has passed shows an `expectation`, which is planning, not a reading. Run `rig provider status --refresh`
-  before telling anyone an account has room. With `provider.subscription_moves`
-  on (off by default), `rig provider moves` records and lists moves of a Codex home's seats between
-  subscriptions.
+  before telling anyone an account has room.
 - **Codex configuration fragments** — a `codex_config_fragment` must open with a table header and
   never overrides a user-declared table; see `docs/reference/agent-spec.md`.
 - **`rig env`** — the real services behind a rig: are they up, what are they saying, how do you

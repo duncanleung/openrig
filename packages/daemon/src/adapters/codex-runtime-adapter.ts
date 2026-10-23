@@ -2,6 +2,8 @@ import { operationalLaunchArg } from "./kernel-authority.js";
 import nodePath from "node:path";
 import fs from "node:fs";
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
+import { createRequire } from "node:module";
 import os from "node:os";
 import Database from "better-sqlite3";
 import { parse as parseToml } from "smol-toml";
@@ -34,9 +36,32 @@ import { mergeManagedBlock } from "../domain/managed-blocks.js";
 import { excludeNewGeneratedFiles } from "../domain/generated-file-hygiene.js";
 import { codexQueueStateRoot, codexTeamWorkspaceArg, type PrepareCodexTeamWorkspace } from "../domain/codex-team-workspace.js";
 import { shellQuote } from "./shell-quote.js";
-import { runSyncSite } from "../domain/sync-site-wrap.js";
+import { execRuntimeProbe } from "./runtime-probe-exec.js";
 import { resolveReadinessTimeoutMs } from "../domain/readiness-timeout.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
+import {
+  CODEX_CORE_MARKETPLACE, CODEX_CORE_PLUGIN, CODEX_CORE_PLUGIN_KEY, CODEX_MARKETPLACE_MANIFEST_PATH,
+  codexCoreMarketplaceManifest, codexCorePluginEnablement, codexReadableConfigLayers, recordedMarketplaceSource, userLayerEnablesCorePlugin,
+  type CodexConfigLayerRead,
+} from "../domain/codex-core-plugin-install.js";
+
+/** Runs Codex's own CLI with the daemon's CODEX_HOME; tests inject a recorder. */
+export type CodexCliRunner = (args: string[], env: NodeJS.ProcessEnv) => Promise<{ status: number | null; stdout: string; stderr: string }>;
+
+const defaultCodexCli: CodexCliRunner = (args, env) => new Promise((resolve) => {
+  execFile("codex", args, { env, timeout: 120_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
+    const status = error ? (typeof (error as { code?: unknown }).code === "number" ? (error as { code: number }).code : null) : 0;
+    // A spawn failure (ENOENT, EACCES) has no exit code and empty output: keep its message as the reason.
+    const err = String(stderr ?? "");
+    resolve({ status, stdout: String(stdout ?? ""), stderr: err.trim() || !error ? err : error.message });
+  });
+});
+
+// Codex's hook trust recipe (the key and hash Codex records for a trusted hook), kept in one script.
+const codexHookTrust = createRequire(import.meta.url)("../../assets/plugins/openrig-core/hooks/scripts/codex-hook-trust.cjs") as {
+  computeCodexHookTrust(event: string, input: CodexHookTrustInput): { key: string; hash: string };
+  codexHookHash(eventLabel: string, handler: { command: string; timeoutSec: number; matcher?: string | null; statusMessage?: string | null }): string;
+};
 
 import { listNativeProcesses, observeCodexPaneProcess, observeCodexForkProcess, verifyPaneIdleShell, type NativeProcessRow } from "../domain/native-process-lineage.js";
 
@@ -92,6 +117,16 @@ export interface CodexAdapterFsOps {
   homedir?: string;
 }
 
+/** #1524 (b): what Codex's own records say about one process's conversation: its thread id, or why none was read
+ *  (a capture diagnostic such as `no_log_row`, `no_cli_thread`, `ambiguous_threads` or `sqlite_unreadable`). */
+export type CodexResumeEvidence = { threadId: string; reason?: undefined } | { threadId?: undefined; reason: string };
+
+// The managed resume check's poll window: a quick phase, then an extended one for a slow boot.
+const RESUME_QUICK_ATTEMPTS = 6;
+const RESUME_EXTENDED_ATTEMPTS = 24;
+const RESUME_QUICK_SLEEP_MS = 200;
+const RESUME_EXTENDED_SLEEP_MS = 500;
+
 /**
  * Codex runtime adapter. Projects resources to .agents/ targets (preserving
  * existing Codex filesystem contract) and delivers startup files.
@@ -103,6 +138,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   private fs: CodexAdapterFsOps;
   private listProcesses: () => CodexProcess[] | Promise<CodexProcess[]>;
   private readThreadIdByPid: (pid: number, identity?: string) => Promise<string | undefined> | string | undefined;
+  private readResumeEvidence: (pid: number, identity: string) => Promise<CodexResumeEvidence> | CodexResumeEvidence;
+  private resumeProofWindowMs: number;
   private readinessSettings?: Pick<SettingsStore, "resolveOne">;
   private sleep: (ms: number) => Promise<void>;
   private resolveHomeDirByPid: ResolveHomeDirByPid;
@@ -132,6 +169,15 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
   // (FR-A) to write config-layer [hooks] command entries that are cwd-independent and
   // version-matched to the running daemon (NOT ${PLUGIN_ROOT}, NOT a per-cwd copy).
   private activityRelayPath?: string;
+  // The vendored openrig-core plugin directory, resolved when the install step runs (vendoring happens at startup).
+  private resolveCorePluginDir?: () => string | undefined;
+  // Whether a node's resolved plugin selection includes openrig-core (the test that also gives it OPENRIG_SEAT_PROJECT_DIR).
+  private resolveCorePluginSelected?: (nodeId: string) => boolean;
+  private runCodexCli: CodexCliRunner;
+  // One Codex config.toml per adapter: launches, the boot step and resume all write it (and Codex's install writes it too),
+  // so each of those runs its whole setup under this one lock, one after another.
+  private configLock: Promise<unknown> = Promise.resolve();
+  private codexSystemConfigDir: string;
 
   constructor(deps: {
     tmux: TmuxAdapter;
@@ -139,6 +185,11 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     fsOps: CodexAdapterFsOps;
     listProcesses?: () => CodexProcess[] | Promise<CodexProcess[]>;
     readThreadIdByPid?: (pid: number, identity?: string) => Promise<string | undefined> | string | undefined;
+    /** #1524 (b): the conversation Codex's own records name for one process (pid and start time), or why none
+     *  could be read. Default: the identity-gated thread reader for the launched process. */
+    readResumeEvidence?: (pid: number, identity: string) => Promise<CodexResumeEvidence> | CodexResumeEvidence;
+    /** The managed resume check's whole window in ms. Default: the existing poll window (tests shorten it). */
+    resumeProofWindowMs?: number;
     readinessSettings?: Pick<SettingsStore, "resolveOne">;
     resolveHomeDirByPid?: ResolveHomeDirByPid;
     sleep?: (ms: number) => Promise<void>;
@@ -156,7 +207,18 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     resolveManagedConfigSettings?: () => Promise<{ enabled: boolean; codexVersion?: string }>;
     /** Whether runtime.codex.hooks_enabled is on, without resolving the Codex version. Absent: nothing is stripped. */
     resolveHooksEnabled?: () => Promise<boolean>;
+    /** The vendored openrig-core directory. Absent: the plugin is never installed into Codex. */
+    resolveCorePluginDir?: () => string | undefined;
+    /** Whether the node's resolved plugin selection includes openrig-core. Absent: no launch ever installs it. */
+    resolveCorePluginSelected?: (nodeId: string) => boolean;
+    runCodexCli?: CodexCliRunner;
+    /** Where Codex's system and legacy managed config files live (default /etc/codex). */
+    codexSystemConfigDir?: string;
   }) {
+    this.resolveCorePluginDir = deps.resolveCorePluginDir;
+    this.resolveCorePluginSelected = deps.resolveCorePluginSelected;
+    this.runCodexCli = deps.runCodexCli ?? defaultCodexCli;
+    this.codexSystemConfigDir = deps.codexSystemConfigDir ?? "/etc/codex";
     this.tmux = deps.tmux;
     this.resolveManagedConfigSettings = deps.resolveManagedConfigSettings;
     this.resolveHooksEnabled = deps.resolveHooksEnabled;
@@ -177,6 +239,18 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     });
     this.readThreadIdByPid = deps.readThreadIdByPid ?? ((pid, identity) => identity === undefined
       ? this.readThreadIdFromLogs(pid) : threadIdResolver.resolveForkChild(pid, identity));
+    // A just-launched resume may log only inside its start second, so this reads like a fork child's ("by-process").
+    this.readResumeEvidence = deps.readResumeEvidence ?? (deps.readThreadIdByPid
+      ? async (pid, identity) => {
+        const threadId = (await deps.readThreadIdByPid!(pid, identity))?.trim();
+        return threadId ? { threadId } : { reason: "no_log_row" };
+      }
+      : async (pid, identity) => {
+        let reason: string | undefined;
+        const threadId = (await threadIdResolver.resolveForkChild(pid, identity, (d) => { reason = d.reason; }))?.trim();
+        return threadId ? { threadId } : { reason: reason ?? "no_log_row" };
+      });
+    this.resumeProofWindowMs = deps.resumeProofWindowMs ?? RESUME_QUICK_ATTEMPTS * RESUME_QUICK_SLEEP_MS + RESUME_EXTENDED_ATTEMPTS * RESUME_EXTENDED_SLEEP_MS;
     this.readinessSettings = deps.readinessSettings;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.verifyProfilePreflight = deps.verifyProfilePreflight
@@ -190,16 +264,153 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
    * them: a rig with no Codex seat leaves the user's config alone. A failure warns and does
    * not block the launch.
    */
-  async ensureManagedConfig(): Promise<void> {
-    if (!this.resolveManagedConfigSettings) return;
+  async ensureManagedConfig(): Promise<{ hooksEnabled: boolean } | undefined> {
+    return this.withConfigLock(() => this.applyManagedConfig());
+  }
+
+  /** Run `task` after every earlier config setup on this adapter has finished, whatever its outcome. */
+  private withConfigLock<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.configLock.then(task, task);
+    this.configLock = run.catch(() => undefined);
+    return run;
+  }
+
+  private async applyManagedConfig(): Promise<{ hooksEnabled: boolean } | undefined> {
+    if (!this.resolveManagedConfigSettings) return undefined;
     try {
       const { enabled, codexVersion } = await this.resolveManagedConfigSettings();
       this.ensureCodexFeatureFlag(enabled, { codexVersion });
       if (enabled) this.ensureCodexActivityHooks();
       else this.removeCodexActivityHooks();
+      return { hooksEnabled: enabled };
     } catch (err) {
       console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
+      return undefined;
     }
+  }
+
+  /**
+   * Boot step, run after the plugin is vendored: install openrig-core into Codex only when hooks are enabled and some
+   * Codex seat's resolved selection includes it. A daemon whose Codex seats didn't select it never installs it.
+   */
+  async ensureCodexCorePluginAtBoot(anySeatSelected: boolean): Promise<void> {
+    if (!anySeatSelected || !this.resolveHooksEnabled) return;
+    const resolveHooksEnabled = this.resolveHooksEnabled;
+    await this.withConfigLock(async () => {
+      try {
+        if (await resolveHooksEnabled()) await this.ensureCodexCorePlugin();
+      } catch (err) {
+        console.error(`[openrig] runtime setup warning: ${(err as Error).message}`);
+      }
+    });
+  }
+
+  /**
+   * Install the vendored openrig-core plugin into Codex through Codex's own commands, so a seat that selected it gets its
+   * refocus and skills, trusting only exact shipped hooks on its first install. It runs only when the person's config
+   * doesn't disable the plugin (codexCorePluginEnablement), and only when the installed version differs from the vendored
+   * one. Codex owns its plugin cache; OpenRig writes the marketplace manifest and first-install exact-hook trust.
+   */
+  async ensureCodexCorePlugin(): Promise<{ outcome: "installed" | "current" | "skipped"; reason: string }> {
+    const report = (outcome: "installed" | "current" | "skipped", reason: string) => {
+      if (outcome !== "current") console.error(`[openrig] codex core plugin ${outcome}: ${reason}`);
+      return { outcome, reason };
+    };
+    const pluginDir = this.resolveCorePluginDir?.();
+    if (!pluginDir) return { outcome: "skipped", reason: "the openrig-core plugin isn't vendored" };
+    let version: unknown;
+    try { version = (JSON.parse(this.fs.readFile(nodePath.join(pluginDir, ".codex-plugin", "plugin.json"))) as { version?: unknown }).version; }
+    catch { return report("skipped", "the vendored plugin has no readable Codex manifest"); }
+    if (typeof version !== "string" || !/^[0-9A-Za-z._-]+$/.test(version)) return report("skipped", "the vendored plugin's Codex manifest has no usable version");
+
+    const shipped = nodePath.resolve(import.meta.dirname, "../../assets/plugins/openrig-core");
+    const ownFiles: string[] = [];
+    const collect = (dir: string, relative = "hooks") => {
+      for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+        const child = nodePath.join(relative, entry.name);
+        if (entry.isDirectory()) collect(nodePath.join(dir, entry.name), child);
+        else ownFiles.push(child);
+      }
+    };
+    collect(nodePath.join(shipped, "hooks"));
+    ownFiles.push(".codex-plugin/plugin.json");
+    const matchesShipped = (dir: string) => ownFiles.every(relative => {
+      try { return fs.readFileSync(nodePath.join(dir, relative)).equals(fs.readFileSync(nodePath.join(shipped, relative))); }
+      catch { return false; }
+    });
+    if (!matchesShipped(pluginDir)) return report("skipped", "vendored hook files differ from this daemon's shipped plugin; existing choices are left alone");
+
+    const codexHome = nodePath.dirname(this.resolveCodexConfigPath());
+    const layers: CodexConfigLayerRead[] = codexReadableConfigLayers(codexHome, this.codexSystemConfigDir).map((layer) => {
+      if (!this.fs.exists(layer.path)) return { ...layer, state: "absent" as const };
+      try { return { ...layer, state: "read" as const, content: this.fs.readFile(layer.path) }; }
+      catch (error) { return { ...layer, state: "unreadable" as const, reason: (error as Error).message }; }
+    });
+    const enablement = codexCorePluginEnablement(layers);
+    if (enablement.decision !== "allow") return report("skipped", enablement.reason);
+
+    const pluginsDir = nodePath.dirname(pluginDir);
+    const userLayer = layers.find((layer) => layer.name === "user config");
+    const userConfig = userLayer?.state === "read" ? userLayer.content : null;
+    const recorded = recordedMarketplaceSource(userConfig);
+    // Compared as real paths, so a marketplace recorded through a symlink to the plugins folder is the same source.
+    const canonical = (p: string) => { try { return fs.realpathSync.native(nodePath.resolve(p)); } catch { return nodePath.resolve(p); } };
+    if (recorded !== undefined && (recorded === null || canonical(recorded) !== canonical(pluginsDir))) {
+      return report("skipped", `a marketplace named ${CODEX_CORE_MARKETPLACE} is already configured with another source; it's left alone`);
+    }
+
+    // Current only when Codex would load it: the vendored version is in its store AND the user config still registers it
+    // (our marketplace, and an explicit enabled = true, which Codex's install writes). Codex loads only configured
+    // plugins, so a cache left behind after the entry or the marketplace was removed is installed again.
+    const cacheRoot = nodePath.join(codexHome, "plugins", "cache", CODEX_CORE_MARKETPLACE, CODEX_CORE_PLUGIN);
+    const cachedDir = nodePath.join(cacheRoot, version);
+    const cached = this.fs.exists(cachedDir);
+    // Codex's "continue without trusting" choice writes no state. An existing install/configuration may therefore be a
+    // decline even with no hooks.state entry. Only the very first installation earns automatic trust; reinstalls and
+    // upgrades retain whatever native choices already exist, including an unrecorded decline.
+    const firstInstall = !this.fs.exists(cacheRoot) && !layers.some(layer => layer.state === "read"
+      && Object.hasOwn((parseToml(layer.content).plugins ?? {}) as object, CODEX_CORE_PLUGIN_KEY));
+    if (cached && recorded !== undefined && userLayerEnablesCorePlugin(userConfig)) {
+      return report("current", `${CODEX_CORE_PLUGIN_KEY} ${version} is installed and registered`);
+    }
+    const manifestPath = nodePath.join(pluginsDir, CODEX_MARKETPLACE_MANIFEST_PATH);
+    const manifest = codexCoreMarketplaceManifest();
+    if (!this.fs.exists(manifestPath) || this.fs.readFile(manifestPath) !== manifest) {
+      this.fs.mkdirp(nodePath.dirname(manifestPath));
+      this.fs.writeFile(manifestPath, manifest);
+    }
+    const env: NodeJS.ProcessEnv = { ...process.env, CODEX_HOME: codexHome, ...(this.launchPath ? { PATH: this.launchPath } : {}) };
+    if (recorded === undefined) {
+      const added = await this.runCodexCli(["plugin", "marketplace", "add", pluginsDir], env);
+      if (added.status !== 0) return report("skipped", `codex plugin marketplace add failed: ${(added.stderr || added.stdout).trim() || `exit ${added.status}`}`);
+    }
+    const installed = await this.runCodexCli(["plugin", "add", CODEX_CORE_PLUGIN_KEY], env);
+    if (installed.status !== 0) return report("skipped", `codex plugin add failed: ${(installed.stderr || installed.stdout).trim() || `exit ${installed.status}`}`);
+    // Trust is over normalized definitions, not script contents. Byte equality is an additional pre-grant check;
+    // Codex remains responsible for later native review if definitions change. No cache files are rewritten here.
+    if (firstInstall && matchesShipped(cachedDir)) {
+      let content = this.fs.readFile(this.resolveCodexConfigPath());
+      const hookManifest = JSON.parse(fs.readFileSync(nodePath.join(shipped, "hooks/codex.json"), "utf8"));
+      for (const [event, groups] of Object.entries(hookManifest.hooks) as Array<[string, Array<{ matcher?: string; hooks: Array<{ command: string; timeout: number }> }>]> ) {
+        groups.forEach((group, groupIndex) => group.hooks.forEach((handler, handlerIndex) => {
+          const { key, hash } = codexHookTrust.computeCodexHookTrust(event, {
+            ...handler, timeoutSec: handler.timeout, matcher: group.matcher,
+            keySource: `${CODEX_CORE_PLUGIN_KEY}:hooks/codex.json`, groupIndex, handlerIndex,
+          });
+          // Any existing choice in any readable layer/profile wins; never overwrite enabled=false or an old hash.
+          const hasChoice = (doc: unknown): boolean => {
+            if (!doc || typeof doc !== "object") return false;
+            const value = doc as { hooks?: { state?: Record<string, unknown> } };
+            return Object.hasOwn(value.hooks?.state ?? {}, key) || Object.values(doc).some(hasChoice);
+          };
+          if (!hasChoice(parseToml(content)) && !layers.some(layer => layer.state === "read" && hasChoice(parseToml(layer.content)))) {
+            content = upsertCodexHookTrust(content, key, hash);
+          }
+        }));
+      }
+      this.fs.writeFile(this.resolveCodexConfigPath(), content);
+    }
+    return report("installed", `${CODEX_CORE_PLUGIN_KEY} ${version} through Codex's own install (${enablement.reason})`);
   }
 
   /**
@@ -437,7 +648,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     }
 
     const updatePrompt: UpdatePromptAttempt = { handled: false };
-    const prepared = await this.prepareLaunch(binding, opts.name);
+    // Only a launch that starts a conversation may install the core plugin; a resume never does.
+    const prepared = await this.prepareLaunch(binding, opts.name, undefined, { installCorePlugin: !opts.resumeToken });
     if (!prepared.ok) return prepared;
     const { modelArg, effortArg, appliedLaunch, postureArg, queueStateDirArg, daemonArg, networkArg } = prepared;
 
@@ -513,7 +725,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     if (opts.resumeToken) {
       const verification = await this.verifyResumeLaunch(binding.tmuxSession, updatePrompt, { resumeToken: opts.resumeToken });
       if (!verification.ok) return verification;
-      return { ok: true, resumeToken: opts.resumeToken, resumeType: "codex_id", appliedLaunch };
+      return { ok: true, resumeToken: opts.resumeToken, resumeType: "codex_id", appliedLaunch,
+        ...(verification.resumedProcess ? { resumedProcess: verification.resumedProcess } : {}) };
     }
 
     const threadId = await this.captureFreshThreadId(binding, updatePrompt);
@@ -532,7 +745,8 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     opts: { name: string; resumeToken: string; running?: RunningCodexLaunch },
   ): Promise<{ ok: true; command: string; core: string; appliedLaunch: AppliedLaunchObservation } | { ok: false; error: string }> {
     if (!binding.tmuxSession) return { ok: false, error: "No tmux session bound — cannot build a Codex resume command" };
-    const prepared = await this.prepareLaunch(binding, opts.name, opts.running);
+    // Building a resume command (the in-place restart's) never installs the core plugin.
+    const prepared = await this.prepareLaunch(binding, opts.name, opts.running, { installCorePlugin: false });
     if (!prepared.ok) return prepared;
     const core = this.resumeCore(prepared, opts.resumeToken, binding);
     return { ok: true, command: await this.seatCommand(binding, core), core, appliedLaunch: prepared.appliedLaunch };
@@ -557,8 +771,17 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
 
   /** Launch flags shared by fresh, fork and resume, decided once per launch. With `running`, the probed and
    *  prepared parts come from the running Codex instead, and no Codex process is started to decide them. */
-  private async prepareLaunch(binding: NodeBinding, name: string, running?: RunningCodexLaunch): Promise<PreparedCodexLaunch | { ok: false; error: string }> {
-    await this.ensureManagedConfig();
+  private async prepareLaunch(binding: NodeBinding, name: string, running: RunningCodexLaunch | undefined,
+    opts: { installCorePlugin: boolean }): Promise<PreparedCodexLaunch | { ok: false; error: string }> {
+    // The config write and, for a seat that selected openrig-core, its install run as one step under the config lock, so
+    // concurrent launches never interleave them. An unselected seat's launch never installs.
+    await this.withConfigLock(async () => {
+      const managed = await this.applyManagedConfig();
+      if (opts.installCorePlugin && managed?.hooksEnabled && this.resolveCorePluginSelected?.(binding.nodeId)) {
+        try { await this.ensureCodexCorePlugin(); }
+        catch (err) { console.error(`[openrig] runtime setup warning: ${(err as Error).message}`); }
+      }
+    });
     const model = binding.model?.trim();
     const modelArg = model ? ` -m ${shellQuote(model)}` : "";
     const effort = binding.effort?.trim();
@@ -1021,11 +1244,77 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
     return undefined;
   }
 
+  /**
+   * #1524 (b): whether the pane's resumed Codex process is proven to hold `resumeToken`. Codex's own records for that
+   * exact process (pid and start time) must name the token, read before `deadline`, with the same process observed
+   * before and after the read, so a reused pid or a replaced pane proves nothing. A different conversation is a
+   * mismatch; anything unread is unknown, never a mismatch or a match.
+   */
+  /** #1524 (b): `work` under the resume check's deadline. It isn't started at or after the deadline, it races the
+   *  deadline, and a value that arrives at or after it is not used (null). It cancels nothing: work already started
+   *  runs to its end (an async step may go on to its next read, and synchronous work such as the default record
+   *  reader's SQLite queries can't be interrupted at all), so the check can return after the deadline. */
+  private async beforeResumeDeadline<T>(work: () => Promise<T> | T, deadline: number): Promise<T | null> {
+    if (Date.now() >= deadline) return null;
+    const value = await this.withinDeadline(Promise.resolve().then(work), deadline);
+    return Date.now() >= deadline ? null : value;
+  }
+
+  private async proveResumedProcess(tmuxSession: string, resumeToken: string, deadline: number):
+    Promise<{ kind: "match"; process: { pid: number; startedAt: string } } | { kind: "mismatch"; threadId: string } | { kind: "unknown"; reason: string; windowEnded?: true }> {
+    if (!this.tmux.getPanePid) return { kind: "unknown", reason: "the pane's process can't be read" };
+    if (Date.now() >= deadline) return { kind: "unknown", reason: "the resume window ended", windowEnded: true };
+    const input = { target: tmuxSession, tmux: this.tmux as { getPanePid(target: string): Promise<number | null> },
+      listProcesses: this.listProcesses as never, expectedToken: resumeToken, requireResume: true };
+    const before = await this.beforeResumeDeadline(() => observeCodexPaneProcess(input), deadline);
+    if (!before && Date.now() >= deadline) return { kind: "unknown", reason: "the resume window ended", windowEnded: true };
+    if (!before) return { kind: "unknown", reason: "no single Codex process resuming this conversation was observed in the pane" };
+    if (lstartToMinTs(before.process.startedAt) === undefined) {
+      return { kind: "unknown", reason: "the resumed Codex process has no readable start time" };
+    }
+    let evidence: CodexResumeEvidence | null;
+    try {
+      evidence = await this.beforeResumeDeadline(() => this.readResumeEvidence(before.process.pid, before.process.startedAt!), deadline);
+    } catch (err) {
+      return { kind: "unknown", reason: `Codex's records couldn't be read (${(err as Error).message})` };
+    }
+    if (!evidence) return { kind: "unknown", reason: "reading Codex's records didn't finish inside the resume window", windowEnded: true };
+    const after = await this.beforeResumeDeadline(() => observeCodexPaneProcess(input), deadline);
+    if (!after && Date.now() >= deadline) return { kind: "unknown", reason: "the resume window ended", windowEnded: true };
+    if (after?.fingerprint !== before.fingerprint) {
+      return { kind: "unknown", reason: "the resumed Codex process changed during the check" };
+    }
+    if (!evidence.threadId) return { kind: "unknown", reason: evidence.reason ?? "no_log_row" };
+    // A decision is only as current as its last observation: at or past the deadline it decides nothing.
+    if (Date.now() >= deadline) return { kind: "unknown", reason: "the resume window ended", windowEnded: true };
+    return evidence.threadId === resumeToken
+      ? { kind: "match", process: { pid: before.process.pid, startedAt: before.process.startedAt! } }
+      : { kind: "mismatch", threadId: evidence.threadId };
+  }
+
   private async verifyResumeLaunch(tmuxSession: string, updatePrompt: UpdatePromptAttempt, opts?: { resumeToken?: string }): Promise<HarnessLaunchResult> {
-    const quickAttempts = 6;
-    const extendedAttempts = 24;
-    const quickSleepMs = 200;
-    const extendedSleepMs = 500;
+    const quickAttempts = RESUME_QUICK_ATTEMPTS;
+    const extendedAttempts = RESUME_EXTENDED_ATTEMPTS;
+    const quickSleepMs = RESUME_QUICK_SLEEP_MS;
+    const extendedSleepMs = RESUME_EXTENDED_SLEEP_MS;
+    // #1524 (b): a managed resume of a known conversation is proven from Codex's own records, inside one wall-clock
+    // deadline for the whole existing window. Why it is still unproven, for the attention text at the bound.
+    // With a conversation to prove, the deadline prevents acceptance of late wrapped poll or proof values, or of a late
+    // match or mismatch. Ordinary poll sleeps request at most the remaining time. Work already started is not cancelled,
+    // and scheduling or synchronous work can delay return. The existing update-prompt helper has its own reads,
+    // reporting and guarded one-key behaviour outside this deadline.
+    const resumeToken = opts?.resumeToken;
+    const deadline = Date.now() + this.resumeProofWindowMs;
+    let unproven: string | null = null;
+    // Ordinary poll sleeps request at most the remaining time; scheduling can delay their completion. False once no time
+    // is left.
+    const pause = async (ms: number): Promise<boolean> => {
+      if (!resumeToken) { await this.sleep(ms); return true; }
+      const left = deadline - Date.now();
+      if (left <= 0) return false;
+      await this.sleep(Math.min(ms, left));
+      return Date.now() < deadline;
+    };
 
     // OPR.0.3.3.21 (FR-2): process-alive is NOT proof of a restored
     // conversation. verifyResumeLaunch must NOT return ok:true unless the probe
@@ -1061,8 +1350,20 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         break;
       }
 
-      const paneCommand = await this.tmux.getPaneCommand(tmuxSession);
-      const paneContent = await this.captureProbeScreen(tmuxSession);
+      // #1524 (b): with a conversation to prove, no capture starts at or after the deadline, and one that ends after it
+      // isn't used (a capture already started isn't cancelled: its second read may still run, its value discarded).
+      let paneCommand: Awaited<ReturnType<TmuxAdapter["getPaneCommand"]>>;
+      let paneContent: string;
+      if (resumeToken) {
+        const captured = await this.beforeResumeDeadline(async () =>
+          ({ command: await this.tmux.getPaneCommand(tmuxSession), content: await this.captureProbeScreen(tmuxSession) }), deadline);
+        if (!captured) break;
+        paneCommand = captured.command;
+        paneContent = captured.content;
+      } else {
+        paneCommand = await this.tmux.getPaneCommand(tmuxSession);
+        paneContent = await this.captureProbeScreen(tmuxSession);
+      }
       lastPaneContent = paneContent;
       let probe = assessNativeResumeProbe({
         runtime: "codex",
@@ -1102,12 +1403,31 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
         };
       }
 
-      if (probe.status === "resumed") {
-        return {
-          ok: true,
-          resumeToken: opts?.resumeToken,
-          resumeType: opts?.resumeToken ? "codex_id" : undefined,
-        };
+      if (probe.status === "resumed" && !resumeToken) {
+        return { ok: true, resumeToken: undefined, resumeType: undefined };
+      }
+      if (probe.status === "resumed" && resumeToken) {
+        const proof = await this.proveResumedProcess(tmuxSession, resumeToken, deadline);
+        if (proof.kind === "match") return { ok: true, resumeToken, resumeType: "codex_id", resumedProcess: proof.process };
+        if (proof.kind === "mismatch") {
+          return {
+            ok: false,
+            error: `Codex resume opened a different conversation: the resumed process's records name ${proof.threadId}, not the requested ${resumeToken}. The session was preserved; nothing was restarted.`,
+            recovery: "attention_required",
+            resumeMismatch: { opened: proof.threadId },
+            verifierInput: verifierInput(),
+            evidence: paneContent.split("\n").slice(-12).join("\n"),
+          };
+        }
+        // Unknown is not a failure yet: keep polling inside the window, as a boot still in progress does. The
+        // window ending says nothing new, so it doesn't replace the last reason a read gave.
+        if (!("windowEnded" in proof) || !unproven) unproven = proof.reason;
+        lastUnresolved = { status: "inconclusive", code: "awaiting_runtime", detail: `Codex resume not yet proven: ${proof.reason}.` };
+        report = { probe, paneContent };
+        if (Date.now() >= deadline) break;
+        const sleepMs = attempt < quickAttempts ? quickSleepMs : extendedSleepMs;
+        if (attempt < totalAttempts - 1 && !(await pause(sleepMs))) break;
+        continue;
       }
 
       report = { probe, paneContent }; // resumed returned above, so this screen is unresolved
@@ -1122,7 +1442,7 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
           lastUnresolved = null;
           sawRealGate = false;
           const sleepMs = attempt < quickAttempts ? quickSleepMs : extendedSleepMs;
-          if (attempt < totalAttempts - 1) await this.sleep(sleepMs);
+          if (attempt < totalAttempts - 1 && !(await pause(sleepMs))) break;
           continue;
         }
         lastUnresolved = probe;
@@ -1135,13 +1455,16 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       }
 
       const sleepMs = attempt < quickAttempts ? quickSleepMs : extendedSleepMs;
-      if (attempt < totalAttempts - 1) await this.sleep(sleepMs);
+      if (attempt < totalAttempts - 1 && !(await pause(sleepMs))) break;
     }
 
     // Report the newest screen observed; a resumed or booting one names no gate. The loop's own decisions above used
     // lastUnresolved. The text follows the newest screen too, so an older gate's text never stands for a newer screen.
     const shown = report && report.probe.status !== "resumed" && report.probe.code !== "awaiting_runtime" ? report : null;
-    const newestText = shown ? shown.probe.detail
+    const unprovenText = unproven && report?.probe.status === "resumed"
+      ? `Codex resume could not be proven within the resume window: ${unproven}. The session was preserved; nothing was restarted.`
+      : null;
+    const newestText = unprovenText ? unprovenText : shown ? shown.probe.detail
       : report?.probe.status === "resumed" ? "Codex resume could not be confirmed: the last screen observed looked ready, but the resume check ended before proving a restored conversation."
         : report ? report.probe.detail
           : lastUnresolved?.detail;
@@ -1153,6 +1476,9 @@ export class CodexRuntimeAdapter implements RuntimeAdapter {
       // The gate on that screen, if any. A boot still in progress names no gate.
       ...(shown ? gateFields(shown.probe, shown.paneContent) : {}),
       ...(shown?.beforeInput ? { screenBeforeInput: true as const } : {}),
+      // With a conversation to prove and no gate on the newest screen, the end is "not proven": whatever the last frame
+      // was (a boot, a ready screen, or no capture at all before the deadline), the resumed Codex may be running.
+      ...(resumeToken && !shown ? { resumeUnproven: true as const } : {}),
       verifierInput: verifierInput(),
       evidence: (report?.paneContent ?? lastPaneContent).split("\n").slice(-12).join("\n"),
     };
@@ -1259,18 +1585,6 @@ function upsertCodexProjectTrust(content: string, projectPath: string): string {
 //   The KEY's exact key_source canonical form + the positional indices are what the VM
 //   read-back must confirm — PROVISIONAL until then.
 
-/** Recursively sort object keys (mirrors codex-rs fingerprint.rs `canonical_json`). */
-function canonicalizeJsonValue(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(canonicalizeJsonValue);
-  if (value !== null && typeof value === "object") {
-    const src = value as Record<string, unknown>;
-    const out: Record<string, unknown> = {};
-    for (const key of Object.keys(src).sort()) out[key] = canonicalizeJsonValue(src[key]);
-    return out;
-  }
-  return value;
-}
-
 const CODEX_HOOK_EVENT_KEY_LABEL: Record<(typeof OPENRIG_ACTIVITY_HOOK_EVENTS)[number], string> = {
   SessionStart: "session_start",
   UserPromptSubmit: "user_prompt_submit",
@@ -1308,21 +1622,9 @@ export function computeCodexHookTrust(
   const groupIndex = input.groupIndex ?? 0;
   const handlerIndex = input.handlerIndex ?? 0;
   const key = `${input.keySource}:${label}:${groupIndex}:${handlerIndex}`;
-
-  // Build NormalizedHookIdentity exactly as `TomlValue::try_from` would: None fields dropped.
-  const handler: Record<string, unknown> = {
-    type: "command",
-    command: input.command,
-    timeout: input.timeoutSec,
-    async: false,
-  };
-  if (input.statusMessage != null) handler.statusMessage = input.statusMessage;
-  const identity: Record<string, unknown> = { event_name: label, hooks: [handler] };
-  if (input.matcher != null) identity.matcher = input.matcher;
-
-  const serialized = JSON.stringify(canonicalizeJsonValue(identity));
-  const hex = createHash("sha256").update(serialized, "utf8").digest("hex");
-  return { key, hash: `sha256:${hex}` };
+  // NormalizedHookIdentity exactly as `TomlValue::try_from` would build it (None fields dropped), hashed by the shared
+  // recipe in codex-hook-trust.cjs.
+  return { key, hash: codexHookTrust.codexHookHash(label, input) };
 }
 
 /**
@@ -1330,7 +1632,7 @@ export function computeCodexHookTrust(
  * `[hooks.state."<key>"] trusted_hash = "<hash>"` record. Mirrors upsertCodexProjectTrust:
  * find/create the exact table header, splice ONLY its `trusted_hash` line, leave every other
  * `[hooks.state]` / `[projects]` entry and the managed hook block byte-identical. Same key+hash
- * ⇒ no-op. Only ever called for OUR 4 authored hook keys (never a blanket/wildcard trust).
+ * ⇒ no-op. Only called for our authored inline or exact first-install plugin keys (never blanket trust).
  */
 export function upsertCodexHookTrust(content: string, key: string, hash: string): string {
   const header = `[hooks.state.${JSON.stringify(key)}]`;
@@ -1734,18 +2036,13 @@ function escapeRegExp(value: string): string {
 
 // Module-private (P1 pin — NEVER exported). The REAL Codex profile-LOAD probe,
 // extracted verbatim from launchHarness: dynamic imports keep it lazy for
-// production, execFn runs the real `codex -p <profile> mcp list` via execSync
-// (utf-8, piped stdio, 10s timeout). Injected as the adapter's default
-// verifyProfilePreflight; tests substitute a controlled stub.
+// production, execFn runs the real `codex -p <profile> mcp list` through
+// execRuntimeProbe (utf-8, 10s bound, off the event loop). Injected as the
+// adapter's default verifyProfilePreflight; tests substitute a controlled stub.
 async function defaultProfilePreflight(profile: string, selected?: { cwd: string; codexHome: string; launchPath?: string }): Promise<CodexProfileProbeResult> {
   const { verifyCodexProfileLoads } = await import("../domain/codex-profile-preflight.js");
-  const { execSync } = await import("node:child_process");
-  const execFn = async (cmd: string) =>
-    runSyncSite("codex.runtime.profile_preflight", () =>
-      execSync(cmd, { encoding: "utf-8", stdio: ["pipe", "pipe", "pipe"], timeout: 10_000,
-        ...(selected ? { cwd: selected.cwd, env: { ...process.env, CODEX_HOME: selected.codexHome, ...(selected.launchPath ? { PATH: selected.launchPath } : {}) } } : {}),
-      })
-    );
+  const execFn = (cmd: string) => execRuntimeProbe("codex.runtime.profile_preflight", cmd,
+    selected ? { cwd: selected.cwd, env: { ...process.env, CODEX_HOME: selected.codexHome, ...(selected.launchPath ? { PATH: selected.launchPath } : {}) } } : {});
   return verifyCodexProfileLoads(profile, execFn, undefined, selected?.codexHome);
 }
 

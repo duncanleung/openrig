@@ -18,7 +18,7 @@ import { AppliedLaunchObservationStore } from "./applied-launch-observation-stor
 import { NativePermissionStore } from "./native-permission-store.js";
 import { RigRepository } from "./rig-repository.js";
 import { SessionTransport, inspectStartupStagedText } from "./session-transport.js";
-import { startupOwnCollapsedPaste, startupSubmissionEvidence, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
+import { claudeInputBoxDrawn, startupNoInputLine, startupOwnCollapsedPaste, startupSubmissionEvidence, type StartupSubmissionDiagnostic } from "./startup-submission-evidence.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import { resolveReadinessTimeoutMs } from "./readiness-timeout.js";
 import { SettingsStore } from "./user-settings/settings-store.js";
@@ -35,6 +35,23 @@ const STARTUP_SUBMIT_SETTLE_LOOKS = 25;
 // A prompt still staged after a guarded retry is retried again, up to this many retries in all, each after
 // the 200 ms look. Every retry is guarded: Enter goes in only while the composer holds exactly the text we typed.
 const STARTUP_SUBMIT_RETRIES = 2;
+
+// Why a startup prompt's submission could not be confirmed, as told to the operator when the
+// proof line is held back.
+const UNCONFIRMED_STAGED = "the prompt still looked staged in the input box";
+const UNCONFIRMED_UNOBSERVABLE = "the input box could not be observed";
+const UNCONFIRMED_UNCLEAR = "the input box did not clearly show the prompt as submitted";
+const UNCONFIRMED_RETRY_REFUSED = "the guarded Enter retry did not go through";
+
+/**
+ * The proof line is held back on purpose when the startup prompt isn't confirmed submitted. Say that
+ * only this one line was skipped, so it doesn't read as the agent or the rig failing to start.
+ */
+export function startupProofHeldBackWarning(reason: string | undefined): string {
+  return "Startup proof instruction held back: only the extra line asking the agent to run its startup check "
+    + "was not sent, so nothing is typed over input that may still be in the box. The startup prompt itself was "
+    + `sent, but its submission could not be confirmed: ${reason ?? "it was not observed submitted"}.`;
+}
 
 type PendingForkContext = { parentToken: string; isRestore: boolean };
 export type PendingStartupContext = { eventSeq: number } & (
@@ -194,10 +211,14 @@ type StartupDeliveryInput = StartupInput & {
   startupAttemptId: string; sendOrder: number; submissionDiagnostics: StartupSubmissionDiagnostic[];
   /** Claude only: whether the latest interactive send was observed submitted (a clear composer). */
   lastSubmissionConfirmed?: boolean;
+  /** Claude only: why the latest interactive send was not confirmed, in words for the operator. */
+  lastSubmissionUnconfirmedReason?: string;
 };
 
 export type StartupResult = { warnings?: string[] } & (
-  | { ok: true; startupStatus: "ready"; continuityOutcome: "resumed" | "fresh" | "forked" | "rebuilt"; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string; diagnostics?: StartupSubmissionDiagnostic[] } }
+  | { ok: true; startupStatus: "ready"; continuityOutcome: "resumed" | "fresh" | "forked" | "rebuilt"; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string; diagnostics?: StartupSubmissionDiagnostic[] };
+    /** Codex (#1524): the native process the managed resume was proven on, carried to restore's join. */
+    resumedProcess?: { pid: number; startedAt: string } }
   // `evidence` carries the last-N pane lines for `attention_required`
   // outcomes so restore-orchestrator's per-node mapping can populate
   // `attentionEvidence` on the RestoreNodeResult. Internal type only;
@@ -322,6 +343,7 @@ export class StartupOrchestrator {
           ? "rebuilt"
           : "fresh";
     let appliedLaunch: AppliedLaunchObservation | undefined;
+    let resumedProcess: { pid: number; startedAt: string } | undefined;
     const forkContext: PendingForkContext | undefined = input.adapter.runtime === "codex"
       && input.forkSource?.kind === "native_id" && input.forkSource.value?.trim()
       ? { parentToken: input.forkSource.value.trim(), isRestore: input.isRestore } : undefined;
@@ -440,6 +462,7 @@ export class StartupOrchestrator {
           });
           if (launchResult.ok) {
             appliedLaunch = launchResult.appliedLaunch;
+            resumedProcess = launchResult.resumedProcess;
             if (input.adapter.runtime === "claude-code" && launchResumeToken?.trim()) {
               await this.recordClaudeResumeLaunch(input.sessionId, input.binding.tmuxPane ?? input.binding.tmuxSession, launchResumeToken.trim(), launchResult.launchedProcess);
             }
@@ -754,7 +777,7 @@ export class StartupOrchestrator {
       : undefined;
     this.eventBus.emit({ type: "node.startup_ready", rigId: input.rigId, nodeId: input.nodeId, ...(submission ? { submission } : {}) });
 
-    return { ok: true, startupStatus: "ready", continuityOutcome, ...(submission ? { submission } : {}) };
+    return { ok: true, startupStatus: "ready", continuityOutcome, ...(submission ? { submission } : {}), ...(resumedProcess ? { resumedProcess } : {}) };
   }
 
   /** A failed attempt can continue only when it stopped before sending context.
@@ -901,7 +924,8 @@ export class StartupOrchestrator {
     }
 
     const firstSendTextIndex = postLaunchFiles.findIndex((file) => file.deliveryHint === "send_text");
-    let prompt = identityAction.value;
+    const identityContext = `OpenRig-generated identity context (not a project task):\n${identityAction.value}\nEnd of generated identity context.`;
+    let prompt = identityContext;
     let remainingFiles = postLaunchFiles;
 
     if (firstSendTextIndex !== -1) {
@@ -909,13 +933,17 @@ export class StartupOrchestrator {
       try {
         const content = this.readFile(firstSendText.absolutePath);
         if (content.length > 0) {
-          prompt = `${identityAction.value}\n\n${content}`;
+          prompt = `${identityContext}\n\n${content}`;
           remainingFiles = postLaunchFiles.filter((_, index) => index !== firstSendTextIndex);
         }
       } catch {
         // Fall back to a standalone identity prompt and let the adapter handle
         // the original startup file using its normal failure semantics.
       }
+    }
+
+    if (firstSendTextIndex === -1 && !input.isRestore && !includeDurableObligations && !challengeBlock) {
+      prompt += "\n\nFor this identity-only startup, run rig whoami --json and reply with your identity and readiness for an assignment. Repository history, tool descriptions and your own replies are not assignments.";
     }
 
     if (includeDurableObligations) prompt += `\n\nThis is a fresh conversation. Before choosing work, derive your identity with rig whoami --json and read durable obligations with rig queue list --destination ${binding.tmuxSession} --state pending,in-progress,blocked --limit 10000 --full --json. Report truncation at the limit; a destination row is not permission to claim unrelated work.`;
@@ -988,7 +1016,7 @@ export class StartupOrchestrator {
   private async sendProofInstruction(input: StartupDeliveryInput): Promise<void> {
     if (input.adapter.runtime !== "claude-code" || !input.binding.tmuxSession) return;
     if (!input.lastSubmissionConfirmed) {
-      this.recordSubmissionWarning(input, "Startup proof instruction was not sent: the startup prompt was not confirmed submitted.");
+      this.recordSubmissionWarning(input, startupProofHeldBackWarning(input.lastSubmissionUnconfirmedReason));
       return;
     }
     const failure = await this.sendInteractiveText(input, STARTUP_PROOF_INSTRUCTION_LINE, "startup_proof_instruction");
@@ -1006,6 +1034,8 @@ export class StartupOrchestrator {
     const sendOrder = ++input.sendOrder;
     const tmuxSession = input.binding.tmuxSession!;
     input.lastSubmissionConfirmed = false;
+    input.lastSubmissionUnconfirmedReason = undefined;
+    if (input.adapter.runtime === "claude-code" && sendOrder === 1 && !input.isRestore) await this.awaitClaudeInputBox(input.binding.tmuxPane);
     const textResult = await this.tmuxAdapter.sendText(tmuxSession, text);
     if (!textResult.ok) {
       return { error: (textResult as { message?: string }).message ?? "unknown" };
@@ -1027,7 +1057,8 @@ export class StartupOrchestrator {
       if (evidence) diagnostic.observations.push({ ...evidence, phase, ...(look === undefined ? {} : { look }) });
       return evidence;
     };
-    const unverified = (reason: string): null => {
+    const unverified = (reason: string, operatorReason: string): null => {
+      input.lastSubmissionUnconfirmedReason = operatorReason;
       this.recordSubmissionWarning(input, reason);
       return null; // An unavailable observation is not a failed delivery.
     };
@@ -1036,7 +1067,7 @@ export class StartupOrchestrator {
     try {
       await this.sleep(200);
       const first = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES);
-      if (!first?.trim()) { record(first); return unverified("Startup submission capture is unavailable after Enter."); }
+      if (!first?.trim()) { record(first); return unverified("Startup submission capture is unavailable after Enter.", UNCONFIRMED_UNOBSERVABLE); }
       const { pane, state: before, looks } = await this.settleOwnPaste(tmuxSession, first, text, input.adapter.runtime);
       if (before === "clear") { input.lastSubmissionConfirmed = true; return null; }
       if (before === "unverified") {
@@ -1044,7 +1075,8 @@ export class StartupOrchestrator {
         const evidence = record(pane, looks || undefined);
         return unverified(evidence?.reason === "unrecognized_composer_boundary"
           ? "Startup submission is unverified: the current composer boundary was not recognized."
-          : "Startup submission is unverified: the current composer does not positively match the complete prompt.");
+          : "Startup submission is unverified: the current composer does not positively match the complete prompt.",
+        UNCONFIRMED_UNCLEAR);
       }
       let retry: Awaited<ReturnType<SessionTransport["send"]>>;
       let after: string | null;
@@ -1064,13 +1096,14 @@ export class StartupOrchestrator {
         phase = "after_retry";
         await this.sleep(200);
         after = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES);
-        if (!after?.trim()) { record(after); return unverified("Startup submission capture is unavailable after the guarded retry."); }
+        if (!after?.trim()) { record(after); return unverified("Startup submission capture is unavailable after the guarded retry.", UNCONFIRMED_UNOBSERVABLE); }
         observed = inspectStartupStagedText(after, text, input.adapter.runtime);
         // A refused retry is not repeated; only a retry whose Enter went in and was lost again is.
       } while (observed === "staged" && retry.ok && ++retries < STARTUP_SUBMIT_RETRIES);
       if (observed === "staged") {
         const warning = `Startup prompt still staged in ${tmuxSession}; press Enter in that pane.`;
         input.stagedSubmissionWarning = warning;
+        input.lastSubmissionUnconfirmedReason = UNCONFIRMED_STAGED;
         this.recordSubmissionWarning(input, warning);
         if (!retry.ok) this.recordSubmissionWarning(input, `Guarded retry did not submit: ${retry.error ?? retry.reason}`);
         return null;
@@ -1079,30 +1112,49 @@ export class StartupOrchestrator {
         const evidence = record(after);
         return unverified(evidence?.reason === "unrecognized_composer_boundary"
           ? "Startup submission is unverified after the guarded retry: the current composer boundary was not recognized."
-          : "Startup submission is unverified after the guarded retry: the current composer is ambiguous.");
+          : "Startup submission is unverified after the guarded retry: the current composer is ambiguous.",
+        UNCONFIRMED_UNCLEAR);
       }
-      if (!retry.ok) return unverified(`Guarded startup retry did not submit: ${retry.error ?? retry.reason}; matching staged text is no longer visible.`);
+      if (!retry.ok) return unverified(`Guarded startup retry did not submit: ${retry.error ?? retry.reason}; matching staged text is no longer visible.`, UNCONFIRMED_RETRY_REFUSED);
       input.lastSubmissionConfirmed = true;
       return null;
     } catch (error) {
       if (!diagnostic.observations.some(observation => observation.phase === phase)) record(null);
-      return unverified(`Startup submission observation is unavailable: ${(error as Error).message}`);
+      return unverified(`Startup submission observation is unavailable: ${(error as Error).message}`, UNCONFIRMED_UNOBSERVABLE);
     } finally {
       if (diagnostic.observations.length) input.submissionDiagnostics.push(diagnostic);
     }
   }
 
   /**
-   * Claude can take the startup Enter after the first look while the composer still shows our paste collapsed.
-   * Only that transient is looked at again, until the composer reads clear or staged, shows anything else, or
-   * the looks run out. A draft, ghost text or any other mismatch keeps its first-look verdict. Observation only.
+   * A fresh launch can read ready before Claude has drawn its input box: on Linux the pane names `claude` the moment
+   * Claude starts, and startup text pasted then sat unsent. Before a fresh start's first send, look at the visible
+   * screen until the input box the startup check reads is drawn, at most STARTUP_SUBMIT_SETTLE_LOOKS looks 200 ms
+   * apart. A screen that never shows one within that, or can't be read, is sent to as before. Observation only.
+   */
+  private async awaitClaudeInputBox(pane: string | null | undefined): Promise<void> {
+    if (!pane) return;
+    for (let look = 0; look < STARTUP_SUBMIT_SETTLE_LOOKS; look++) {
+      let screen: string | null;
+      try { screen = await this.tmuxAdapter.capturePaneScreen(pane); } catch { return; }
+      if (screen === null || claudeInputBoxDrawn(screen)) return;
+      await this.sleep(200);
+    }
+  }
+
+  /**
+   * Claude can take the startup Enter after the first look while the composer still shows our paste collapsed, and a
+   * fresh Claude can still be drawing its screen, with no input line at all, when the first look comes. Only those
+   * two transients are looked at again, until the composer reads clear or staged, shows anything else, or the looks
+   * run out. A draft, ghost text, a dialog or any other mismatch keeps its verdict. Observation only.
    * Remaining ambiguity: a person who clears a collapsed paste with the same line count inside the window reads
    * as submitted.
    */
   private async settleOwnPaste(tmuxSession: string, pane: string, text: string, runtime: string | null): Promise<{ pane: string; state: ReturnType<typeof inspectStartupStagedText>; looks: number }> {
     let state = inspectStartupStagedText(pane, text, runtime);
     let looks = 0;
-    while (state === "unverified" && looks < STARTUP_SUBMIT_SETTLE_LOOKS && startupOwnCollapsedPaste(pane, text, runtime)) {
+    while (state === "unverified" && looks < STARTUP_SUBMIT_SETTLE_LOOKS
+      && (startupOwnCollapsedPaste(pane, text, runtime) || startupNoInputLine(pane, runtime))) {
       await this.sleep(200);
       // A failed re-look adds nothing; the last usable observation stands.
       const next = await this.tmuxAdapter.capturePaneContent(tmuxSession, STARTUP_SUBMIT_CAPTURE_LINES).catch(() => null);

@@ -16,8 +16,8 @@ import {
 import {
   getDaemonStatus,
   getDaemonUrl,
-  statusGuardMessage,
-} from "../daemon-lifecycle.js";
+  statusGuardMessage } from "../daemon-lifecycle.js";
+import { daemonMayAnswer } from "../daemon-reachability.js";
 import { realDeps } from "./daemon.js";
 import { identityRoutingHint, resolveIdentitySource } from "./whoami.js";
 import type { StatusDeps } from "./status.js";
@@ -182,7 +182,7 @@ function responseError(status: number, data: unknown): HealthCliError {
 
 async function readyClient(deps: HealthDeps, json: boolean): Promise<DaemonClient | null> {
   const status = await getDaemonStatus(deps.lifecycleDeps, { cleanupStaleState: false });
-  if (status.state !== "running" || status.healthy === false) {
+  if (!daemonMayAnswer(status)) {
     emitError(daemonError(statusGuardMessage(status)), json);
     return null;
   }

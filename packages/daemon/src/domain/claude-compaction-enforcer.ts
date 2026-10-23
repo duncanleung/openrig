@@ -38,9 +38,8 @@ import * as path from "node:path";
  *   write an attempt-bound restore map. Existing polls send /compact only after
  *   atomic publication of that completed artifact, within the preparation deadline.
  * - Post-compact restore: after a successful auto-compact, the enforcer
- *   first sends a turn-boundary handshake once context usage drops below
- *   threshold, or when the latest sample is stale or unknown (a seat that
- *   takes no turn after /compact never refreshes its sample), then sends the
+ *   first sends a turn-boundary handshake when the pane is idle, independently
+ *   of trigger usage (including stale or unknown samples), then sends the
  *   restore prompt on a later polling tick.
  *   This is intentionally active because Claude hooks can provide
  *   context, but they do not create a new assistant turn by themselves.
@@ -54,6 +53,9 @@ export const POST_COMPACT_RESTORE_COOLDOWN_MS_DEFAULT = 10 * 60_000;
 export const MANUAL_PREP_WAIT_MS_DEFAULT = 180_000;
 // Operational ceiling, not a measured optimum. Existing context polls advance auto preparation.
 export const AUTO_PREP_WAIT_MS_DEFAULT = 25 * 60_000;
+// How long a stopped attempt holds automatic compaction off for its seat before a fresh attempt may begin. Without it one
+// failed preparation turned automatic compaction off for the seat until someone noticed. Operational, not measured.
+export const AUTO_RETRY_AFTER_STOP_MS_DEFAULT = 10 * 60_000;
 const PREP_SEND_ATTEMPTS_MAX = 3;
 // Slices 13–14 fix — each post-compact back-half send (turn_boundary → restore →
 // audit) is idle-gated so it cannot be injected into the busy pane right after
@@ -92,6 +94,7 @@ export type ManualCompactionStage =
   | "compact-sent"
   | "restore-sent"
   | "audit-sent"
+  | "cancelled"
   | "skipped-or-failed";
 
 export interface ManualCompactionStatus {
@@ -392,6 +395,12 @@ export function buildPostCompactTurnBoundaryPrompt(): string {
 }
 
 type PendingPostCompactStage = "turn_boundary" | "restore_prompt" | "compliance_prompt";
+
+/** A managed compaction the enforcer has recorded for a seat: the stage, and a phrase that says only what was observed. */
+export interface ObservedCompaction {
+  stage: "preparing" | "compacting" | "compacted" | "restoring";
+  detail: string;
+}
 export interface PreparationState {
   attemptId: string;
   occupantGeneration: string | null;
@@ -415,6 +424,10 @@ interface PreparationAttempt extends PreparationState {
   controller: AbortController;
   /** The policy's compaction instruction when the attempt began; the /compact command uses this one. */
   compactInstruction: string;
+  /** When the attempt stopped (this.now()); automatic compaction may begin a fresh one after the retry cooldown. */
+  stoppedAt?: number;
+  /** An explicit cancel, even one after a stop: a decision about this seat, never retried automatically. */
+  cancelled?: boolean;
 }
 
 /** What the restore request must carry because the /compact command could not. With --skip-map the attempt
@@ -426,6 +439,7 @@ export class ClaudeCompactionEnforcer {
   private readonly sessionTransport: SessionTransport;
   private readonly dedupWindowMs: number;
   private readonly postCompactRestoreCooldownMs: number;
+  private readonly autoRetryAfterStopMs: number;
   private readonly openrigHome: string;
   // OPR.0.4.3.14 — max time to wait for the manual prep turn to complete (seat
   // idle) before sending /compact. Bounds the two-phase wait-for-idle.
@@ -463,6 +477,7 @@ export class ClaudeCompactionEnforcer {
       dedupWindowMs?: number;
       openrigHome?: string;
       postCompactRestoreCooldownMs?: number;
+      autoRetryAfterStopMs?: number;
       manualPrepWaitMs?: number;
       now?: () => number;
       sleep?: (ms: number) => Promise<void>;
@@ -481,6 +496,7 @@ export class ClaudeCompactionEnforcer {
     this.sessionTransport = sessionTransport;
     this.dedupWindowMs = opts?.dedupWindowMs ?? DEDUP_WINDOW_MS_DEFAULT;
     this.postCompactRestoreCooldownMs = opts?.postCompactRestoreCooldownMs ?? POST_COMPACT_RESTORE_COOLDOWN_MS_DEFAULT;
+    this.autoRetryAfterStopMs = opts?.autoRetryAfterStopMs ?? AUTO_RETRY_AFTER_STOP_MS_DEFAULT;
     this.openrigHome = opts?.openrigHome ?? defaultOpenRigHome();
     this.manualPrepWaitMs = opts?.manualPrepWaitMs ?? MANUAL_PREP_WAIT_MS_DEFAULT;
     this.now = opts?.now ?? (() => Date.now());
@@ -499,6 +515,22 @@ export class ClaudeCompactionEnforcer {
   async maybeAutoCompact(input: EnforcerInput): Promise<EnforcerOutcome> {
     this.reconcilePreparations();
     return this.withDeliveryGuard(input, () => this.maybeAutoCompactUnchecked(input));
+  }
+
+  /**
+   * What this enforcer has recorded about a managed compaction of `sessionName`, for a sender's context, or null when
+   * none is under way. Read-only: it reports the enforcer's own state (the preparation attempt and the post-compact
+   * stage still owed), never whether the seat finished compacting or restoring.
+   */
+  observedCompaction(sessionName: string): ObservedCompaction | null {
+    const owed = this.pendingPostCompactRestore.get(sessionName);
+    if (owed === "compliance_prompt") return { stage: "restoring", detail: "mid-restore: the restore request was sent and the post-restore audit is still owed" };
+    if (owed === "restore_prompt") return { stage: "compacted", detail: "compacted, with its restore not yet requested" };
+    if (owed === "turn_boundary") return { stage: "compacting", detail: "being compacted: /compact was submitted and the post-compaction steps haven't started" };
+    const attempt = this.pendingPreCompactPrep.get(sessionName);
+    if (attempt?.status === "sending" || attempt?.status === "waiting") return { stage: "preparing", detail: "preparing for a managed compaction: /compact hasn't been sent yet" };
+    if (attempt?.status === "compact-sent") return { stage: "compacting", detail: "being compacted: /compact was submitted and the post-compaction steps haven't started" };
+    return null;
   }
 
   /** True while a post-compact stage (turn boundary, restore or audit) is still owed to this seat. */
@@ -555,11 +587,18 @@ export class ClaudeCompactionEnforcer {
     input: EnforcerInput,
     policy: ClaudeCompactionPolicy,
   ): Promise<EnforcerOutcome | null> {
-    // Without a usage sample nothing shows compaction has finished, and the newest hook can be the
-    // Stop from before /compact. Then only a live pane read may count as idle.
+    // A missing or still-high sample need not show that /compact has finished. The newest idle
+    // hook can predate it, so these drains require a live pane read to establish idle.
+    const pendingStage = this.pendingPostCompactRestore.get(input.sessionName);
+    const attempt = this.pendingPreCompactPrep.get(input.sessionName);
+    const isCurrent = () => this.pendingPostCompactRestore.get(input.sessionName) === pendingStage
+      && this.pendingPreCompactPrep.get(input.sessionName) === attempt;
     const sendOpts = {
+      beforeWrite: () => {
+        if (!isCurrent()) throw new DeliveryGuardError("compaction_cancelled", "Managed compaction was cancelled or replaced; no further input is authorized.");
+      },
       waitForIdleMs: this.postCompactSendWaitMs,
-      ...(input.usedPercentage == null ? { readinessFromPaneOnly: true } : {}),
+      ...(input.usedPercentage == null || input.usedPercentage >= policy.thresholdPercent ? { readinessFromPaneOnly: true } : {}),
     };
     // GHOST-STAGE FIX (a) — gate the DRAIN by `enabled`. A disabled system drains NOTHING: the
     // legacy compaction-stage defect (operator-confirmed ruling 05c174e0) proved that draining a
@@ -588,13 +627,13 @@ export class ClaudeCompactionEnforcer {
         return { triggered: false, reason: "stale_generation" };
       }
     }
-    const pendingStage = this.pendingPostCompactRestore.get(input.sessionName);
     if (pendingStage === "turn_boundary") {
       const boundary = await this.sessionTransport.send(
         input.sessionName,
         buildPostCompactTurnBoundaryPrompt(),
         sendOpts,
       );
+      if (!isCurrent()) return { triggered: false, reason: "preparation_stopped" };
       if (!boundary.ok || boundary.outcome === "retained") {
         // Busy/never-idle → no delivery, no advance; the SAME stage retries next tick.
         return { triggered: false, reason: "send_failed" };
@@ -621,6 +660,7 @@ export class ClaudeCompactionEnforcer {
         }),
         sendOpts,
       );
+      if (!isCurrent()) return { triggered: false, reason: "preparation_stopped" };
       if (!restore.ok || restore.outcome === "retained") {
         // Restore is exact-once + operator-authorized: if the seat is still busy
         // (mid-compaction/boundary), do NOT advance to restore-sent on an
@@ -639,6 +679,7 @@ export class ClaudeCompactionEnforcer {
         buildPostCompactCompliancePrompt(policy.postRestoreAuditInstruction),
         sendOpts,
       );
+      if (!isCurrent()) return { triggered: false, reason: "preparation_stopped" };
       if (!compliance.ok || compliance.outcome === "retained") {
         // Audit cannot overtake restore: only advances once the restore turn is
         // idle and this send delivers; a busy tick retries the SAME stage.
@@ -657,6 +698,7 @@ export class ClaudeCompactionEnforcer {
           saturationBoundPercentage: policy.thresholdPercent,
         });
       }
+      if (!isCurrent()) return { triggered: false, reason: "preparation_stopped" };
       this.pendingPostCompactRestore.delete(input.sessionName);
       this.restoreCarry.delete(input.sessionName);
       if (this.pendingPreCompactPrep.get(input.sessionName)?.status === "compact-sent") this.pendingPreCompactPrep.delete(input.sessionName);
@@ -665,7 +707,10 @@ export class ClaudeCompactionEnforcer {
         input.sessionName,
         Date.now() + this.postCompactRestoreCooldownMs,
       );
-      this.triggeredAboveThreshold.delete(input.sessionName);
+      // A high sample may now finish the audit, but must not re-arm automatic compaction.
+      if (input.usedPercentage == null || input.usedPercentage < policy.thresholdPercent) {
+        this.triggeredAboveThreshold.delete(input.sessionName);
+      }
       // OPR.0.4.3.14 — terminal manual-trigger stage (no-op for auto seats).
       this.advanceManualStage(input.sessionName, "restore-sent", "audit-sent");
       return { triggered: true };
@@ -692,9 +737,11 @@ export class ClaudeCompactionEnforcer {
     if (!isValidThresholdPercent(policy.thresholdPercent)) {
       return { triggered: false, reason: "invalid_policy" };
     }
+    // A trigger sample must not block work already owed to this occupant. Restore reads can
+    // themselves exceed a low threshold; keep the same stage, authorization and idle gates.
+    const drained = await this.drainPendingStage(input, policy);
+    if (drained) return drained;
     if (input.usedPercentage < policy.thresholdPercent) {
-      const drained = await this.drainPendingStage(input, policy);
-      if (drained) return drained;
       this.triggeredAboveThreshold.delete(input.sessionName);
       const preparation = this.pendingPreCompactPrep.get(input.sessionName);
       if (preparation?.status === "compact-sent") this.pendingPreCompactPrep.delete(input.sessionName);
@@ -703,15 +750,8 @@ export class ClaudeCompactionEnforcer {
       return { triggered: false, reason: "below_threshold" };
     }
 
-    // OPR.0.4.3.14 — the `enabled` gate moved here (from the top of the method)
-    // so it guards only the auto TRIGGER (this above-threshold path). The
-    // below-threshold back-half above now drains regardless of `enabled`,
-    // because it only advances an ALREADY-INITIATED guided sequence
-    // (`pendingPostCompactRestore` is set only after a /compact was sent — by
-    // auto above OR by the manual trigger). A disabled policy therefore still
-    // never STARTS a compaction (unchanged observable auto behavior for a
-    // constant policy), while a manual trigger's restore/audit half can finish
-    // via this single shared path even when auto-compaction is disabled.
+    // No new automatic compaction while disabled. An already-owed stage above uses
+    // drainPendingStage's existing operator-initiated manual exemption.
     if (!policy.enabled) {
       return { triggered: false, reason: "disabled" };
     }
@@ -742,6 +782,14 @@ export class ClaudeCompactionEnforcer {
     }
 
     let attempt = this.pendingPreCompactPrep.get(input.sessionName);
+    // A stopped attempt, automatic or manual, gives way to a fresh automatic one once the retry cooldown has passed. The
+    // cooldown keeps a seat that can't finish a map from getting a preparation prompt on every poll. Never retried: an
+    // explicit cancel, and an attempt whose /compact may have been submitted (its receipt was lost), which is never replayed.
+    if (attempt?.status === "stopped" && attempt.stoppedAt !== undefined && !attempt.cancelled && attempt.compact === "not_sent"
+      && this.now() - attempt.stoppedAt >= this.autoRetryAfterStopMs) {
+      this.pendingPreCompactPrep.delete(input.sessionName);
+      attempt = undefined;
+    }
     if (attempt?.mode === "manual") return { triggered: false, reason: "preparation_pending" };
     if (attempt?.status === "stopped") return { triggered: false, reason: "preparation_stopped" };
     if (!attempt) {
@@ -998,6 +1046,7 @@ export class ClaudeCompactionEnforcer {
       return { ok: false, reason };
     }
     attempt.compact = "submitted_unconfirmed";
+    if (attempt.controller.signal.aborted) return { ok: false, reason: attempt.reason };
     // Whatever the command could not carry, the restore request carries instead.
     if (skipMap || !composed.mapPathInCommand || !composed.instructionInCommand) {
       this.restoreCarry.set(input.sessionName, {
@@ -1006,7 +1055,6 @@ export class ClaudeCompactionEnforcer {
         ...(skipMap ? { skipMap: { mapPath: attempt.mapPath, marker: attempt.marker } } : {}),
       });
     } else this.restoreCarry.delete(input.sessionName);
-    if (attempt.controller.signal.aborted) return { ok: false, reason: attempt.reason };
     attempt.status = "compact-sent";
     this.lastAutoCompactAt.set(input.sessionName, this.now());
     this.triggeredAboveThreshold.add(input.sessionName);
@@ -1046,12 +1094,27 @@ export class ClaudeCompactionEnforcer {
   private stopPreparation(session: string, reason: string, expected?: PreparationAttempt): void {
     const attempt = this.pendingPreCompactPrep.get(session);
     if ((expected && expected !== attempt) || !attempt || attempt.status === "stopped" || attempt.status === "compact-sent") return;
-    attempt.status = "stopped"; attempt.reason = reason; attempt.controller.abort();
+    attempt.status = "stopped"; attempt.reason = reason; attempt.stoppedAt = this.now(); attempt.controller.abort();
     if (attempt.mode === "manual") this.setManualStage(session, "skipped-or-failed", reason);
   }
 
   cancelPreparation(session: string): PreparationState | null {
-    this.stopPreparation(session, "preparation_cancelled");
+    const attempt = this.pendingPreCompactPrep.get(session);
+    if (attempt) attempt.cancelled = true;
+    if (attempt?.status === "compact-sent" || this.pendingPostCompactRestore.has(session)) {
+      // Abandon management, not the provider command: keep its unconfirmed receipt and map.
+      // Do not clear automatic dedup/re-arm state or send any input. A later explicit retry
+      // still requires a new preparation and the live-pane idle check before /compact.
+      if (attempt) {
+        attempt.status = "stopped";
+        attempt.reason = "compaction_cancelled";
+        attempt.controller.abort();
+      }
+      this.pendingPostCompactRestore.delete(session);
+      this.pendingStageGeneration.delete(session);
+      this.restoreCarry.delete(session);
+      this.setManualStage(session, "cancelled", "compaction_cancelled");
+    } else this.stopPreparation(session, "preparation_cancelled");
     return this.getPreparationState(session);
   }
 
@@ -1059,7 +1122,7 @@ export class ClaudeCompactionEnforcer {
     this.reconcilePreparations();
     const attempt = this.pendingPreCompactPrep.get(session);
     if (!attempt) return null;
-    const { controller: _controller, sends: _sends, policyWasEnabled: _enabled, compactInstruction: _instruction, ...state } = attempt;
+    const { controller: _controller, sends: _sends, policyWasEnabled: _enabled, compactInstruction: _instruction, stoppedAt: _stoppedAt, cancelled: _cancelled, ...state } = attempt;
     return state;
   }
 

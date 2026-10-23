@@ -26,9 +26,9 @@ use:
 
 ```sh
 # Claude Code
-npx skills add https://github.com/mvschwarz/openrig/tree/v0.6.14/skills/rigs --skill rigs --agent claude-code
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.0/skills/rigs --skill rigs --agent claude-code
 # Codex
-npx skills add https://github.com/mvschwarz/openrig/tree/v0.6.14/skills/rigs --skill rigs --agent codex
+npx skills add https://github.com/mvschwarz/openrig/tree/v0.7.0/skills/rigs --skill rigs --agent codex
 ```
 
 Then type `/rigs` in Claude Code, or `$rigs` in Codex, and say what you want built. The skill has your agent tell
@@ -42,7 +42,7 @@ Already have OpenRig? Use the tag that matches `rig --version`, or upgrade first
 
 Prefer to type the commands yourself? [Install it yourself ↓](#install-it-yourself)
 
-Requires Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude Code or Codex account: one is enough, since the kernel operator adapts the shipped `starter` team to whichever you have. On Linux, the distribution's own Node.js can be older (Ubuntu 24.04's is 18); install a supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac with Apple silicon, use Node.js 22 ([compatibility history](docs/releases/v0.5.15.md#known-compatibility-limitation)). On a Mac where you aren't an administrator, or where Homebrew belongs to another account (its `brew install` is refused), install Node.js in your own home folder with [nvm](https://github.com/nvm-sh/nvm): run `touch ~/.zshrc` (a new Mac account has none, and nvm's installer only adds itself to a profile file that already exists), then the install command on nvm's page, open a new terminal, and run `nvm install 22`. That needs no administrator password, and `npm install -g` then installs into your nvm folder. On Windows, use WSL2, the Windows route OpenRig supports; native Windows isn't supported. OpenRig's automated tests don't run on WSL2 yet; see [one user's working setup](docs/reference/getting-started.md#wsl2-a-reported-working-setup).
+Requires Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude Code or Codex account: one is enough, since the kernel operator adapts the shipped `starter` team to whichever you have. On Linux, the distribution's own Node.js can be older (Ubuntu 24.04's is 18); install a supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac with Apple silicon, use Node.js 22 ([compatibility history](docs/releases/v0.5.15.md#known-compatibility-limitation)). On a Mac where you aren't an administrator, or where Homebrew belongs to another account (its `brew install` is refused), install Node.js in your own home folder with [nvm](https://github.com/nvm-sh/nvm): run `touch ~/.zshrc` (a new Mac account has none, and nvm's installer only adds itself to a profile file that already exists), then nvm's install command, for nvm v0.40.8 `curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.8/install.sh | bash` ([nvm's page](https://github.com/nvm-sh/nvm#install--update-script) has the newest), open a new terminal, and run `nvm install 22`. nvm itself needs no administrator password, and `npm install -g` then installs into your nvm folder. If nvm's installer says you need Apple's command line tools, run `xcode-select --install`, then its install command again. On Windows, use WSL2, the Windows route OpenRig supports; native Windows isn't supported. OpenRig's automated tests don't run on WSL2 yet; see [one user's working setup](docs/reference/getting-started.md#wsl2-a-reported-working-setup).
 
 > **What OpenRig changes on your machine**
 > - **Install:** `@openrig/cli` goes in globally with npm.
@@ -68,14 +68,14 @@ Requires Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude Co
 
 ### Install it yourself
 
-This runs OpenRig's install script from the `v0.6.14` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
+This runs OpenRig's install script from the `v0.7.0` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.14/scripts/install.sh | sh -s -- --dry-run
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.14/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.0/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.7.0/scripts/install.sh | sh
 ```
 
-If `rig setup` doesn't finish ready, for example because a provider isn't signed in yet, the script ends with `INSTALLED, SETUP NOT COMPLETE`: the CLI is installed, and `rig setup` lists what's left under "Some steps need attention". If the only items left are provider sign-ins, sign in to each selected provider as below and continue; run `rig setup` again rather than reinstalling the CLI.
+If a provider isn't signed in yet, the last step reports `FAILED [4/4]`, and `rig setup` lists the sign-in under "Some steps need attention". If the only remaining failures are provider sign-ins, the install steps finished; sign in to each selected provider as below and continue.
 
 **Or step by step:**
 
@@ -106,10 +106,11 @@ to an unused provider.
 ### Your agent opens OpenRig for you
 
 After installing, your agent opens the OpenRig TUI and the operator for you. To get back to them later, ask your
-agent for OpenRig or your agents in any words. After checking the selected login, it runs:
+agent for OpenRig or your agents in any words. After checking the selected login, it starts the daemon if it's stopped
+and opens the view:
 
 ```sh
-rig daemon start  # if stopped
+rig daemon start
 rig terminal open saved:kernel --window
 ```
 

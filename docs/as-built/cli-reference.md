@@ -165,16 +165,16 @@ the sections that were not read are `null`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig snapshot <rigId>` | — | `--intended-seats <ids>` |
-| `rig snapshot list <rigId>` | — | — |
+| `rig snapshot <rig>` | — | `--intended-seats <ids>` |
+| `rig snapshot list <rig>` | — | — |
 
 ### restore
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
 | `rig restore` | — | — |
-| `rig restore apply <snapshotId>` (hidden) | — | `--rig <rigId>` **required** |
-| `rig restore status <attemptId>` | — | `--rig <rigId>` **required**<br>`--json` |
+| `rig restore apply <snapshotId>` (hidden) | — | `--rig <rig>` **required** |
+| `rig restore status <attemptId>` | — | `--rig <rig>` **required**<br>`--json` |
 
 ### crash-cart
 
@@ -192,6 +192,16 @@ the sections that were not read are `null`.
 | `rig gateway human list` | — | `--json` |
 | `rig gateway human show <entityId>` | — | `--json` |
 | `rig gateway human set <entityId> <field> <value>` | — | `--reason <reason>`<br>`--actor <actor>` |
+| `rig gateway human mode` | — | — |
+| `rig gateway human mode save <entityId> <name>` | — | `--availability <value>`<br>`--expected-back <when>`<br>`--decision-room <words>`<br>`--exclude <item...>`<br>`--quiet <rule>`<br>`--tz <zone>`<br>`--account <where>`<br>`--actor <actor>`<br>`--json` |
+| `rig gateway human mode saved <entityId> [name]` | — | `--json` |
+| `rig gateway human mode apply <entityId> <name>` | — | `--until <time>`<br>`--tz <zone>`<br>`--actor <actor>`<br>`--json` |
+| `rig gateway human mode current <entityId>` | — | `--json` |
+| `rig gateway human mode end <entityId>` | — | `--scheduled`<br>`--actor <actor>`<br>`--json` |
+| `rig gateway human mode account <entityId> <applicationId>` | — | `--json` |
+| `rig gateway human mode room <entityId>` | — | `--json` |
+| `rig gateway human mode decide <qitemId>` | — | `--application <id>` **required**<br>`--choose <question=option...>`<br>`--reason <why>` **required**<br>`--reversible`<br>`--irreversible`<br>`--actor <actor>`<br>`--json` |
+| `rig gateway human mode decisions <entityId> <applicationId>` | — | `--json` |
 | `rig gateway human remove <entityId>` | — | `--force` |
 
 ### parked
@@ -204,7 +214,7 @@ the sections that were not read are `null`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig export <rigId>` | — | `-o, --output <path>` |
+| `rig export <rig>` | — | `-o, --output <path>` |
 
 ### import
 
@@ -301,13 +311,13 @@ the sections that were not read are `null`.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig archive <rigId>` | — | `--force`<br>`--json` |
+| `rig archive <rig>` | — | `--force`<br>`--json` |
 
 ### unarchive
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig unarchive <rigId>` | — | `--json` |
+| `rig unarchive <rig>` | — | `--json` |
 
 ### host
 
@@ -418,7 +428,7 @@ the sections that were not read are `null`.
 | `rig slack setup` | — | `--channel <id>`<br>`--inbound-destination <session>`<br>`--minimum-level-that-posts <level>`<br>`--minimum-level-that-interrupts <level>`<br>`--source-label <label>`<br>`--secrets-env-file <path>`<br>`--required-scopes <csv>`<br>`--reason <reason>`<br>`--actor <actor>` |
 | `rig slack status` | — | `--json` |
 | `rig slack manifest` | — | `--url`<br>`--json` |
-| `rig slack verify` | — | `--json`<br>`--reason <reason>`<br>`--actor <actor>` |
+| `rig slack verify` | — | `--json` |
 | `rig slack channel-map` | — | — |
 | `rig slack channel-map list` | — | `--json` |
 | `rig slack channel-map set <match> <channel>` | — | `--reason <reason>`<br>`--actor <actor>` |
@@ -712,9 +722,6 @@ Only Claude and Codex tenures can be woken.
 | `rig provider signals` | — | `--json`<br>`--provider <p>`<br>`--account <a>` |
 | `rig provider precheck` | — | `--seat <s>` **required**<br>`--to-account <a>` **required**<br>`--json` |
 | `rig provider switch` | — | `--seat <s>` **required**<br>`--to-account <a>` **required**<br>`--force-unsafe`<br>`--json` |
-| `rig provider moves` | — | `--home <home>`<br>`--seat <seat>`<br>`--limit <n>`<br>`--json` |
-| `rig provider moves show` | `<id>` | `--json` |
-| `rig provider moves record` | — | `--file <path>` **required**<br>`--operator <name>`<br>`--json` |
 
 ### usage
 
@@ -758,7 +765,7 @@ Only Claude and Codex tenures can be woken.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig expand <rig-id> <pod-fragment-path>` | — | `--json`<br>`--rig-root <path>` |
+| `rig expand <rig> <pod-fragment-path>` | — | `--json`<br>`--rig-root <path>` |
 
 ### add
 
@@ -803,7 +810,7 @@ Only Claude and Codex tenures can be woken.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig release <rigId>` | — | `--delete`<br>`--json` |
+| `rig release <rig>` | — | `--delete`<br>`--json` |
 
 ### launch
 
@@ -821,7 +828,7 @@ Only Claude and Codex tenures can be woken.
 
 | Invocation | Aliases | Declared options |
 |---|---|---|
-| `rig shrink <rigId> <podRef>` | — | `--fallback <live-seat>`<br>`--json` |
+| `rig shrink <rig> <podRef>` | — | `--fallback <live-seat>`<br>`--json` |
 
 ### destroy
 
