@@ -47,7 +47,7 @@ The skill diff (`factory-loop-dispatch-rewrite-skill.diff`) makes four changes t
    the advisor seat (`PHASE=enrich`). `/codex-second-opinion` runs there as part of it.
 3. **Inline fallbacks become block and retry.** The implement, advisor and review dispatch steps
    no longer run the skill in the orchestrator when a seat is missing or no topology exists. The
-   ticket moves to `blocked` for that phase (`block_phase: implementing | validating | reviewing`),
+   ticket moves to `blocked` for that phase (`block_phase: planning | validating | reviewing`; `planning` because no dispatch or worktree exists yet), parks the row with `--wake-after 15m` and a manual-unblock note,
    the orchestrator reports to the human, and the dispatch retries on the next wake. The phase-gate
    stays mandatory for non-AUTO tickets. A stable budget needs this: an inline run puts the full
    skill body back into the orchestrator and defeats the change (Codex finding).

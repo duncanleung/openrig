@@ -1,5 +1,5 @@
 --- a/factory-loop/SKILL.md	2026-10-23 02:47:56
-+++ b/factory-loop/SKILL.md	2026-10-23 02:48:25
++++ b/factory-loop/SKILL.md	2026-10-23 03:17:02
 @@ -43,9 +43,9 @@
                                              │           └──────────────────────────┘
                                              │
@@ -35,11 +35,11 @@
  
 -### 5. Skill availability
 +### 5. Seat availability
- 
--Verify `/ticket-loop`, `/pr-review-lifecycle`, and `/phase-gate` are available. Check:
++
 +The seats run `/ticket-loop`, `/pr-review-lifecycle` and `/phase-gate`, so the orchestrator does
 +not need the skill files. Verify the seats exist. Do NOT call the `Skill` tool to test a skill.
-+
+ 
+-Verify `/ticket-loop`, `/pr-review-lifecycle`, and `/phase-gate` are available. Check:
  ```bash
 -ls ~/.claude/skills/ticket-loop/SKILL.md 2>/dev/null && echo "ticket-loop: available"
 -ls ~/Documents/Develop/openrig/packages/daemon/assets/plugins/openrig-core/skills/pr-review-lifecycle/SKILL.md 2>/dev/null && echo "pr-review-lifecycle: available"
@@ -53,18 +53,22 @@
  
  ### 6. Configuration file (auto-generate if missing)
  
-@@ -974,8 +980,8 @@
+@@ -972,10 +978,10 @@
+ IMPLEMENT_SEAT="${TOPOLOGY_IMPLEMENT_SEAT}@${RIG_NAME}"
+ 
  # Verify seat exists and is responsive
- SEAT_STATUS=$(rig whoami --json 2>/dev/null | jq -r --arg s "${TOPOLOGY_IMPLEMENT_SEAT}" '.peers[] | select(.name == $s) | .status')
- if [ -z "$SEAT_STATUS" ]; then
+-SEAT_STATUS=$(rig whoami --json 2>/dev/null | jq -r --arg s "${TOPOLOGY_IMPLEMENT_SEAT}" '.peers[] | select(.name == $s) | .status')
+-if [ -z "$SEAT_STATUS" ]; then
 -  echo "WARN: implement seat ${IMPLEMENT_SEAT} not found — falling back to inline dispatch"
 -  # Fall through to single-seat mode below
++SEAT_FOUND=$(rig whoami --json 2>/dev/null | jq -r --arg s "${IMPLEMENT_SEAT}" '.peers[] | select(.sessionName == $s) | .sessionName')
++if [ -z "$SEAT_FOUND" ]; then
 +  echo "BLOCKED: implement seat ${IMPLEMENT_SEAT} not found — do not run /ticket-loop inline"
-+  # Transition to blocked (block_phase: implementing). Retry the dispatch after the seat returns.
++  # Transition to blocked (block_phase: planning) and park with a retry wake (see below).
  fi
  ```
  
-@@ -1053,14 +1059,12 @@
+@@ -1053,14 +1059,22 @@
  The orchestrator does not poll continuously. It waits for input (the result message) and runs
  the lease check only at the heartbeat interval.
  
@@ -73,18 +77,26 @@
  
 -```
 -/ticket-loop ${TICKET_ID}
--```
--
++Do NOT run `/ticket-loop` inline. An inline run loads the full skill body into the orchestrator and
++keeps it there through compaction. Transition to `blocked` with `block_phase: planning` (no
++dispatch happened and no worktree exists, so recovery re-dispatches `/ticket-loop`). Park the queue
++item with a retry wake and report "implement seat unavailable" to the human:
++
++```bash
++rig queue block ${QITEM_ID} \
++  --on "external:seat-available:${TOPOLOGY_IMPLEMENT_SEAT}" \
++  --continuation "retry /ticket-loop dispatch for ${TICKET_ID} when ${TOPOLOGY_IMPLEMENT_SEAT} returns" \
++  --wake-after 15m
+ ```
+ 
 -Runs inline. The full output stays in the orchestrator's context. This works for single-ticket
 -runs but limits multi-ticket runs due to context pressure.
-+Do NOT run `/ticket-loop` inline. An inline run loads the full skill body into the orchestrator and
-+keeps it there through compaction. Transition to `blocked` with `block_phase: implementing`, report
-+"implement seat unavailable" to the human, and retry the dispatch (re-check
-+`rig whoami --json`) on the next wake.
++When the wake fires, re-check `rig whoami --json` and re-dispatch. To resume sooner, the human
++unblocks the row with `rig queue update ${QITEM_ID} --state in-progress`.
  
  **Processing the result (both modes):**
  
-@@ -1172,28 +1176,36 @@
+@@ -1172,28 +1186,36 @@
  HEAD_SHA=$(gh pr view ${PR_NUMBER} --repo ${GH_REPO} --json headRefOid --jq '.headRefOid')
  ```
  
@@ -118,7 +130,7 @@
  
 +**No advisor seat (not configured, or missing):** Do NOT run `/phase-gate` or a validator inline.
 +Transition to `blocked` with `block_phase: validating`, report "advisor seat unavailable" to the
-+human, and retry the dispatch on the next wake. The gate stays mandatory. An inline run would load
++human. Park the queue item with `rig queue block ${QITEM_ID} --on "external:seat-available:${TOPOLOGY_ADVISOR_SEAT}" --continuation "retry gate dispatch for ${TICKET_ID}" --wake-after 15m`, and retry the dispatch when the wake fires. The human can unblock sooner with `rig queue update ${QITEM_ID} --state in-progress`. The gate stays mandatory. An inline run would load
 +the skill body into the orchestrator and would also remove the seat boundary.
 +
  **Wait-for-result procedure:** Same as Steps 2c and 2f — poll every 60s, run lease checks. If the
@@ -134,7 +146,7 @@
  
  | Gate result | Action |
  |-------------|--------|
-@@ -1227,13 +1239,17 @@
+@@ -1227,13 +1249,30 @@
  `ADVISOR_RESULT` for non-AUTO tickets. If the advisor seat is unavailable, the orchestrator blocks
  — it does not skip validation. This is a mandatory gate, not an optional check.
  
@@ -152,13 +164,26 @@
  
 +**Enrichment (`/ticket-enrich`) follows the same rule.** The orchestrator never calls the `Skill`
 +tool for `/ticket-enrich` or `/codex-second-opinion`. To enrich a ticket, send
-+`/ticket-enrich ${TICKET_ID}` to the advisor seat with `rig send` and park (`PHASE=enrich`). The
-+seat writes the `## Approach` section into the ticket and reports one line.
++`/ticket-enrich ${TICKET_ID}` to the advisor seat with `rig send` and park (`PHASE=enrich`):
++
++```bash
++rig send ${ADVISOR_SEAT} "/ticket-enrich ${TICKET_ID}
++
++Write the result into the ticket's ## Approach section. Do not implement.
++
++When complete, report back to the orchestrator with EXACTLY this format:
++rig send orch-lead@${RIG_NAME} \"ENRICH_RESULT: ticket=${TICKET_ID} outcome=<enriched|failed> mode=<research|debate|compare|validate> approach_written=<yes|no> error=<reason|null>\"
++"
++```
++
++When `ENRICH_RESULT` arrives, unpark first
++(`rig queue update ${QITEM_ID} --state in-progress --note "result: enrich ${OUTCOME}"`).
++If the advisor seat is missing, block and retry as in Step 2e.
 +
  ---
  
  ### 2f — Dispatch review (state: `reviewing`)
-@@ -1309,10 +1325,11 @@
+@@ -1309,10 +1348,13 @@
  crash. If the review seat goes idle without reporting, transition to `blocked` with
  `block_phase: reviewing`.
  
@@ -168,12 +193,14 @@
 -Invoke `/pr-review-lifecycle` inline starting from Step 2 (check review status) with the PR
 -number. The lifecycle skill's decision matrix determines next actions.
 +Do NOT run `/pr-review-lifecycle` or `/code-review-dual` inline. Transition to `blocked` with
-+`block_phase: reviewing`, report "review seat unavailable" to the human, and retry the dispatch on
-+the next wake.
++`block_phase: reviewing`, report "review seat unavailable" to the human, and park with
++`rig queue block ${QITEM_ID} --on "external:seat-available:${TOPOLOGY_REVIEW_SEAT}" --continuation "retry review dispatch for ${TICKET_ID}" --wake-after 15m`.
++Retry the dispatch when the wake fires. The human can unblock sooner with
++`rig queue update ${QITEM_ID} --state in-progress`.
  
  **Merge-stop contract (both modes):** When invoked from `/factory-loop`, the review evaluates
  merge readiness (Steps 5a–5d) but **does not execute Step 5e** (the merge command). The review
-@@ -1321,8 +1338,7 @@
+@@ -1321,8 +1363,7 @@
  human approval (or after confirming the merge policy permits auto-merge for this ticket's
  classification and advisor outcome).
  
@@ -183,7 +210,7 @@
  
  This is a composition boundary, not a logic override. The review still evaluates all five merge
  conditions. The factory loop adds the sixth condition: recorded human approval (or policy-based
-@@ -1330,7 +1346,7 @@
+@@ -1330,7 +1371,7 @@
  
  ### 2f — Handle review result
  
@@ -192,7 +219,7 @@
  
  | `outcome` field | State transition | Action |
  |-----------------|-----------------|--------|
-@@ -1780,11 +1796,10 @@
+@@ -1780,11 +1821,10 @@
  **When:** `TICKET_LOOP_RESULT` arrives with `classification=ADJUDICATE_LIGHT` or
  `classification=ADJUDICATE_HEAVY`. AUTO-classified tickets skip this gate.
  
@@ -208,7 +235,7 @@
  
  **Why mandatory.** In human-out-of-the-loop autonomous operation, the implementation seat plans
  and builds the first approach it finds. `/phase-gate` provides an independent second opinion via
-@@ -1955,9 +1970,9 @@
+@@ -1955,9 +1995,9 @@
      │   (includes /phase-gate pre-implement)   │                   │
      │◀── TICKET_LOOP_RESULT ──│                │                   │
      │                         │                │                   │
@@ -221,7 +248,7 @@
      │◀── GATE_RESULT ─────────────────────────-│  gate:validation) │
      │                         │                │                   │
      │── rig send /code-review-dual ───────────────────────────────▶│
-@@ -1979,7 +1994,7 @@
+@@ -1979,7 +2019,7 @@
  GATE_RESULT: subject=<ID> boundary=post-implement result=<PASS|FAIL|WARN> findings=<N> high=<N> blocking=<N> validator=<skill> qitem=<gate_qitem_id|null> note=<one-line>
  ```
  
@@ -230,14 +257,19 @@
  production. The orchestrator receives the gate result and uses `result` to determine the
  state transition (see Step 2e).
  
-@@ -2001,11 +2016,13 @@
- SEAT_STATUS=$(rig whoami --json 2>/dev/null | jq -r --arg s "${SEAT_NAME}" '.peers[] | select(.name == $s) | .status')
+@@ -1998,14 +2038,17 @@
+ **Seat availability check:** Before dispatching to a named seat, verify it exists:
+ 
+ ```bash
+-SEAT_STATUS=$(rig whoami --json 2>/dev/null | jq -r --arg s "${SEAT_NAME}" '.peers[] | select(.name == $s) | .status')
++SEAT_FOUND=$(rig whoami --json 2>/dev/null | jq -r --arg s "${SEAT_NAME}@${RIG_NAME}" '.peers[] | select(.sessionName == $s) | .sessionName')
  ```
  
 -If the seat is unavailable, fall back to running in the current session (single-seat mode) and
 -log a warning.
-+If the seat is unavailable, transition the ticket to `blocked` for the current phase, log a
-+warning, and retry the dispatch on the next wake. Do NOT run the seat's skill in the current
++If `SEAT_FOUND` is empty, the seat is unavailable. Transition the ticket to `blocked` for the
++current phase (`planning` when nothing was dispatched yet), park the row with a `--wake-after`
++retry as in Step 2e, and log a warning. Do NOT run the seat's skill in the current
 +session: that loads the skill body into the orchestrator's context and keeps it there through
 +compaction (RIG-128).
  
