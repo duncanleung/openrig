@@ -57,6 +57,7 @@ import { workflowResumeSchema } from "./migrations/051_workflow_resume.js";
 import { workflowInstanceBoundRigSchema } from "./migrations/052_workflow_instance_bound_rig.js";
 import { sessionsNodeIdIndexSchema } from "./migrations/053_sessions_node_id_index.js";
 import { queueTransitionsArchiveSchema } from "./migrations/054_queue_transitions_archive.js";
+import { seatEnvSchema } from "./migrations/111_seat_env.js";
 import { nodePermissionPolicySchema } from "./migrations/055_node_permission_policy.js";
 import { rigPermissionPolicySchema } from "./migrations/056_rig_permission_policy.js";
 import { nodePolicyProvenanceSchema } from "./migrations/057_node_policy_provenance.js";
@@ -95,33 +96,30 @@ import { classificationIdentityProvenanceSchema } from "./migrations/089_classif
 import { humanReplyToSchema } from "./migrations/090_human_reply_to.js";
 import { humanQuestionsSchema } from "./migrations/091_human_questions.js";
 import { nodeEffortSchema } from "./migrations/092_node_effort.js";
+import { nodeEffortChoiceSchema } from "./migrations/104_node_effort_choice.js";
 import { usageSamplesLatestIndexesSchema } from "./migrations/094_usage_samples_latest_indexes.js";
-import { rigNonInterruptiveSchema } from "./migrations/095_rig_non_interruptive.js";
-import { nodeRuntimeFallbackSchema } from "./migrations/090_node_runtime_fallback.js";
-import { nodeFallbackExpiresAtSchema } from "./migrations/091_node_fallback_expires_at.js";
-import { sessionDigestsSchema } from "./migrations/096_session_digests.js";
-import { reviewRunsSchema } from "./migrations/097_review_runs.js";
-import { reviewFindingsSchema } from "./migrations/098_review_findings.js";
-import { dailyTokenSnapshotsSchema } from "./migrations/099_daily_token_snapshots.js";
-import { digestTokenUsageSchema } from "./migrations/100_digest_token_usage.js";
-import { digestEscalationCountSchema } from "./migrations/101_digest_escalation_count.js";
-import { digestSessionTimestampsSchema } from "./migrations/102_digest_session_timestamps.js";
-import { digestSkillInvocationsSchema } from "./migrations/103_digest_skill_invocations.js";
-import { ticketAdmissionsSchema } from "./migrations/104_ticket_admissions.js";
-import { ticketFactoryControlSchema } from "./migrations/105_ticket_factory_control.js";
-import { ticketFactoryCutoverSchema } from "./migrations/106_ticket_factory_cutover.js";
-import { cronJobsSchema } from "./migrations/107_cron_jobs.js";
-import { digestStallPatternsSchema } from "./migrations/108_session_digest_stall_patterns.js";
-import { reviewSuppressRulesSchema } from "./migrations/109_review_suppress_rules.js";
 import type { Migration } from "./migrate.js";
 
+import { rigNonInterruptiveSchema } from "./migrations/095_rig_non_interruptive.js";
 import { rigInstallRootSchema } from "./migrations/096_rig_install_root.js";
 import { threadPartMapSchema } from "./migrations/097_thread_part_map.js";
 import { queueTransitionsQitemIdOrderSchema } from "./migrations/098_queue_transitions_qitem_id_order.js";
 import { queueItemsRecoveryTagsSchema } from "./migrations/099_queue_items_recovery_tags.js";
+import { typingGuardModesSchema } from "./migrations/100_typing_guard_modes.js";
 import { resumeRotationSchema } from "./migrations/101_claude_resume_rotation.js";
+import { sessionStopIntentSchema } from "./migrations/103_session_stop_intent.js";
+import { usageSamplesClientCostSchema } from "./migrations/105_usage_samples_client_cost.js";
+import { piUsageEntriesSchema } from "./migrations/107_pi_usage_entries.js";
+import { piUsageChargesSchema } from "./migrations/108_pi_usage_charges.js";
+import { modePostureCoexistSchema } from "./migrations/109_mode_posture_coexist.js";
+import { workflowInstanceScopeSchema } from "./migrations/110_workflow_instance_scope.js";
+import { queueTransitionsTsQitemSchema } from "./migrations/112_queue_transitions_ts_qitem.js";
+import { appliedLaunchDaemonOptOutSchema } from "./migrations/113_applied_launch_daemon_opt_out.js";
+import { sessionAgentAppSchema as sessionCommunityHarnessSchema } from "./migrations/114_session_agent_app.js";
+import { threadSeatMapChannelKeySchema } from "./migrations/115_thread_seat_map_channel_key.js";
 
 /** Ordered migrations; numbers may be reserved by independent changes. */
+
 export const ALL_MIGRATIONS: Migration[] = [
   coreSchema,
   bindingsSessionsSchema,
@@ -217,25 +215,22 @@ export const ALL_MIGRATIONS: Migration[] = [
   nodeEffortSchema,
   usageSamplesLatestIndexesSchema,
   rigNonInterruptiveSchema,
-  nodeRuntimeFallbackSchema,
-  nodeFallbackExpiresAtSchema,
   rigInstallRootSchema,
   threadPartMapSchema,
   queueTransitionsQitemIdOrderSchema,
-  sessionDigestsSchema,
-  reviewRunsSchema,
-  reviewFindingsSchema,
-  dailyTokenSnapshotsSchema,
-  digestTokenUsageSchema,
-  digestEscalationCountSchema,
   queueItemsRecoveryTagsSchema,
+  typingGuardModesSchema,
   resumeRotationSchema,
-  digestSessionTimestampsSchema,
-  digestSkillInvocationsSchema,
-  ticketAdmissionsSchema,
-  ticketFactoryControlSchema,
-  ticketFactoryCutoverSchema,
-  cronJobsSchema,
-  digestStallPatternsSchema,
-  reviewSuppressRulesSchema,
+  sessionStopIntentSchema,
+  nodeEffortChoiceSchema,
+  usageSamplesClientCostSchema,
+  piUsageEntriesSchema,
+  piUsageChargesSchema,
+  modePostureCoexistSchema,
+  workflowInstanceScopeSchema,
+  seatEnvSchema,
+  queueTransitionsTsQitemSchema,
+  appliedLaunchDaemonOptOutSchema,
+  sessionCommunityHarnessSchema,
+  threadSeatMapChannelKeySchema,
 ];

@@ -11,13 +11,13 @@ import type {
   ValidationResult,
   WorkspaceSpec,
   WorkspaceRepoSpec,
-  ValidationGateConfigSpec,
 } from "./types.js";
 import { WORKSPACE_KINDS } from "./types.js";
 import { validateSafePath } from "./path-safety.js";
 import { CLAUDE_MANAGED_BLOCK_FILES } from "./managed-blocks.js";
 import { canonicalCompactionStrategy, canonicalContinuityMechanic } from "./agent-manifest.js";
 import { aliasModelPinAdvisory } from "./spec-validation-advisory.js";
+import { normalizeSeatEnv, validateSeatEnv } from "./seat-env.js";
 import { validatePermissionPolicyRef } from "./permission-policy/policy-ref.js";
 import { validateStartupBlock, normalizeStartupBlock } from "./startup-validation.js";
 import { COMPOSE_PROJECT_NAME_PATTERN, deriveComposeProjectName } from "./compose-project-name.js";
@@ -47,13 +47,13 @@ const VALID_WORKSPACE_KINDS = new Set<string>(WORKSPACE_KINDS as readonly string
 
 const RIG_KEYS = new Set([
   "version", "name", "summary", "culture_file", "permission_policy", "managed_blocks", "docs",
-  "startup", "services", "workspace", "pods", "edges", "non_interruptive", "validation_gate",
+  "startup", "services", "workspace", "pods", "edges", "non_interruptive", "env",
 ]);
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
 const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
   "model", "effort", "role", "permission_policy", "cwd", "restore_policy",
-  "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref",
+  "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env",
 ]);
 const EDGE_KEYS = new Set(["kind", "from", "to"]);
 
@@ -181,15 +181,13 @@ export class RigSpecSchema {
       errors.push("non_interruptive: must be a boolean");
     }
 
+    // Launch environment for every seat in the rig; a member's own env overrides it.
+    if (obj["env"] !== undefined) errors.push(...validateSeatEnv(obj["env"], "env"));
+
     // #25: optional per-runtime managed-block destination. Only claude-code is
     // configurable in this release; Codex stays on AGENTS.md.
     if (obj["managed_blocks"] !== undefined) {
       errors.push(...validateManagedBlocks(obj["managed_blocks"]));
-    }
-
-    // RIG-77: optional validation_gate block
-    if (obj["validation_gate"] !== undefined && obj["validation_gate"] !== null) {
-      errors.push(...validateValidationGateBlock(obj["validation_gate"] as Record<string, unknown>, "validation_gate"));
     }
 
     // pods: required array
@@ -262,12 +260,12 @@ export class RigSpecSchema {
       cultureFile: raw["culture_file"] as string | undefined,
       permissionPolicy: raw["permission_policy"] as string | undefined,
       nonInterruptive: raw["non_interruptive"] as boolean | undefined,
+      env: normalizeSeatEnv(raw["env"]),
       managedBlocks: raw["managed_blocks"] as RigSpec["managedBlocks"],
       docs,
       startup: raw["startup"] ? normalizeStartupBlock(raw["startup"]) : undefined,
       services: raw["services"] ? normalizeServicesBlock(raw["services"], raw["name"] as string) : undefined,
       workspace: raw["workspace"] ? this.normalizeWorkspace(raw["workspace"]) : undefined,
-      validationGate: raw["validation_gate"] ? normalizeValidationGate(raw["validation_gate"] as Record<string, unknown>) : undefined,
       pods,
       edges,
     };
@@ -534,6 +532,8 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
     }
   }
 
+  if (member["env"] !== undefined) errors.push(...validateSeatEnv(member["env"], `${prefix}.env`));
+
   // Terminal sentinel validation: exact triple required
   const isTerminalRuntime = member["runtime"] === "terminal";
   const isTerminalRef = member["agent_ref"] === "builtin:terminal";
@@ -609,11 +609,6 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
     ));
   }
 
-  // RIG-43: fallback block validation
-  if (member["fallback"] !== undefined) {
-    errors.push(...validateFallbackSpec(member["fallback"], `${prefix}.fallback`));
-  }
-
   return errors;
 }
 
@@ -655,44 +650,6 @@ function validateStarterRef(
       errors.push(`${prefix}: starter_ref + session_source.mode="fork" composition is rejected in v0 (the v1+ "Real native-fork-from-registered-thread-id starter proof" trigger covers that combination); use either starter_ref alone or session_source.mode="rebuild" for artifact-additive composition`);
     }
   }
-  return errors;
-}
-
-// RIG-43: validate the fallback: block on a member.
-function validateFallbackSpec(raw: unknown, prefix: string): string[] {
-  const errors: string[] = [];
-  if (raw === null || typeof raw !== "object") {
-    errors.push(`${prefix}: must be an object`);
-    return errors;
-  }
-  const fb = raw as Record<string, unknown>;
-
-  const runtime = fb["runtime"];
-  if (typeof runtime !== "string" || runtime.trim() === "") {
-    errors.push(`${prefix}.runtime: required non-empty string`);
-  }
-
-  const model = fb["model"];
-  if (model !== undefined && (typeof model !== "string" || model.trim() === "")) {
-    errors.push(`${prefix}.model: must be a non-empty string when present`);
-  }
-
-  const on = fb["on"];
-  if (!Array.isArray(on) || on.length === 0) {
-    errors.push(`${prefix}.on: required non-empty array; v1 supports ["usage_limit"]`);
-  } else {
-    for (const trigger of on) {
-      if (trigger !== "usage_limit") {
-        errors.push(`${prefix}.on: unsupported trigger "${String(trigger)}"; v1 supports "usage_limit" only`);
-      }
-    }
-  }
-
-  const swapBack = fb["swap_back"];
-  if (swapBack !== "at_expiry" && swapBack !== "manual") {
-    errors.push(`${prefix}.swap_back: required; must be "at_expiry" or "manual" (got ${JSON.stringify(swapBack)})`);
-  }
-
   return errors;
 }
 
@@ -943,6 +900,7 @@ function validateServicesBlock(raw: unknown, prefix: string): string[] {
 }
 
 function validateWaitTarget(raw: Record<string, unknown>, index: number, prefix: string): string[] {
+  if (!isMapping(raw)) return [`${prefix}.wait_for[${index}]: must be an object`];
   const errors: string[] = [];
   const targetPrefix = `${prefix}.wait_for[${index}]`;
   const hasService = typeof raw["service"] === "string" && raw["service"];
@@ -982,6 +940,10 @@ function validateSurfaces(raw: unknown, prefix: string): string[] {
     } else {
       for (let i = 0; i < (obj["urls"] as unknown[]).length; i++) {
         const url = (obj["urls"] as Record<string, unknown>[])[i]!;
+        if (!isMapping(url)) {
+          errors.push(`${prefix}.surfaces.urls[${i}]: must be an object`);
+          continue;
+        }
         if (!url["name"] || typeof url["name"] !== "string") {
           errors.push(`${prefix}.surfaces.urls[${i}].name: required non-empty string`);
         }
@@ -998,6 +960,10 @@ function validateSurfaces(raw: unknown, prefix: string): string[] {
     } else {
       for (let i = 0; i < (obj["commands"] as unknown[]).length; i++) {
         const command = (obj["commands"] as Record<string, unknown>[])[i]!;
+        if (!isMapping(command)) {
+          errors.push(`${prefix}.surfaces.commands[${i}]: must be an object`);
+          continue;
+        }
         if (!command["name"] || typeof command["name"] !== "string") {
           errors.push(`${prefix}.surfaces.commands[${i}].name: required non-empty string`);
         }
@@ -1018,6 +984,10 @@ function validateCheckpointHooks(raw: unknown, prefix: string): string[] {
   const errors: string[] = [];
   for (let i = 0; i < raw.length; i++) {
     const hook = raw[i] as Record<string, unknown>;
+    if (!isMapping(hook)) {
+      errors.push(`${prefix}.checkpoints[${i}]: must be an object`);
+      continue;
+    }
     if (!hook["id"] || typeof hook["id"] !== "string") {
       errors.push(`${prefix}.checkpoints[${i}].id: required non-empty string`);
     }
@@ -1136,17 +1106,6 @@ function validateContinuityPolicy(raw: unknown, prefix: string): string[] {
 
 // -- Normalization helpers --
 
-function normalizeFallbackSpec(raw: unknown): import("./types.js").FallbackSpec | undefined {
-  if (raw === null || typeof raw !== "object") return undefined;
-  const fb = raw as Record<string, unknown>;
-  const runtime = typeof fb["runtime"] === "string" ? fb["runtime"] : undefined;
-  if (!runtime) return undefined;
-  const model = typeof fb["model"] === "string" ? fb["model"] : undefined;
-  const on = Array.isArray(fb["on"]) ? (fb["on"] as unknown[]).filter((t): t is "usage_limit" => t === "usage_limit") : [];
-  const swapBack = fb["swap_back"] === "manual" ? "manual" as const : "at_expiry" as const;
-  return { runtime, ...(model ? { model } : {}), on, swapBack };
-}
-
 function normalizeStarterRef(raw: unknown): import("./types.js").StarterRefSpec | undefined {
   if (raw === null || typeof raw !== "object") return undefined;
   const sr = raw as Record<string, unknown>;
@@ -1208,6 +1167,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     effort: typeof m["effort"] === "string" && m["effort"].trim() ? m["effort"].trim() : undefined,
     role: m["role"] as string | undefined,
     permissionPolicy: m["permission_policy"] as string | undefined,
+    env: normalizeSeatEnv(m["env"]),
     cwd: m["cwd"] as string,
     restorePolicy: m["restore_policy"] as string | undefined,
     // OPR.0.5.6.20 A5 — aliases normalize at ingestion; absent stays undefined so the
@@ -1221,7 +1181,6 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     startup: m["startup"] ? normalizeStartupBlock(m["startup"]) : undefined,
     sessionSource: normalizeSessionSource(m["session_source"]),
     starterRef: normalizeStarterRef(m["starter_ref"]),
-    fallback: normalizeFallbackSpec(m["fallback"]),
   }));
 
   const edges = Array.isArray(raw["edges"])
@@ -1399,40 +1358,4 @@ export class LegacyRigSpecSchema {
       edges,
     };
   }
-}
-
-/** RIG-77 — validate the optional validation_gate block. */
-function validateValidationGateBlock(obj: Record<string, unknown>, prefix: string): string[] {
-  const errors: string[] = [];
-  const mode = obj["mode"];
-  if (mode !== undefined && mode !== "off" && mode !== "warn" && mode !== "enforce") {
-    errors.push(`${prefix}.mode: must be "off", "warn", or "enforce"`);
-  }
-  const validators = obj["validators"];
-  if (validators !== undefined) {
-    if (!Array.isArray(validators) || validators.some((v) => typeof v !== "string")) {
-      errors.push(`${prefix}.validators: must be an array of strings`);
-    }
-  }
-  const implSeats = obj["impl_seats"];
-  if (implSeats !== undefined) {
-    if (!Array.isArray(implSeats) || implSeats.some((s) => typeof s !== "string")) {
-      errors.push(`${prefix}.impl_seats: must be an array of strings`);
-    }
-  }
-  const warnUntil = obj["warn_until"];
-  if (warnUntil !== undefined && typeof warnUntil !== "string") {
-    errors.push(`${prefix}.warn_until: must be an ISO date string`);
-  }
-  return errors;
-}
-
-/** RIG-77 — normalize the YAML validation_gate block into typed ValidationGateConfigSpec. */
-function normalizeValidationGate(raw: Record<string, unknown>): ValidationGateConfigSpec {
-  return {
-    mode: (raw["mode"] as ValidationGateConfigSpec["mode"]) ?? "warn",
-    validators: (raw["validators"] as string[]) ?? [],
-    impl_seats: (raw["impl_seats"] as string[]) ?? [],
-    warn_until: raw["warn_until"] as string | undefined,
-  };
 }

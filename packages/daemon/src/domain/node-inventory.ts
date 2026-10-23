@@ -19,7 +19,11 @@ import { findLatestUsableSnapshot, findLatestUsableSnapshotsForAllRigs } from ".
 import { resolveNodeWorkspace } from "./workspace/workspace-resolver.js";
 import { deriveCanonicalSessionName } from "./session-name.js";
 import { buildNativeResumeCommand, buildCodexResumeCore } from "./native-resume-probe.js";
+import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { tmuxAttachCommand } from "../adapters/tmux-server.js";
+import { communityHarnessLabel } from "./community-harness-presets.js";
+import { communityHarnessOf } from "./built-in-runtimes.js";
+import { sessionCommunityHarnessSelect } from "./session-registry.js";
 
 // -- Row types for SQL results --
 
@@ -57,11 +61,14 @@ interface InventoryRow {
   session_name: string | null;
   session_created_at: string | null;
   session_status: string | null;
+  session_community_harness?: string | null;
+  intentionally_stopped: number | null;
   startup_status: string | null;
   resume_type: string | null;
   resume_token: string | null;
   startup_completed_at: string | null;
   binding_attachment_type: string | null;
+  binding_id: string | null;
   binding_tmux_pane: string | null;
 }
 
@@ -97,9 +104,12 @@ interface BindingRow {
 
 // -- Helpers --
 
-function computeResumeCommand(runtime: string | null, resumeToken: string | null, codexConfigProfile?: string | null): string | null {
-  return buildNativeResumeCommand(runtime, resumeToken, null, codexConfigProfile);
+function computeResumeCommand(runtime: string | null, resumeToken: string | null, codexConfigProfile?: string | null, codexDaemonOptOut?: boolean): string | null {
+  return buildNativeResumeCommand(runtime, resumeToken, null, codexConfigProfile, codexDaemonOptOut);
 }
+
+const CODEX_DAEMON_CHOICE_NOT_RECORDED = "Not recorded whether this seat's last managed launch used --no-daemon. If `codex --help` lists --no-daemon, "
+  + "add it right after `codex`, as the managed launch does.";
 
 function computeRecoveryGuidance(input: {
   runtime: string | null;
@@ -107,8 +117,10 @@ function computeRecoveryGuidance(input: {
   cwd: string | null;
   sessionName: string | null;
   codexConfigProfile?: string | null;
+  /** Codex: the current generation's recorded daemon choice; undefined when none was recorded. */
+  codexDaemonOptOut?: boolean;
 }): NodeRecoveryGuidance | null {
-  const { runtime, resumeToken, cwd, sessionName, codexConfigProfile } = input;
+  const { runtime, resumeToken, cwd, sessionName, codexConfigProfile, codexDaemonOptOut } = input;
 
   if (runtime === "claude-code") {
     const commands: string[] = [];
@@ -141,14 +153,15 @@ function computeRecoveryGuidance(input: {
     const commands: string[] = [];
     const notes: string[] = [];
 
+    const daemonOptOut = codexDaemonOptOut === true;
     if (resumeToken) {
-      commands.push(buildCodexResumeCore(resumeToken, codexConfigProfile));
+      commands.push(buildCodexResumeCore(resumeToken, codexConfigProfile, undefined, undefined, undefined, undefined, undefined, daemonOptOut));
     }
     if (cwd) {
       commands.push(`cd ${cwd}`);
     }
     if (!resumeToken) {
-      commands.push(buildCodexResumeCore("", codexConfigProfile, true));
+      commands.push(buildCodexResumeCore("", codexConfigProfile, true, undefined, undefined, undefined, undefined, daemonOptOut));
     }
 
     notes.push("Use workspace and recent prompt text to identify the right conversation.");
@@ -158,11 +171,14 @@ function computeRecoveryGuidance(input: {
     if (sessionName) {
       notes.push(`If the identity anchor was captured, the picker may include: ${sessionName}`);
     }
+    if (codexDaemonOptOut === undefined) {
+      notes.push(CODEX_DAEMON_CHOICE_NOT_RECORDED);
+    }
 
     return {
       summary: resumeToken
         ? "Try native Codex resume first; the managed launch sets the explicit -s workspace-write floor flag unless a named config profile is present."
-        : "No stored Codex resume token. Try codex -s workspace-write resume --last; the managed launch sets the explicit -s workspace-write floor flag unless a named config profile is present.",
+        : `No stored Codex resume token. Try codex${daemonOptOut ? " --no-daemon" : ""} -s workspace-write resume --last; the managed launch sets the explicit -s workspace-write floor flag unless a named config profile is present.`,
       commands,
       notes,
     };
@@ -517,11 +533,12 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
   // map = the prior WHERE rig_id=? filter; oriented map is node-scoped/global.
   const restoreOutcomes = buildRestoreOutcomeMap(db, rigId);
   const orienteds = buildOrientedMap(db);
+  const codexDaemonOptOuts = new AppliedLaunchObservationStore(db).readCurrentDaemonOptOuts();
 
   const rows = queryInventoryRows(db, rigId);
 
   return rows.map((row) =>
-    buildInventoryEntry(db, row, { usableSnapshot, workspaceSpec, identityVerdicts, restoreOutcomes, orienteds }),
+    buildInventoryEntry(db, row, { usableSnapshot, workspaceSpec, identityVerdicts, restoreOutcomes, orienteds, codexDaemonOptOuts }),
   );
 }
 
@@ -583,11 +600,14 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       s.session_name,
       s.created_at as session_created_at,
       s.status as session_status,
+      ${sessionCommunityHarnessSelect(db)} as session_community_harness,
+      s.intentionally_stopped,
       s.startup_status,
       s.resume_type,
       s.resume_token,
       s.startup_completed_at,
       b.attachment_type as binding_attachment_type,
+      b.id as binding_id,
       b.tmux_pane as binding_tmux_pane
     FROM nodes n
     JOIN rigs r ON r.id = n.rig_id
@@ -634,6 +654,8 @@ interface InventoryBuildContext {
   // batched path) and looked up O(1) here instead of a query per node.
   restoreOutcomes: Map<string, RestoreProjection>;
   orienteds: Map<string, NodeOriented>;
+  /** Each node's current recorded Codex daemon choice (one read per projection); absent = not recorded. */
+  codexDaemonOptOuts: Map<string, boolean>;
 }
 
 /**
@@ -646,7 +668,7 @@ function buildInventoryEntry(
   row: InventoryRow,
   ctx: InventoryBuildContext,
 ): NodeInventoryEntry {
-  const { usableSnapshot, workspaceSpec, identityVerdicts, restoreOutcomes, orienteds } = ctx;
+  const { usableSnapshot, workspaceSpec, identityVerdicts, restoreOutcomes, orienteds, codexDaemonOptOuts } = ctx;
   // FS-1 W1.3 S1 — O(1) lookup into the once-per-rig restore-outcome map
   // (byte-identical to the prior per-node deriveRestoreOutcome; "n-a" when a node
   // is referenced by no restore event, matching the prior fall-through).
@@ -691,8 +713,11 @@ function buildInventoryEntry(
     attachmentType: (row.binding_attachment_type as NodeInventoryEntry["attachmentType"]) ?? null,
     nodeKind: deriveNodeKind(row.runtime),
     runtime: row.runtime,
+    ...(communityHarnessOf(row.session_community_harness, row.runtime) ? { communityHarness: communityHarnessLabel(row.runtime!) } : {}),
     sessionStatus,
     storedSessionStatus: row.session_status,
+    intentionallyStopped: row.intentionally_stopped === 1
+      && row.session_status === "exited" && row.binding_id === null,
     // Match the graph's current-status projection without rewriting the startup
     // result. Applicable mismatch (including ambiguity) or pane_missing overrides it.
     storedStartupStatus: row.startup_status as NodeInventoryEntry["startupStatus"],
@@ -713,7 +738,7 @@ function buildInventoryEntry(
     handoverAt: row.handover_at,
     ...(row.fallback_state ? { runtimeFallback: deriveRuntimeFallback(row) } : {}),
     tmuxAttachCommand: row.binding_attachment_type === "tmux" && row.session_name ? tmuxAttachCommand(row.session_name) : null,
-    resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile),
+    resumeCommand: computeResumeCommand(row.runtime, row.resume_token, row.codex_config_profile, codexDaemonOptOuts.get(row.node_id)),
     // OPR.0.4.0.26: recoveryGuidance is NOT inlined per node in the LIST
     // payload. It duplicated ~47KB of templated prose across all nodes and
     // no node-list consumer reads it. The full guidance is recomputed on
@@ -801,6 +826,7 @@ function buildInventoryMapFromRows(db: Database.Database, rows: InventoryRow[]):
   // events, so each node's value equals the single-rig path.
   const restoreOutcomes = buildRestoreOutcomeMap(db); // one fleet restore-outcome scan
   const orienteds = buildOrientedMap(db);             // one fleet startup-orientation scan
+  const codexDaemonOptOuts = new AppliedLaunchObservationStore(db).readCurrentDaemonOptOuts(); // one launch-fact read
   const out = new Map<string, NodeInventoryEntry[]>();
   for (const row of rows) {
     const entry = buildInventoryEntry(db, row, {
@@ -809,6 +835,7 @@ function buildInventoryMapFromRows(db: Database.Database, rows: InventoryRow[]):
       identityVerdicts: verdictsByRig.get(row.rig_id) ?? new Map(),
       restoreOutcomes,
       orienteds,
+      codexDaemonOptOuts,
     });
     let list = out.get(row.rig_id);
     if (!list) { list = []; out.set(row.rig_id, list); }
@@ -1003,6 +1030,7 @@ export function getNodeDetail(
       cwd: entry.cwd,
       sessionName: entry.canonicalSessionName,
       codexConfigProfile: entry.codexConfigProfile,
+      codexDaemonOptOut: entry.runtime === "codex" ? new AppliedLaunchObservationStore(db).readCurrent(nodeId)?.daemonOptOut : undefined,
     }),
     binding,
     startupFiles,
@@ -1310,7 +1338,7 @@ export async function attachAgentActivity(
         },
       };
     }
-    // ACTIVITY D1+D2 — the MOTION reading, resolved once and applied to every exit below.
+    // ACTIVITY D1+D2 — the MOTION reading, resolved once for the activity ladder below.
     const motion = entry.canonicalSessionName
       ? deps.seatActivity?.getSeatActivity(entry.canonicalSessionName) ?? null
       : null;
@@ -1347,7 +1375,7 @@ export async function attachAgentActivity(
     })();
 
     /**
-     * ACTIVITY D1+D2 — ONE precedence rule, applied at EVERY exit of the ladder:
+     * ACTIVITY D1+D2 — precedence below, except for a current typed usage limit:
      *
      *     needs_input > running > MOTION > idle / unknown
      *
@@ -1403,16 +1431,26 @@ export async function attachAgentActivity(
       };
     }
 
+    // Capture-free cache read; the service rejects expired observations.
+    const structural = entry.canonicalSessionName
+      ? deps.structuralActivity?.getStructuralActivity(entry.canonicalSessionName)
+      : null;
+
     // #763: a typed provider-interruption row (at_limit) is positive evidence
     // even though its state is unknown by construction (it must never count
     // as waiting-on-a-person). Deliver it instead of the cached pane reading
     // so a limited seat shows the limit, not idle — but only while current.
+    // Terminal redraws are not recovery evidence and must not erase the limit.
+    // Only a strictly newer, current attention observation outranks it.
     // A demoted row (aged out or generation-mismatched) falls through to the
     // structural reading like any other stale hook.
-    if (hookActivity?.rawEvent === "at_limit" && hookActivity.stale !== true) {
+    if (hookActivity?.rawEvent === "at_limit" && hookActivity.stale !== true && !(
+      structural?.state === "attention" &&
+      Date.parse(structural.observedAt) > Date.parse(hookActivity.eventAt ?? "")
+    )) {
       return {
         ...entry,
-        agentActivity: withMotion(hookActivity),
+        agentActivity: hookActivity,
       };
     }
 
@@ -1423,9 +1461,6 @@ export async function attachAgentActivity(
     // beats hook-arrival age) and makes ACTIVITY real on the DEFAULT path for hook-less / Codex /
     // just-finished-a-turn seats: the exact fleet-blindness this fix targets. Structural discrimination
     // is STRUCTURAL (spinner shapes / esc-to-interrupt / idle prompt), never a verb allowlist.
-    const structural = entry.canonicalSessionName
-      ? deps.structuralActivity?.getStructuralActivity(entry.canonicalSessionName)
-      : null;
     if (structural && structural.state !== "unknown") {
       return {
         ...entry,
@@ -1481,6 +1516,7 @@ export async function attachAgentActivity(
       now: sampledAt,
       captureObserver: deps.captureObserver,
       binding: deps.captureObserver ? deps.observationBinding?.(entry) : undefined,
+      communityHarness: entry.communityHarness?.harness ?? null,
     })),
     };
   }));

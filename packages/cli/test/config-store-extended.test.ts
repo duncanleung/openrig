@@ -173,6 +173,16 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "terminal.status_bar",
       // Slice 15 (OPR.0.7.0.15) — compact command-output defaults switch.
       "output.compact",
+      // Slice 15 P5 — the whoami peer bound under output.compact.
+      "output.whoami_peers",
+      // Slice 01 (OPR.0.7.0.1) — Codex usage windows switch.
+      "provider.usage_windows",
+      "bundle.services_enabled",
+      // Slice 18 (OPR.0.7.0.18) — the subscription move record switch.
+      "provider.subscription_moves",
+      "usage.pi_cost_facts",
+      "usage.pi_openrouter_charge",
+      "transport.verify_input_box",
       // OPR.0.4.6.FS-1 W2 — queue-retention maintenance knobs.
       "retention.enabled",
       "retention.transitions_days",
@@ -249,6 +259,19 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
       "queue.pickup_stall_threshold_minutes" as never,
     );
     expect(setting).toMatchObject({ value: 3, source: "default", defaultValue: 3 });
+  });
+
+  it("transport.verify_input_box defaults off, resolves its env twin, and appears in the resolved config", () => {
+    const store = new ConfigStore(configPath);
+    expect(store.resolveWithSource("transport.verify_input_box")).toMatchObject({ value: false, source: "default", defaultValue: false });
+    expect(store.resolve().transport).toEqual({ verifyInputBox: false });
+    try {
+      process.env.OPENRIG_TRANSPORT_VERIFY_INPUT_BOX = "1";
+      expect(store.resolveWithSource("transport.verify_input_box")).toMatchObject({ value: true, source: "env" });
+      expect(store.resolve().transport).toEqual({ verifyInputBox: true });
+    } finally {
+      delete process.env.OPENRIG_TRANSPORT_VERIFY_INPUT_BOX;
+    }
   });
 
   it("configures the launch readiness window with strict bounds and env precedence", () => {

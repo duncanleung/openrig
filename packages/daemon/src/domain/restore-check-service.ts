@@ -341,7 +341,7 @@ export class RestoreCheckService {
         Boolean(node.canonicalSessionName) && node.sessionStatus === "running" && node.startupStatus === "ready"
       );
       if (!opts.recoveryOnly || !allReady) {
-        const preconditions = this.checkRestorePreconditions(rig);
+        const preconditions = this.checkRestorePreconditions(rig, nodes);
         checks.push(preconditions.check);
         rigChecks.push(preconditions.check);
         preconditionError = preconditions.error;
@@ -425,7 +425,7 @@ export class RestoreCheckService {
     return this.buildResult(checks, rigRollups, hostInfraCheck.hostInfra, recoveryRigInputs, deferredAssessmentChecks);
   }
 
-  private checkRestorePreconditions(rig: { rigId: string; name: string }): {
+  private checkRestorePreconditions(rig: { rigId: string; name: string }, inventory: NodeInventoryEntry[]): {
     check: CheckEntry;
     snapshot: { id: string; kind: string } | null;
     error?: string;
@@ -452,6 +452,7 @@ export class RestoreCheckService {
       const validation = validatePreRestore(input.snapshot.data, {
         fsOps: { exists: this.deps.exists },
         servicesRecord: input.servicesRecord,
+        currentRuntimes: Object.fromEntries(inventory.map((current) => [current.logicalId, current.runtime])),
       });
       const { blockers, warnings } = validation;
       return {

@@ -34,10 +34,14 @@ export interface Node {
   runtime: string | null;
   model: string | null;
   effort?: string | null;
+  /** OPR.0.7.0.7: the seat's explicit effort choice (rig seat set-effort); null = none. */
+  effortChoice?: string | null;
   codexConfigProfile?: string | null;
   /** OPR.0.4.8.3 Seam B: attached permission_policy REF (builtin:<name> or spec-relative custom
    *  path), or null when none is attached (= the floor). */
   permissionPolicy?: string | null;
+  /** The member's own declared launch environment (not merged with the rig's), or null. */
+  env?: Record<string, string> | null;
   cwd: string | null;
   surfaceHint: string | null;
   workspace: string | null;
@@ -57,25 +61,8 @@ export interface Node {
   handoverResult: HandoverResult;
   previousOccupant: string | null;
   handoverAt: string | null;
-  /** RIG-43: runtime fallback state columns. Non-null only while a fallback is active. */
-  fallbackRuntime?: string | null;
-  fallbackModel?: string | null;
-  fallbackState?: FallbackState | null;
-  fallbackPoolKey?: string | null;
-  fallbackEnteredAt?: string | null;
-  fallbackSwapBack?: FallbackSwapBack | null;
-  /** RIG-43: the runtime the seat held BEFORE the forward swap; stored so swap-back can restore it. */
-  fallbackOriginalRuntime?: string | null;
-  /** RIG-43: the pool's actual usage-limit expiry deadline (ISO string). */
-  fallbackExpiresAt?: string | null;
   createdAt: string;
 }
-
-/** RIG-43: lifecycle state for runtime fallback. */
-export type FallbackState = "on_fallback" | "swap_back_pending";
-
-/** RIG-43: how the seat returns to its primary runtime. */
-export type FallbackSwapBack = "at_expiry" | "manual";
 
 export interface Edge {
   id: string;
@@ -118,6 +105,8 @@ export interface Session {
   origin: "launched" | "claimed";
   startupStatus: "pending" | "ready" | "attention_required" | "failed";
   startupCompletedAt: string | null;
+  /** The community harness this session was launched for (selected through its preset); absent otherwise. */
+  communityHarness?: string;
 }
 
 // -- Event types --
@@ -148,11 +137,17 @@ export type RigEvent =
   // S5 (OPR.0.5.4.7) — seat-lifecycle audit trail: the three supported seat verbs each persist
   // their mutation with actor + reason in the same transaction as the mutation itself.
   | { type: "node.model_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
+  | { type: "node.effort_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; source: "seat_selection"; effect: "future_launches_only" }
+  | { type: "node.policy_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; launchPosture: "floor" | "full_bypass" | "auto"; reason: string; operator: string }
   | { type: "session.stopped"; rigId: string; nodeId: string; sessionName: string; reason: string; operator: string | null }
   | { type: "session.cleaned"; rigId: string; nodeId: string; sessionName: string | null; reason: string; operator: string | null; actions: { sessionsExited: string[]; bindingCleared: boolean } }
   | { type: "node.launched"; rigId: string; nodeId: string; logicalId: string; sessionName: string }
   | { type: "topology.roster_recorded"; rigId: string; intendedNodeIds: string[]; source: "materialized_topology" }
+  // OPR.0.7.0.5 — in-place restart (same conversation, same pane). Started is persisted before any signal, so
+  // a request that waited behind it, or a restart that never recorded a result, is refused rather than repeated.
+  | { type: "seat.restart_in_place_started"; rigId: string; nodeId: string; logicalId: string; sessionName: string; pane: string; paneShape: "shell_backed" | "direct_native"; oldPid: number; oldStartedAt: string | null; codexHome: string; reason: string; operator: string | null }
+  | { type: "seat.restart_in_place_finished"; rigId: string; nodeId: string; logicalId: string; sessionName: string; outcome: "restarted_account_unverified" | "not_started" | "incomplete" | "native_unknown"; newPid: number | null; newStartedAt: string | null; codexHome: string; paneHeld: boolean; accountLinesAtRestart: Record<string, number> | null; finishedAt: string }
   | { type: "seat.fresh_launched"; rigId: string; nodeId: string; logicalId: string; sessionName: string; sessionId: string; supersededSessionIds: string[]; retiringGeneration: string | null; newGeneration: string; nativeSessionId: string | null; nativeSessionIdReason?: string; model: string | null; effort?: string | null; startupPolicyHash: string; reason: string; operator: string | null; status: "ready" | "attention_required" }
   | { type: "seat.fresh_launch_failed"; rigId: string; nodeId: string; logicalId: string; sessionName: string; sessionId: string; supersededSessionIds: string[]; retiringGeneration: string | null; newGeneration: string | null; model: string | null; effort?: string | null; startupPolicyHash: string; reason: string; operator: string | null; errors: string[] }
   | { type: "snapshot.created"; rigId: string; snapshotId: string; kind: string }
@@ -191,7 +186,7 @@ export type RigEvent =
   // token value is intentionally omitted; this is observability, NOT a
   // secret-boundary control — resume tokens are not treated as secret per the
   // 2026-07-02 founder ruling).
-  | { type: "session.resume_token_captured"; rigId: string; nodeId: string; sessionName: string; sessionId: string; runtime: string; outcome: "captured" | "preserved" | "skipped"; resumeType?: string; provenance?: "adoption"; reason?: "missing_sidecar" | "parse_error" | "probe_timeout" | "invalid_token" | "stale_sidecar" | "higher_rank_present"; redacted: true }
+  | { type: "session.resume_token_captured"; rigId: string; nodeId: string; sessionName: string; sessionId: string; runtime: string; outcome: "captured" | "preserved" | "skipped"; resumeType?: string; provenance?: "adoption"; reason?: "missing_sidecar" | "parse_error" | "probe_timeout" | "process_unreadable" | "invalid_token" | "stale_sidecar" | "higher_rank_present"; redacted: true }
   | { type: "seat.attention_cleared"; rigId: string; nodeId: string; sessionName: string; from: string; to: "ready"; clearedBy: "evidence" | "operator_attestation"; evidence?: { kind: string; state?: string; reason?: string }; reason?: string; previousError: string | null }
   | { type: "rig.imported"; rigId: string; specName: string; specVersion: string }
   // Package events (cross-rig, no rigId)
@@ -219,14 +214,12 @@ export type RigEvent =
        *  record (not just the command response) carries what primed the successor:
        *  fork provenance, or rebuild's exact primed set / gaps / empty-chain reason. */
       sourceOutcome?:
-        | { mode: "fork"; forkedFrom: string }
+        | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
         | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string } }
-  // RIG-43: runtime fallback audit events (seat-level; one per swap direction)
-  | { type: "seat.runtime_fallback_entered"; rigId: string; nodeId: string; logicalId: string; fromRuntime: string | null; toRuntime: string; poolKey: string | null; expiresAt: string | null; swapBack: FallbackSwapBack | null }
-  | { type: "seat.runtime_fallback_exited"; rigId: string; nodeId: string; logicalId: string; fromRuntime: string | null; toRuntime: string | null; poolKey: string; trigger: "at_expiry" | "manual_operator" }
-  | { type: "seat.runtime_fallback_swap_back_pending"; rigId: string; nodeId: string; logicalId: string; poolKey: string; originalRuntime: string | null }
   // Bundle events (cross-rig)
   | { type: "bundle.created"; bundleName: string; bundleVersion: string; archiveHash: string }
+  // OPR.0.7.0.18 — a subscription move an agent made or attempted, as it reported it (fleet-wide, no rig).
+  | { type: "subscription.move_recorded"; move: import("./provider/subscription-moves.js").SubscriptionMoveEventPayload }
   // Teardown events
   | { type: "rig.stopped"; rigId: string }
   // OPR.0.3.3.19 - rig archive affordance (soft, reversible; NOT a delete)
@@ -236,26 +229,8 @@ export type RigEvent =
   | { type: "pod.created"; rigId: string; podId: string; namespace: string; label: string }
   | { type: "pod.deleted"; rigId: string; podId: string }
   | { type: "node.startup_pending"; rigId: string; nodeId: string; startupProof?: StartupProofSelection }
-  | { type: "node.startup_ready"; rigId: string; nodeId: string; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string; diagnostics?: StartupSubmissionDiagnostic[] } }
-  | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean; submissionDiagnostics?: StartupSubmissionDiagnostic[] }
-  | {
-      type: "node.startup_delivery_manifest";
-      rigId: string;
-      nodeId: string;
-      sessionName: string;
-      deliveredFiles: Array<{
-        path: string;
-        deliveryHint: string;
-        surface: string;
-        phase: "pre_launch" | "post_launch";
-        contentHash: string;
-      }>;
-      summary: {
-        preLaunchCount: number;
-        postLaunchCount: number;
-        surfaceCounts: Record<string, number>;
-      };
-    }
+  | { type: "node.startup_ready"; rigId: string; nodeId: string; previousStatus?: "failed" | "attention_required"; submission?: { status: "unverified" | "staged"; reasons: string[]; warning?: string; diagnostics?: StartupSubmissionDiagnostic[] } }
+  | { type: "node.startup_failed"; rigId: string; nodeId: string; error: string; sessionId?: string; freshContextPending?: boolean; forkContextPending?: { parentToken: string; isRestore: boolean }; submissionDiagnostics?: StartupSubmissionDiagnostic[]; stage?: StartupFailureStage; hasPendingWork?: boolean; requestedResumeToken?: string | null; requestedResumeType?: string | null }
   // OPR.0.4.3.06 — startup proof (challenge-verified orientation). Append-only.
   // `node.startup_challenged` freezes this launch's challenge ground truth
   // (challengeId + contractHash; the expected answer is recomputed, never
@@ -349,26 +324,7 @@ export type RigEvent =
   // PL-005 Phase B: notification dispatch events. Best-effort delivery;
   // failure does NOT interrupt the underlying action being notified about.
   | { type: "mission_control.notification_sent"; mechanism: string; target: string; qitemId: string | null; sentAt: string }
-  | { type: "mission_control.notification_failed"; mechanism: string; target: string; qitemId: string | null; error: string; failedAt: string }
-  // Memory observability — staleness evaluation and decay recommendations (RIG-36).
-  | {
-      type: "memory.staleness_evaluated";
-      rigId: string;
-      evaluatedAt: string;
-      sessionWindow: number;
-      surfaces: Array<{
-        surface: string;
-        delivered: number;
-        deliveryRate: number;
-        staleness: "fresh" | "aging" | "stale";
-        score: number;
-      }>;
-      recommendations: Array<{
-        action: "review" | "archive" | "promote" | "demote";
-        surface: string;
-        reason: string;
-      }>;
-    };
+  | { type: "mission_control.notification_failed"; mechanism: string; target: string; qitemId: string | null; error: string; failedAt: string };
 
 export type PersistedEvent = RigEvent & {
   seq: number;
@@ -584,6 +540,8 @@ export type AgentActivityEvidenceSource =
   | "session_registry";
 
 export interface AgentActivity {
+  turnId?: string | null;
+
   state: AgentActivityState;
   reason: string;
   evidenceSource: AgentActivityEvidenceSource;
@@ -633,7 +591,8 @@ export type NodeLifecycleState = "running" | "detached" | "recoverable" | "atten
  * projection; `verified`, `binding_absent`, and `tmux_unavailable` (and an
  * absent verdict) leave it unchanged.
  */
-export type SeatIdentityVerdictKind = "verified" | "mismatch" | "pane_missing" | "binding_absent" | "tmux_unavailable";
+/** `unconfirmed`: the seat's pane is live, but nothing proves which session it runs (a community harness). */
+export type SeatIdentityVerdictKind = "verified" | "unconfirmed" | "mismatch" | "pane_missing" | "binding_absent" | "tmux_unavailable";
 
 export interface SeatIdentityVerdict {
   nodeId: string;
@@ -644,6 +603,7 @@ export interface SeatIdentityVerdict {
   reason:
     | "process_identity_mismatch"
     | "process_identity_ambiguous"
+    | "process_identity_unconfirmed"
     | "pane_ambiguous"
     | "pane_pid_gone"
     | "binding_pane_missing"
@@ -685,27 +645,6 @@ export function identityVerdictDownranksRunning(
 //   attention_required — any node is attention_required (priority over above).
 export type RigLifecycleState = "running" | "recoverable" | "stopped" | "degraded" | "attention_required";
 
-/**
- * RIG-101: read-only view of an active runtime fallback (nodes.fallback_* columns).
- * Present on a NodeInventoryEntry only while the seat is on a fallback runtime.
- */
-export interface RuntimeFallbackView {
-  state: FallbackState;
-  /** The runtime the seat held before the forward swap. */
-  originalRuntime: string | null;
-  /** The runtime the seat runs now. */
-  currentRuntime: string | null;
-  /** The usage-limit pool that triggered the fallback. */
-  poolKey: string | null;
-  enteredAt: string | null;
-  /** The pool's usage-limit deadline. A deadline does not prove the provider recovered. */
-  expiresAt: string | null;
-  /** Declared return policy. null = no policy stored on the node. */
-  swapBack: FallbackSwapBack | null;
-  /** True when the pool expired and the seat waits for its return swap. */
-  swapBackPending: boolean;
-}
-
 export interface NodeInventoryEntry {
   /** Stable daemon node identity. Health scopes and other canonical records
    * key seats by this value; logicalId remains the human-facing address. */
@@ -725,10 +664,15 @@ export interface NodeInventoryEntry {
   attachmentType?: "tmux" | "external_cli" | null;
   nodeKind: "agent" | "infrastructure";
   runtime: string | null;
+  /** Present only on a community harness's seat: its label, maintainer and declared limits. */
+  communityHarness?: import("./community-harness-presets.js").CommunityHarnessLabel;
   /** Effective current status; confirmed session absence projects as detached. */
   sessionStatus: string | null;
   /** Persisted session status, retained for history and registry-based rollups. */
   storedSessionStatus?: string | null;
+  /** The latest session was explicitly stopped and has no replacement binding.
+   * It remains non-running, but is not a missing member in the rig lifecycle. */
+  intentionallyStopped?: boolean;
   // Current projection: an applicable identity failure down-ranks a running
   // session to attention_required; the stored startup result stays unchanged.
   startupStatus: "pending" | "ready" | "attention_required" | "failed" | null;
@@ -744,8 +688,6 @@ export interface NodeInventoryEntry {
   handoverResult: HandoverResult;
   previousOccupant: string | null;
   handoverAt: string | null;
-  /** RIG-101: set only while the seat runs on a fallback runtime. */
-  runtimeFallback?: RuntimeFallbackView;
   tmuxAttachCommand: string | null;
   resumeCommand: string | null;
   recoveryGuidance: NodeRecoveryGuidance | null;
@@ -972,6 +914,22 @@ export interface StartupBlock {
   actions: StartupAction[];
 }
 
+export type StartupFailureStage =
+  | "permission_selection"
+  | "proof_selection"
+  | "projection"
+  | "pre_launch_files"
+  | "persistence"
+  | "harness_launch"
+  | "readiness_check"
+  | "initial_prompt"
+  | "restore_preload"
+  | "post_launch_files"
+  | "after_files"
+  | "after_ready"
+  | "post_delivery_readiness"
+  | "identity_verification";
+
 export interface LifecycleDefaults {
   executionMode: "interactive_resident";
   // OPR.0.5.6.20 B-3/B-4: optional so a lifecycle block that omits a field preserves
@@ -1182,6 +1140,8 @@ export interface RigSpecPodMember {
   /** OPR.0.4.8.3 Seam B: optional per-seat permission_policy REF (builtin:<name> or a spec-relative
    *  custom path). Absent = the floor. Overrides the rig-level ref. */
   permissionPolicy?: string;
+  /** Non-secret launch environment for this seat; overrides the rig-level `env`. */
+  env?: Record<string, string>;
   cwd: string;
   restorePolicy?: string;
   /** OPR.0.5.6.20 — per-member continuity override (most-specific-wins; canonical or
@@ -1204,22 +1164,6 @@ export interface RigSpecPodMember {
    * `sessionSource.mode: "fork"` per v0 schema (validateStarterRef).
    */
   starterRef?: StarterRefSpec;
-  /** RIG-43: optional runtime fallback declaration. When the primary runtime's
-   *  usage-limit pool is exhausted, the daemon swaps the occupant to this runtime. */
-  fallback?: FallbackSpec;
-}
-
-/** RIG-43 — per-member fallback declaration in rig spec. */
-export interface FallbackSpec {
-  /** Target runtime when the primary is exhausted (e.g. "claude-code"). */
-  runtime: string;
-  /** Optional model override for the fallback occupant. */
-  model?: string;
-  /** Trigger conditions that activate the fallback. v1 supports only "usage_limit". */
-  on: ("usage_limit")[];
-  /** How the seat returns to primary runtime. "at_expiry" swaps back automatically;
-   *  "manual" emits an escalation and waits for operator action. */
-  swapBack: FallbackSwapBack;
 }
 
 export interface RigSpecPodEdge {
@@ -1278,18 +1222,6 @@ export interface WorkspaceSpec {
   knowledgeRoot?: string;
 }
 
-/** RIG-77 — validation_gate YAML block in rigspec. */
-export interface ValidationGateConfigSpec {
-  /** "off" | "warn" | "enforce" — defaults to "warn" when the block is present. */
-  mode: "off" | "warn" | "enforce";
-  /** Glob-style session patterns accepted as validators (e.g. ["advisor@*"]). */
-  validators: string[];
-  /** Logical-id patterns that trigger the gate (e.g. ["dev.impl"]). */
-  impl_seats: string[];
-  /** ISO date; when set and today >= this, warn auto-promotes to enforce. */
-  warn_until?: string;
-}
-
 export interface RigSpec {
   /** Authored launch-warning choice; an explicit launch option takes precedence. */
   nonInterruptive?: boolean;
@@ -1300,6 +1232,8 @@ export interface RigSpec {
   /** OPR.0.4.8.3 Seam B: optional rig-level permission_policy REF (builtin:<name> or a
    *  spec-relative custom path). Absent = the floor. A per-member ref overrides this. */
   permissionPolicy?: string;
+  /** Non-secret launch environment for every seat in the rig; a member's `env` overrides it. */
+  env?: Record<string, string>;
   /** #25: per-runtime managed-block destination. Absent = CLAUDE.md. */
   managedBlocks?: { "claude-code"?: import("./managed-blocks.js").ClaudeManagedBlockFile };
   docs?: RigSpecDoc[];
@@ -1307,8 +1241,6 @@ export interface RigSpec {
   services?: RigServicesSpec;
   /** PL-007 Workspace Primitive — optional typed workspace declaration. */
   workspace?: WorkspaceSpec;
-  /** RIG-77 — optional validation-gate policy for impl-seat dispatch. */
-  validationGate?: ValidationGateConfigSpec;
   pods: RigSpecPod[];
   edges: RigSpecCrossPodEdge[];
 }
@@ -1560,4 +1492,6 @@ export interface ContextUsage {
   sessionName: string | null;
   sampledAt: string | null;
   fresh: boolean;
+  /** Claude only: the statusline's cumulative client-side cost estimate for `sessionId` (USD); null when not reported. */
+  clientCostEstimateUsd?: number | null;
 }

@@ -264,6 +264,9 @@ export interface RecentTransitionSnap {
   change: string;
   /** Authored queue summary for display only; never used to derive change. */
   summary?: string | null;
+  /** Display text the daemon derives from the body (first non-blank line within its first 2,000
+   *  characters) for a row with no authored summary. Absent from older daemons. */
+  bodyPreview?: string | null;
   /** Owning local rig, explicit on instance-scoped reads. */
   rig?: string | null;
   targetKind: "qitem" | "slice" | "mission";
@@ -367,6 +370,12 @@ export interface FleetSnapshot {
   slackManifest?: import("./connections/connections-model.js").SlackManifestRead | null;
   daemonTarget?: string;
   launchingCli?: string;
+  /** Slice 01 — System → Usage: the served provider read model (usage windows, seat accounts). Absent until read. */
+  usage?: import("./usage/usage-model.js").UsageRead;
+  /** Slice 01 — System → Usage across hosts: the served view across registered hosts. Absent until read. */
+  usageHosts?: import("./usage/usage-hosts-model.js").UsageHostsRead;
+  /** Slice 02 — System → Cost: the served cost view (`rig usage cost`). Absent until read. */
+  cost?: import("./cost/cost-read.js").CostRead;
   /** Canonical daemon health records. Absent on old/demo snapshots. */
   health?: HealthSnapshot;
   /** SCOPES view (d64d2f5c): store-direct mission/slice projections; absent on old daemons (honest-empty). */

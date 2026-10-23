@@ -1,4 +1,5 @@
 import type Database from "better-sqlite3";
+import { readSeatEffort } from "./seat-effort.js";
 import { NativePermissionStore } from "./native-permission-store.js";
 import { ulid } from "ulid";
 import type { RigRepository } from "./rig-repository.js";
@@ -22,6 +23,7 @@ import type { PersistedEvent } from "./types.js";
 import type { AppliedLaunchObservation } from "./permission-drift.js";
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { findOtherSessionOwner } from "./session-owner.js";
+import { seatCorePluginDir, withCorePlugin } from "./claude-core-plugin-env.js";
 
 /** A bounded labeled-from-record recap of the predecessor's last exchanges + the record path,
  *  resolved from the predecessor's provider transcript (claude transcript_path / codex rollout_path).
@@ -78,7 +80,7 @@ export interface SeatHandoverMutationResult {
    *  declared addresses were gaps, and (when the chain is empty) the named
    *  reason — recorded, never silently dropped. Absent for fresh/discovered. */
   sourceOutcome?:
-    | { mode: "fork"; forkedFrom: string }
+    | { mode: "fork"; forkedFrom: string; forkId?: "captured" | "pending"; limit?: string }
     | { mode: "rebuild"; primedArtifacts: Array<{ address: string; label: string }>; gaps: string[]; emptyChainReason?: string };
 }
 
@@ -101,12 +103,9 @@ interface NodeRow {
   // 0.5.2-07 A4-profile: the seat's SPEC-pinned codex config profile (nodes.codex_config_profile),
   // threaded onto the successor binding for the same reason as model — the adapter emits `-p <profile>`.
   codex_config_profile: string | null;
-  // #75: the seat's configured reasoning effort (nodes.effort), threaded onto successor binding.
+  // #75: the seat's authored reasoning effort (nodes.effort). The successor binding reads the shared
+  // resolver (OPR.0.7.0.7: a saved seat choice first), not this column alone.
   effort: string | null;
-  // RIG-43: fallback columns needed for forward swap runtime selection and reverse swap restoration.
-  fallback_original_runtime?: string | null;
-  fallback_runtime?: string | null;
-  fallback_state?: string | null;
 }
 
 interface SessionRow {
@@ -136,6 +135,8 @@ interface SeatHandoverServiceDeps {
   sessionEnv?: Record<string, string | undefined>;
   /** Extra env for one runtime only (OMP's provider keys), merged over sessionEnv. */
   runtimeSessionEnv?: Record<string, Record<string, string | undefined>>;
+  /** Where the daemon vendors its plugins; default is `plugins` under the OpenRig home (tests). */
+  pluginsDir?: string;
   /** Injectable id source for the successor session name (tests). */
   newSuccessorId?: () => string;
   /** Runtime adapters keyed by runtime — used to launch a fresh successor into
@@ -226,6 +227,7 @@ export class SeatHandoverService {
   private sleep: (ms: number) => Promise<void>;
   private appliedLaunchObservations: AppliedLaunchObservationStore;
   private now: () => Date;
+  private pluginsDir: string | undefined;
 
   constructor(deps: SeatHandoverServiceDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("SeatHandoverService: rigRepo must share the same db handle");
@@ -247,6 +249,7 @@ export class SeatHandoverService {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.appliedLaunchObservations = new AppliedLaunchObservationStore(deps.db);
     this.now = deps.now ?? (() => new Date());
+    this.pluginsDir = deps.pluginsDir;
     this.statusService = new SeatStatusService({ rigRepo: deps.rigRepo });
     this.planner = new SeatHandoverPlanner({ rigRepo: deps.rigRepo });
     this.successorLauncher = deps.successorLauncher ?? new SuccessorSessionLauncher(deps.tmuxAdapter, deps.discoveryRepo, {
@@ -273,22 +276,6 @@ export class SeatHandoverService {
     source?: string | null;
     operator?: string | null;
     dryRun?: boolean;
-    /** RIG-43: when present, executes a fallback-authorized cross-runtime swap.
-     *  Forces source=rebuild, bypasses runtime mismatch, atomically commits runtime change. */
-    fallback?: {
-      runtime: string;
-      model?: string;
-      poolKey: string;
-      expiresAt: string;
-      swapBack: import("./types.js").FallbackSwapBack;
-    };
-    /** RIG-43: when present, executes the reverse swap back to the original runtime.
-     *  Forces source=rebuild, uses node.fallback_original_runtime as effectiveRuntime,
-     *  clears fallback columns atomically, emits seat.runtime_fallback_exited. */
-    reverseSwap?: {
-      poolKey: string;
-      trigger: "at_expiry" | "manual_operator";
-    };
   }): Promise<SeatHandoverResult> {
     if (input.dryRun) {
       const planResult = this.planner.plan({ ...input, dryRun: true });
@@ -328,9 +315,7 @@ export class SeatHandoverService {
       };
     }
 
-    // RIG-43: fallback and reverse-swap both force rebuild mode.
-    const effectiveSource = (input.fallback || input.reverseSwap) ? "rebuild" : input.source;
-    const parsed = parseHandoverSource(effectiveSource);
+    const parsed = parseHandoverSource(input.source);
     if (!parsed.ok) {
       return parsed;
     }
@@ -362,10 +347,7 @@ export class SeatHandoverService {
 
     const node = this.lookupNode(statusResult.status);
     const guard = this.tmuxAdapter.deliveryGuard;
-    if (!guard) {
-      throw new Error(`[seat-handover] deliveryGuard is not configured — cannot serialize handover for node ${node.id}`);
-    }
-    if (!guard.ownsLifecycle(node.id)) {
+    if (guard && !guard.ownsLifecycle(node.id)) {
       return guard.lifecycle([node.id], () => this.handover(input));
     }
     const latestSession = this.lookupLatestSession(node.id);
@@ -384,7 +366,7 @@ export class SeatHandoverService {
     // (the respawn), so a missing/undiscoverable token is an honest pre-mutation
     // refusal — never a blank successor silently reported as a fork, and never a
     // mid-swap abort for a condition knowable up front.
-    let forkSource: { kind: "native_id"; value: string } | null = null;
+    let forkSource: { kind: "native_id"; value: string; pendingIdAllowed: true } | null = null;
     if (parsed.source.mode === "fork") {
       const forkRef = parsed.source.ref ?? latestSession.session_name;
       const discovery = discoverResumeToken(this.db, forkRef);
@@ -412,7 +394,7 @@ export class SeatHandoverService {
           guidance: "Fork from a source session that runs the seat's runtime.",
         };
       }
-      forkSource = { kind: "native_id", value: discovery.result.nativeId };
+      forkSource = { kind: "native_id", value: discovery.result.nativeId, pendingIdAllowed: true };
     }
 
     // Already-created successor: route straight through the discovered->commit
@@ -477,18 +459,14 @@ export class SeatHandoverService {
     // The successor must carry its own generation from its first byte. This reservation writes no
     // ledger row; commit consumes it, while every failed pre-commit branch remains unregistered.
     const occupantGeneration = this.sessionRegistry.reserveOccupantGeneration();
-    // RIG-43: a fallback swap uses the declared fallback runtime; a reverse swap restores the original.
-    const effectiveRuntime = input.reverseSwap
-      ? (node.fallback_original_runtime ?? node.runtime)
-      : (input.fallback?.runtime ?? node.runtime);
-    const effectiveModel = input.fallback?.model ?? node.model;
+    const corePluginDir = seatCorePluginDir(node, this.db, undefined, this.pluginsDir);
     const launch = await this.successorLauncher.createSuccessor({
       // Seam B: the successor is the SAME seat continuing — persisted policy posture carries.
       // 0.5.2-07 model fidelity: carry the seat's SPEC-pinned model so the successor launch reads the
       // spec (else the running topology drifts from the founder-designed one at every handover).
       // A4-profile: likewise carry the codex config profile (adapter emits -p) — the restore path
       // already threads it; handover must too, or a profile-pinned codex seat reverts at handover.
-      node: { id: node.id, runtime: effectiveRuntime, cwd: node.cwd, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: effectiveModel, effort: node.effort ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined },
+      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined, seatEnv: withCorePlugin(this.rigRepo.getEffectiveSeatEnv(node.id), corePluginDir), ...(corePluginDir && node.cwd ? { seatProjectDir: node.cwd } : {}) },
       departingSessionName: latestSession.session_name,
       occupantGeneration,
       // OPR.0.5.5.5: a fork-sourced successor launches as a NATIVE FORK of the
@@ -556,8 +534,22 @@ export class SeatHandoverService {
     // OPR.0.5.5.5 — per-source execution outcome, recorded on the result so the
     // operator sees exactly what carried context (fork origin / primed set).
     let sourceOutcome: SeatHandoverMutationResult["sourceOutcome"];
+    // A fork's own id is never its parent's (the fork source) or the retiring occupant's; either answer
+    // from the launch-time capture is treated as not captured.
+    const launchedId = launch.resumeToken?.trim() || null;
+    const retireeId = (this.db.prepare("SELECT resume_token FROM sessions WHERE id = ?").get(latestSession.id) as
+      { resume_token: string | null } | undefined)?.resume_token?.trim() || null;
+    const forkOwnId = forkSource && launchedId && launchedId !== forkSource.value && launchedId !== retireeId ? launchedId : null;
+    const launchToken = forkSource
+      ? (forkOwnId ? { token: forkOwnId, resumeType: launch.resumeType } : null)
+      : (launchedId ? { token: launchedId, resumeType: launch.resumeType } : null);
     if (parsed.source.mode === "fork" && forkSource) {
-      sourceOutcome = { mode: "fork", forkedFrom: parsed.source.ref ?? latestSession.session_name };
+      // A fork whose own conversation id wasn't captured at launch commits with no resume token and
+      // says so: its exact resumability isn't established until the id is recorded.
+      sourceOutcome = forkOwnId
+        ? { mode: "fork", forkedFrom: parsed.source.ref ?? latestSession.session_name, forkId: "captured" }
+        : { mode: "fork", forkedFrom: parsed.source.ref ?? latestSession.session_name, forkId: "pending",
+            limit: "The fork's own conversation id wasn't captured at launch, so no resume token is recorded for this seat. It may stay unrecorded (for example when the process has logged more than one conversation); `rig ps --nodes --json` shows whether one has been. Until it is, exact resumption of this conversation isn't established, and a restore of the seat can't resume it; what restore does instead follows the seat's restore policy." };
     }
     if (parsed.source.mode === "rebuild") {
       // rebuild: the successor is a FRESH conversation primed from the seat's
@@ -621,39 +613,11 @@ export class SeatHandoverService {
       contextDelivered,
       // B2 (launched/fresh): the launch-scraped resume token captured by the
       // successor launcher is persisted atomically at commit (provenance scrape).
-      launchToken: launch.resumeToken ? { token: launch.resumeToken, resumeType: launch.resumeType } : null,
+      launchToken,
       occupantGeneration,
       appliedLaunch: launch.appliedLaunch ?? null,
       sourceOutcome,
       cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId),
-      // RIG-43: thread fallback bypass so the runtime mismatch gate is skipped and
-      // node.runtime + fallback_state are updated atomically with provenance at commit.
-      ...(input.fallback ? {
-        fallbackAuthorized: true,
-        targetRuntime: input.fallback.runtime,
-        fallbackStateOpts: {
-          fallbackState: "on_fallback" as const,
-          fallbackPoolKey: input.fallback.poolKey,
-          fallbackEnteredAt: this.now().toISOString(),
-          fallbackSwapBack: input.fallback.swapBack,
-          fallbackExpiresAt: input.fallback.expiresAt,
-        },
-      } : {}),
-      // RIG-43: reverse swap — restore original runtime + clear fallback columns atomically.
-      ...(input.reverseSwap ? {
-        fallbackAuthorized: true,
-        ...(( node.fallback_original_runtime ?? node.runtime) != null
-          ? { targetRuntime: (node.fallback_original_runtime ?? node.runtime) as string }
-          : {}),
-        reverseSwapEvent: {
-          poolKey: input.reverseSwap.poolKey,
-          trigger: input.reverseSwap.trigger,
-          logicalId: statusResult.status.logical_id,
-          rigId: statusResult.status.rig_id,
-          fromRuntime: node.runtime,
-          toRuntime: node.fallback_original_runtime ?? null,
-        },
-      } : {}),
     });
   }
 
@@ -683,27 +647,6 @@ export class SeatHandoverService {
     /** OPR.0.5.5.5 — per-source execution outcome, threaded onto the result. */
     sourceOutcome?: SeatHandoverMutationResult["sourceOutcome"];
     cleanup: (() => Promise<void>) | null;
-    /** RIG-43: bypass runtime mismatch check for a fallback-authorized cross-runtime swap. */
-    fallbackAuthorized?: boolean;
-    /** RIG-43: if set, atomically update node.runtime to this value at commit. */
-    targetRuntime?: string;
-    /** RIG-43: fallback state columns written atomically with provenance at commit. */
-    fallbackStateOpts?: {
-      fallbackState: "on_fallback" | null;
-      fallbackPoolKey: string | null;
-      fallbackEnteredAt: string | null;
-      fallbackSwapBack: "at_expiry" | "manual" | null;
-      fallbackExpiresAt?: string | null;
-    };
-    /** RIG-43: when present, clears all fallback columns and emits seat.runtime_fallback_exited. */
-    reverseSwapEvent?: {
-      poolKey: string;
-      trigger: "at_expiry" | "manual_operator";
-      logicalId: string;
-      rigId: string;
-      fromRuntime: string | null;
-      toRuntime: string | null;
-    };
   }): Promise<SeatHandoverResult> {
     const fail = async (result: SeatHandoverResult): Promise<SeatHandoverResult> => {
       if (input.cleanup) await input.cleanup();
@@ -750,7 +693,7 @@ export class SeatHandoverService {
       });
     }
 
-    const runtimeMismatch = this.checkRuntimeMismatch(input.node.runtime, discovered.runtimeHint, input.fallbackAuthorized);
+    const runtimeMismatch = this.checkRuntimeMismatch(input.node.runtime, discovered.runtimeHint);
     if (runtimeMismatch) return fail(runtimeMismatch);
 
     // #141: a composer-launched successor reuses the seat's own session name, which an archived earlier
@@ -800,9 +743,6 @@ export class SeatHandoverService {
       occupantGeneration: input.occupantGeneration,
       appliedLaunch: input.appliedLaunch,
       sourceOutcome: input.sourceOutcome,
-      targetRuntime: input.targetRuntime,
-      fallbackState: input.fallbackStateOpts,
-      reverseSwapEvent: input.reverseSwapEvent,
     });
     if (!committed.ok) return fail(committed);
     this.tmuxAdapter.deliveryGuard?.rebindLifecycle(input.node.id);
@@ -868,7 +808,7 @@ export class SeatHandoverService {
   private emitCaptureSkip(
     input: { rigId: string; nodeId: string; sessionId: string; sessionName: string },
     runtime: string,
-    reason: "missing_sidecar" | "parse_error" | "probe_timeout" | "invalid_token" | "stale_sidecar",
+    reason: "missing_sidecar" | "parse_error" | "probe_timeout" | "process_unreadable" | "invalid_token" | "stale_sidecar",
   ): void {
     try {
       this.eventBus.emit({
@@ -971,16 +911,10 @@ export class SeatHandoverService {
     return { ok: true };
   }
 
-  private checkRuntimeMismatch(
-    nodeRuntime: string | null,
-    discoveredRuntime: string,
-    fallbackAuthorized?: boolean,
-  ): SeatHandoverResult | null {
+  private checkRuntimeMismatch(nodeRuntime: string | null, discoveredRuntime: string): SeatHandoverResult | null {
     if (!nodeRuntime || discoveredRuntime === "unknown" || nodeRuntime === discoveredRuntime) {
       return null;
     }
-    // RIG-43: a fallback-authorized swap intentionally crosses runtimes — bypass the guard.
-    if (fallbackAuthorized) return null;
     return {
       ok: false,
       code: "runtime_mismatch",
@@ -991,7 +925,7 @@ export class SeatHandoverService {
 
   private lookupNode(status: SeatStatus): NodeRow {
     return this.db.prepare(
-      "SELECT id, runtime, cwd, model, codex_config_profile, effort, fallback_original_runtime, fallback_runtime, fallback_state FROM nodes WHERE rig_id = ? AND logical_id = ?"
+      "SELECT id, runtime, cwd, model, codex_config_profile, effort FROM nodes WHERE rig_id = ? AND logical_id = ?"
     ).get(status.rig_id, status.logical_id) as NodeRow;
   }
 
@@ -1018,26 +952,7 @@ export class SeatHandoverService {
     launchToken: { token: string; resumeType?: string } | null;
     occupantGeneration: string | null;
     appliedLaunch: AppliedLaunchObservation | null;
-    sourceOutcome?: SeatHandoverMutationResult["sourceOutcome"];
-    /** RIG-43: if set, atomically write node.runtime in the same UPDATE as provenance. */
-    targetRuntime?: string;
-    /** RIG-43: fallback state columns written atomically with provenance. */
-    fallbackState?: {
-      fallbackState: "on_fallback" | null;
-      fallbackPoolKey: string | null;
-      fallbackEnteredAt: string | null;
-      fallbackSwapBack: "at_expiry" | "manual" | null;
-      fallbackExpiresAt?: string | null;
-    };
-    /** RIG-43: when present, clears all fallback columns and emits seat.runtime_fallback_exited. */
-    reverseSwapEvent?: {
-      poolKey: string;
-      trigger: "at_expiry" | "manual_operator";
-      logicalId: string;
-      rigId: string;
-      fromRuntime: string | null;
-      toRuntime: string | null;
-    };
+      sourceOutcome?: SeatHandoverMutationResult["sourceOutcome"];
   }): SeatHandoverResult {
     const handoverAt = this.now().toISOString();
     const tx = this.db.transaction(() => {
@@ -1103,55 +1018,15 @@ export class SeatHandoverService {
         : input.reportedSource.mode === "fork" ? "forked"
         : input.reportedSource.mode === "rebuild" ? "rebuilt"
         : null;
-      if (input.targetRuntime) {
-        // RIG-43: atomic runtime change — runtime mutation commits in the SAME transaction
-        // as provenance, defeating the "Seat runtime changed since permission selection" guards.
-        // When fallbackState is also provided, write all fallback columns in the same UPDATE.
-        const fb = input.fallbackState;
-        if (fb) {
-          // fallback_original_runtime captures the pre-swap runtime so swap-back knows what to restore.
-          const originalRuntime = input.node.runtime ?? null;
-          this.db.prepare(`
-            UPDATE nodes SET
-              runtime = ?,
-              occupant_lifecycle = 'active',
-              continuity_outcome = ?,
-              handover_result = 'complete',
-              previous_occupant = ?,
-              handover_at = ?,
-              fallback_state = ?,
-              fallback_pool_key = ?,
-              fallback_entered_at = ?,
-              fallback_swap_back = ?,
-              fallback_original_runtime = ?,
-              fallback_expires_at = ?
-            WHERE id = ? AND fallback_state IS NULL
-          `).run(input.targetRuntime, continuityOutcome, input.latestSession.session_name, handoverAt,
-            fb.fallbackState, fb.fallbackPoolKey, fb.fallbackEnteredAt, fb.fallbackSwapBack,
-            originalRuntime, fb.fallbackExpiresAt ?? null, input.node.id);
-        } else {
-          this.db.prepare(`
-            UPDATE nodes SET
-              runtime = ?,
-              occupant_lifecycle = 'active',
-              continuity_outcome = ?,
-              handover_result = 'complete',
-              previous_occupant = ?,
-              handover_at = ?
-            WHERE id = ?
-          `).run(input.targetRuntime, continuityOutcome, input.latestSession.session_name, handoverAt, input.node.id);
-        }
-      } else {
-        this.db.prepare(`
-          UPDATE nodes SET
-            occupant_lifecycle = 'active',
-            continuity_outcome = ?,
-            handover_result = 'complete',
-            previous_occupant = ?,
-            handover_at = ?
-          WHERE id = ?
-        `).run(continuityOutcome, input.latestSession.session_name, handoverAt, input.node.id);
-      }
+      this.db.prepare(`
+        UPDATE nodes SET
+          occupant_lifecycle = 'active',
+          continuity_outcome = ?,
+          handover_result = 'complete',
+          previous_occupant = ?,
+          handover_at = ?
+        WHERE id = ?
+      `).run(continuityOutcome, input.latestSession.session_name, handoverAt, input.node.id);
 
       // Ghost-stage (e) re-key seam — the rebind is done; now invalidate the RETIRING occupant's
       // seat-name-keyed stores so the successor never inherits a ghost (drained compaction stage, frozen
@@ -1178,47 +1053,10 @@ export class SeatHandoverService {
         operator: input.operator,
         ...(input.sourceOutcome ? { sourceOutcome: input.sourceOutcome } : {}),
       });
-      // RIG-43: audit event for runtime fallback entry OR exit (same transaction = atomic with the commit).
-      let fallbackEvent: PersistedEvent | undefined;
-      if (input.reverseSwapEvent) {
-        // Reverse swap: clear ALL fallback columns now that the original runtime is restored.
-        this.db.prepare(`
-          UPDATE nodes SET
-            fallback_state = NULL,
-            fallback_pool_key = NULL,
-            fallback_entered_at = NULL,
-            fallback_swap_back = NULL,
-            fallback_original_runtime = NULL,
-            fallback_expires_at = NULL
-          WHERE id = ?
-        `).run(input.node.id);
-        fallbackEvent = this.eventBus.persistWithinTransaction({
-          type: "seat.runtime_fallback_exited",
-          rigId: input.reverseSwapEvent.rigId,
-          nodeId: input.node.id,
-          logicalId: input.reverseSwapEvent.logicalId,
-          fromRuntime: input.reverseSwapEvent.fromRuntime,
-          toRuntime: input.reverseSwapEvent.toRuntime,
-          poolKey: input.reverseSwapEvent.poolKey,
-          trigger: input.reverseSwapEvent.trigger,
-        });
-      } else if (input.fallbackState?.fallbackState === "on_fallback") {
-        fallbackEvent = this.eventBus.persistWithinTransaction({
-          type: "seat.runtime_fallback_entered",
-          rigId: input.status.rig_id,
-          nodeId: input.node.id,
-          logicalId: input.status.logical_id,
-          fromRuntime: input.node.runtime,
-          toRuntime: input.targetRuntime!,
-          poolKey: input.fallbackState.fallbackPoolKey,
-          expiresAt: input.fallbackState.fallbackExpiresAt ?? null,
-          swapBack: input.fallbackState.fallbackSwapBack,
-        });
-      }
-      return { newSessionId: newSession.id, previousSessionIdsSuperseded, event, fallbackEvent };
+      return { newSessionId: newSession.id, previousSessionIdsSuperseded, event };
     });
 
-    let committed: { newSessionId: string; previousSessionIdsSuperseded: string[]; event: PersistedEvent; fallbackEvent?: PersistedEvent };
+    let committed: { newSessionId: string; previousSessionIdsSuperseded: string[]; event: PersistedEvent };
     try {
       committed = tx();
       // S19 ruling 01530 — the SOLE narrow call: after the commit lands, the activity
@@ -1235,7 +1073,6 @@ export class SeatHandoverService {
     }
 
     this.eventBus.notifySubscribers(committed.event);
-    if (committed.fallbackEvent) this.eventBus.notifySubscribers(committed.fallbackEvent);
     const postStatus = this.statusService.getStatus(`${input.status.logical_id}@${input.status.rig_name}`);
     const currentStatus = postStatus.ok
       ? {

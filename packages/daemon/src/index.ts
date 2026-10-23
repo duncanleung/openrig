@@ -1,8 +1,7 @@
 import { serve, type ServerType } from "@hono/node-server";
 import path from "node:path";
-import os from "node:os";
 import { pathToFileURL } from "node:url";
-import { writeShutdownManifest, SHUTDOWN_MANIFEST_FILE } from "./domain/shutdown-manifest.js";
+import { endProbeGroupsOnStartupSignal, stopRuntimeProbes } from "./adapters/bounded-probe-exec.js";
 import { closeHttpServer, createDaemonShutdown, DAEMON_SHUTDOWN_RECEIPT, trackHttpServerResponses } from "./daemon-shutdown.js";
 import { readOpenRigEnv, OPENRIG_HOME } from "./openrig-compat.js";
 import { makeOperatorDeliveryEngine } from "./domain/gateway/operator-delivery-engine.js";
@@ -11,8 +10,6 @@ import { createDaemon } from "./startup.js";
 import { removeParentSessionEnv } from "./domain/parent-session-env.js";
 import { resolveBindPlan } from "./domain/bind-plan.js";
 import { runQueueRetentionSweep, RETENTION_DEFAULTS } from "./domain/queue-retention.js";
-import { FleetIngestionService, startFleetIngestionScheduler, resolveFleetReconcileIntervalMs } from "./domain/fleet-ingestion-service.js";
-import { FleetStore } from "./domain/fleet-store.js";
 import {
   createStuckSweepStatus,
   resolveStuckSweepIntervalSeconds,
@@ -125,7 +122,6 @@ export function startPeriodicSnapshotScheduler(deps: {
 export function startQueueRetentionScheduler(deps: {
   rigRepo: { db: import("better-sqlite3").Database };
   settingsStore?: { resolveOne(key: string): { value: unknown } };
-  fleetIngestion?: { rollUpSnapshots(opts?: { days?: number }): Promise<unknown> };
 }): ReturnType<typeof setInterval> | null {
   const store = deps.settingsStore;
   const enabled = store ? store.resolveOne("retention.enabled").value === true : true;
@@ -136,15 +132,14 @@ export function startQueueRetentionScheduler(deps: {
     return typeof v === "number" ? v : fallback;
   };
   const runOnce = (): void => {
-    const usageSamplesRetentionDays = num("retention.usage_samples_days", RETENTION_DEFAULTS.usageSamplesRetentionDays);
     void runQueueRetentionSweep(db, {
       nowIso: new Date().toISOString(),
       transitionsRetentionDays: num("retention.transitions_days", RETENTION_DEFAULTS.transitionsRetentionDays),
       watchdogRetentionDays: num("retention.watchdog_days", RETENTION_DEFAULTS.watchdogRetentionDays),
       watchdogKeepPerJob: num("retention.watchdog_keep_per_job", RETENTION_DEFAULTS.watchdogKeepPerJob),
-      usageSamplesRetentionDays,
+      usageSamplesRetentionDays: num("retention.usage_samples_days", RETENTION_DEFAULTS.usageSamplesRetentionDays),
       batchSize: num("retention.batch_size", RETENTION_DEFAULTS.batchSize),
-    }, { fleetIngestion: deps.fleetIngestion, usageSamplesRetentionDays }).catch((err: unknown) => {
+    }).catch((err: unknown) => {
       console.error(`[queue-retention] sweep error: ${err instanceof Error ? err.message : String(err)}`);
     });
   };
@@ -197,7 +192,6 @@ export function startWakeLadderScheduler(deps: {
   seatActivityService?: Pick<import("./domain/seat-activity-service.js").SeatActivityService, "getSeatState">;
   agentActivityStore?: Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "getLatestForNode">;
   gatewaySubsystem?: { dispatch: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => import("./domain/gateway/dispatcher.js").DispatchResult };
-  runtimeFallbackService?: { triggerForwardSwap(opts: { nodeId: string; poolKey: string; expiresAt: string }): void };
 }): WakeLadderScheduler | null {
   const queueRepo = deps.queueRepo;
   if (!queueRepo) return null;
@@ -231,11 +225,6 @@ export function startWakeLadderScheduler(deps: {
         : {}),
       ...(deps.usageLimitJitterSeconds !== undefined
         ? { usageLimitJitterSeconds: deps.usageLimitJitterSeconds }
-        : {}),
-      // RIG-43: wire forward-swap trigger when RuntimeFallbackService is available.
-      ...(deps.runtimeFallbackService
-        ? { runtimeFallbackTrigger: (opts: { nodeId: string; poolKey: string; expiresAt: string }) =>
-            void deps.runtimeFallbackService!.triggerForwardSwap(opts) }
         : {}),
     }),
     tickIntervalMs: resolveWakeRetryIntervalSeconds() * 1000,
@@ -316,6 +305,8 @@ export async function startServer(port?: number) {
     bindHosts = bindPlan.hosts;
   }
 
+  // The fresh-DB Codex probe runs inside createDaemon, before the shutdown handlers below exist.
+  const disarmStartupSignals = endProbeGroupsOnStartupSignal();
   const { app, contextMonitor, deps, eventLoopMonitor, injectWebSocket } = await createDaemon({
     dbPath,
     bearerToken,
@@ -332,7 +323,6 @@ export async function startServer(port?: number) {
   let monitorsStarted = false;
   let retentionTimer: ReturnType<typeof setInterval> | null = null;
   let stuckSweepTimer: ReturnType<typeof setInterval> | null = null;
-  let fleetIngestionTimer: ReturnType<typeof setInterval> | null = null;
   let wakeLadderScheduler: WakeLadderScheduler | null = null;
   // P7 — lifecycle heartbeat: advance last-seen every tick while running.
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -347,9 +337,7 @@ export async function startServer(port?: number) {
         // tree post-bind so the HTTP surface is ready before the first
         // tick (matches contextMonitor pattern).
         deps.watchdogScheduler?.start();
-        // RIG-84: cron joins post-bind too. Its first (catch-up) tick runs from a timer,
-        // so it never delays startup, and a throwing job is contained in the scheduler.
-        deps.cronJobScheduler?.start();
+        deps.sessionTransport?.guardedDelivery?.recover();
         // S10 — start the gateway subsystem's NETWORK services (replay, outbound poll,
         // Socket Mode inbound) post-bind, contextMonitor pattern: the composed wire is
         // already active; only its dial-out half waits for the supervision tree.
@@ -366,27 +354,9 @@ export async function startServer(port?: number) {
         // gates the running/active projection on verified process identity.
         deps.seatIdentityReconciler?.start();
         startPeriodicSnapshotScheduler(deps);
-        // Fleet ingestion: roll up snapshots before retention prunes usage_samples,
-        // then start the periodic reconciliation timer (5 min default).
-        // deps.fleetIngestion is assigned here; the route reads it via a getter closure.
-        deps.fleetIngestion = new FleetIngestionService({
-          db: deps.rigRepo.db,
-          fleetStore: new FleetStore(deps.rigRepo.db),
-          homedir: process.env.HOME ?? os.homedir(),
-          reducerPath: path.join(path.dirname(new URL(import.meta.url).pathname), "../assets/plugins/openrig-core/skills/retro/scripts/reduce-transcript.mjs"),
-          eventBus: deps.eventBus,
-        });
-        deps.fleetIngestion.subscribeLifecycleEvents();
-        deps.fleetIngestion.rollUpSnapshots({ days: 15 }).catch((err: unknown) => {
-          console.error(`[fleet-ingestion] boot rollup error: ${err instanceof Error ? err.message : String(err)}`);
-        });
         // OPR.0.4.6.FS-1 W2 — boot sweep + daily retention tick (bounded,
         // yields between batches; a sweep failure is logged, never fatal).
-        retentionTimer = startQueueRetentionScheduler({ ...deps, fleetIngestion: deps.fleetIngestion });
-        fleetIngestionTimer = startFleetIngestionScheduler(
-          deps.fleetIngestion,
-          resolveFleetReconcileIntervalMs(process.env.OPENRIG_FLEET_RECONCILE_INTERVAL_MS),
-        );
+        retentionTimer = startQueueRetentionScheduler(deps);
         // S02 — the standing stuck sweep: nobody has to remember to run the verbs.
         stuckSweepTimer = startStuckSweepScheduler(deps);
         // S01 — wake-or-escalate on batons: a failed baton wake retries on schedule,
@@ -416,20 +386,17 @@ export async function startServer(port?: number) {
   const shutdown = createDaemonShutdown({
     receiptPath: path.join(OPENRIG_HOME, DAEMON_SHUTDOWN_RECEIPT),
     phases: [
-      // First: record which rigs are running before any phase can change rig state,
-      // so `rig start --last` restores only those (RIG-83).
-      ["shutdown-manifest", () => { writeShutdownManifest(path.join(OPENRIG_HOME, SHUTDOWN_MANIFEST_FILE), deps.rigRepo.db); }],
       ["timers", () => {
+        deps.resumeMetadataRefresher?.stop();
         if (heartbeatTimer) clearInterval(heartbeatTimer);
         if (retentionTimer) clearInterval(retentionTimer);
         if (stuckSweepTimer) clearInterval(stuckSweepTimer);
-        if (fleetIngestionTimer) clearInterval(fleetIngestionTimer);
-        deps.fleetIngestion?.unsubscribeLifecycleEvents();
       }],
+      ["runtime-probes", () => stopRuntimeProbes()],
       ["proof-source-watch", () => deps.proofSourceWatch?.close()],
       ["health-diagnosis", () => deps.healthDiagnosis?.stop()],
       ["watchdog", () => deps.watchdogScheduler?.stop()],
-      ["cron", () => deps.cronJobScheduler?.stop()],
+      ["draft-delivery", () => deps.sessionTransport?.guardedDelivery?.stop()],
       ["seat-activity", () => deps.seatActivityService?.stop()],
       ["seat-structural-activity", () => deps.seatStructuralActivityService?.stop()],
       ["seat-identity", () => deps.seatIdentityReconciler?.stop()],
@@ -438,6 +405,8 @@ export async function startServer(port?: number) {
       ["wake-ladder", () => wakeLadderScheduler?.stop()],
       ["event-loop-monitor", () => eventLoopMonitor.stop()],
       ["connections", () => Promise.all(servers.map((srv) => closeHttpServer(srv)))],
+      // After the last request: the tmux control client ends and its session goes with it.
+      ["tmux-control", () => deps.tmuxAdapter.closeControlClient()],
       ["recorder", async () => {
         deps.requestPhaseObserver?.close();
         if (await drainSlowOpRecorderOnShutdown(deps.slowOpRecorder) !== 0) {
@@ -449,6 +418,7 @@ export async function startServer(port?: number) {
     markClean: () => deps.daemonLifecycleStore.recordStop(deps.daemonBootEpoch, new Date().toISOString()),
   });
   // Repeated signals join the first shutdown instead of bypassing its evidence.
+  disarmStartupSignals();
   process.on("SIGINT", () => shutdown("SIGINT"));
   process.on("SIGTERM", () => shutdown("SIGTERM"));
 

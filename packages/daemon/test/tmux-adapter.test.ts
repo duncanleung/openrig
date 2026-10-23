@@ -761,6 +761,38 @@ describe("TmuxAdapter", () => {
     });
   });
 
+  describe("isPaneInMode", () => {
+    it("reads #{pane_in_mode} from the exact pane target", async () => {
+      const exec: ExecFn = vi.fn(async () => "1\n") as unknown as ExecFn;
+      const adapter = new TmuxAdapter(exec);
+      expect(await adapter.isPaneInMode("dev-impl@my-rig")).toBe(true);
+      expect(exec).toHaveBeenCalledWith(`tmux display-message -p -t '=dev-impl@my-rig:' "#{pane_in_mode}"`);
+    });
+
+    it("returns false outside copy mode", async () => {
+      const adapter = new TmuxAdapter(async () => "0\n");
+      expect(await adapter.isPaneInMode("%0")).toBe(false);
+    });
+
+    it("treats any mode count above 0 as in a mode", async () => {
+      expect(await new TmuxAdapter(async () => "2\n").isPaneInMode("%0")).toBe(true);
+    });
+
+    it("returns null on error or unexpected output", async () => {
+      expect(await new TmuxAdapter(async () => { throw new Error("no server"); }).isPaneInMode("%0")).toBeNull();
+      expect(await new TmuxAdapter(async () => "\n").isPaneInMode("%0")).toBeNull();
+    });
+  });
+
+  describe("cancelPaneMode", () => {
+    it("sends -X cancel to the pane", async () => {
+      const exec: ExecFn = vi.fn(async () => "") as unknown as ExecFn;
+      const adapter = new TmuxAdapter(exec);
+      expect(await adapter.cancelPaneMode("%0")).toEqual({ ok: true });
+      expect(exec).toHaveBeenCalledWith("tmux send-keys -t '%0' '-X' 'cancel'");
+    });
+  });
+
   describe("capturePaneContent", () => {
     it("calls exact tmux capture-pane command with shell quoting", async () => {
       const exec: ExecFn = vi.fn(async () => "line 1\nline 2\n") as unknown as ExecFn;
@@ -1387,5 +1419,28 @@ describe("TmuxAdapter", () => {
       const res = await adapter.signalPaneProcess("%3", "KILL");
       expect(res.ok).toBe(false);
     });
+  });
+});
+
+describe("TmuxAdapter pane-local options (in-place restart)", () => {
+  it("reads a pane's own option exactly: unset is null, an empty value stays empty, spaces are kept", async () => {
+    const outputs: Record<string, string> = { "remain-on-exit": "", "@empty": "\n", "@spaced": "  on \n" };
+    const adapter = new TmuxAdapter(async (cmd) => outputs[cmd.split(" ").at(-1)!.replace(/'/g, "")] ?? "");
+    expect(await adapter.getPaneLocalOption("%1", "remain-on-exit")).toBeNull();
+    expect(await adapter.getPaneLocalOption("%1", "@empty")).toBe("");
+    expect(await adapter.getPaneLocalOption("%1", "@spaced")).toBe("  on ");
+  });
+
+  it("an unreadable option is undefined, and restoring null unsets the pane's own value", async () => {
+    const calls: string[] = [];
+    const failing = new TmuxAdapter(async () => { throw new Error("no server"); });
+    expect(await failing.getPaneLocalOption("%1", "remain-on-exit")).toBeUndefined();
+    const adapter = new TmuxAdapter(async (cmd) => { calls.push(cmd); return ""; });
+    expect(await adapter.restorePaneOption("%1", "remain-on-exit", null)).toEqual({ ok: true });
+    expect(await adapter.restorePaneOption("%1", "remain-on-exit", "on")).toEqual({ ok: true });
+    expect(calls.map((cmd) => cmd.replace(/'/g, ""))).toEqual([
+      "tmux set-option -p -u -t %1 remain-on-exit",
+      "tmux set-option -p -t %1 remain-on-exit on",
+    ]);
   });
 });

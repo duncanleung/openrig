@@ -160,11 +160,11 @@ Not setting this up today? Get the next walkthrough and occasional OpenRig updat
 
 Requires Node.js 22 or 24 and tmux, on macOS or Linux. On Linux, the distribution's own Node.js can be older (Ubuntu 24.04's is 18); install a supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac with Apple silicon, use Node.js 22 ([compatibility history](docs/releases/v0.5.15.md#known-compatibility-limitation)). On Windows, use WSL2, the Windows route OpenRig supports; native Windows isn't supported. OpenRig's automated tests don't run on WSL2 yet; see [one user's working setup](docs/reference/getting-started.md#wsl2-a-reported-working-setup). Launching a rig writes provider hooks and workspace trust settings. Before running the commands below, read [what OpenRig changes on your machine](#what-openrig-changes-on-your-machine) and back up the relevant files.
 
-**One command.** This runs OpenRig's install script from the `v0.6.8` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
+**One command.** This runs OpenRig's install script from the `v0.6.12` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.8/scripts/install.sh | sh -s -- --dry-run
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.8/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.12/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.12/scripts/install.sh | sh
 ```
 
 If a provider isn't signed in yet, the last step reports `FAILED [4/4]`, and `rig setup` lists the sign-in under "Some steps need attention". If the only remaining failures are provider sign-ins, the install steps finished; sign in to each selected provider as below and continue.
@@ -282,6 +282,7 @@ Not setting this up today? Get the next walkthrough and occasional OpenRig updat
 - **Questions:** [Discussions › Q&A](https://github.com/mvschwarz/openrig/discussions/categories/q-a)
 - **Bugs and feature requests:** [open an issue](https://github.com/mvschwarz/openrig/issues/new/choose)
 - **Contributing:** [CONTRIBUTING.md](CONTRIBUTING.md) · [Code of Conduct](CODE_OF_CONDUCT.md) · [Security policy](SECURITY.md) · [Getting help](.github/SUPPORT.md)
+- **Working on OpenRig with a coding agent?** Start with the `developing-openrig` skill in `.agents/skills/` (Claude Code: `.claude/skills/`) and [CONTRIBUTING.md](CONTRIBUTING.md).
 - **Videos:** [youtube.com/@openrig](https://www.youtube.com/@openrig)
 - **Releases:** [GitHub Releases](https://github.com/mvschwarz/openrig/releases) and npm `@openrig/cli`
 
@@ -319,6 +320,8 @@ user's home; changing `OPENRIG_HOME` alone does not isolate provider configurati
   selected MCP resources configure those external services. Built-in bootstrap
   no longer writes a command allowlist to `~/.claude/settings.json` or removes
   older allowances. `CLAUDE_CONFIG_DIR` does not relocate the project-local writes.
+  To keep your own status line alongside the collector, see
+  [Custom Claude status line](docs/reference/claude-status-line.md).
 - **Codex:** writes the daemon's `CODEX_HOME/config.toml` (normally
   `~/.codex/config.toml`). Startup enables hooks, adds the OpenRig activity relay
   commands and pre-writes trust hashes for those commands. Seat startup adds
@@ -435,7 +438,7 @@ rig specs ls
 
 ## How It Works
 
-OpenRig is a local daemon + CLI + terminal UI + MCP server, built on tmux. The older React web UI remains in maintenance mode with best-effort support.
+OpenRig is a local daemon + CLI + terminal UI + MCP server, built on tmux. OpenRig itself is under active development; only the older React web UI is in maintenance mode, with best-effort support.
 
 ```
 CLI / TUI / MCP
