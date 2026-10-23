@@ -11,7 +11,7 @@ not know exists.** So the point of what follows is not skill. It is recognition:
 lands, something rhymes, and you go check instead of building.
 
 Eighty-eight top-level verbs ship (capability canon refreshed through
-`capability-delta-v0.6.13`). This marker describes the pack's teaching, not publication or live
+`capability-delta-v0.6.14`). This marker describes the pack's teaching, not publication or live
 adoption. Read this once for shape, and let it make you suspicious that a thing already exists.
 Model-divergence proclamations are live product (trust them; pins use canonical
 model IDs).
@@ -135,7 +135,8 @@ unseen — which makes messages the one delivery channel that never gets skipped
   read something, do not ask it. Look.**
 - **`rig ask`** — search what was said or decided, across *every generation that ever sat in a
   seat*. It reaches back past a handover that erased your predecessor's context, and costs no
-  runtime tokens.
+  runtime tokens. `--wake` asks a Claude or Codex seat itself; any other runtime (Pi, custom, or
+  none recorded) is refused before a wake starts.
 - **`rig chatroom wait`** — block until a peer actually says something, instead of polling
   `capture` in a loop. Also `history`, `watch`, `topic` for a named thread that stays retrievable.
   Its `--timeout` is in seconds and ignores a suffix, so `2m` means 2 seconds. Poll timeouts,
@@ -460,7 +461,12 @@ not have to tear one down to change it, and you rarely have to start from nothin
   to a node. **`rig adopt`** does the whole thing at once: create the structure and bind the
   running sessions into it.
 - **`rig reconcile-session`** — you resumed a seat by hand and the daemon still shows it down; make
-  the system see the live process **without launching anything**.
+  the system see the live process **without launching anything**. A running seat that refuses every
+  send because its tmux pane was never recorded (one launched by an older OpenRig) takes
+  `rig reconcile-session <seat> --repair-missing-pane --no-launch`: it fills only the missing pane,
+  keeps the session and resume token, never adopts, and refuses while typing protection is on.
+  Plain reconcile adopts the seat into a new session without its resume token; use the repair even
+  where a protected seat's compaction refusal still suggests plain reconcile.
 - **`rig unclaim` / `rig release`** — stop managing one adopted session, or all of them,
   **without killing the process or the agent inside it**. Handing something back to its human is a
   first-class move, not an abandonment.
@@ -487,6 +493,7 @@ version, from checking the environment to a useful report to the OpenRig team.
   Stop distinguishes process/listener exit from a clean asynchronous drain: inspect the matching
   `daemon-shutdown.json` and log when completion is incomplete or unverified. No target is a
   distinct no-op, and a timeout never proves down. Use command help for exact limits and recovery.
+  `/healthz` reports the daemon's effective UID as `euid`, beside `pid`.
 - **`rig doctor`** — is the *installation* wired up correctly, or are you chasing a bug that is
   really a broken install. It checks Claude and Codex installs, and a login or configured provider
   credential, the way setup does; it fails for a harness the person doesn't use, which they can
@@ -590,7 +597,9 @@ version, from checking the environment to a useful report to the OpenRig team.
 - **`rig compact-plan`** → **`rig compact`** — who is near the context wall, then act on it.
   **Ordering matters: running `compact` without the plan is guessing which seat needed it.**
   Managed compaction waits for the seat's restore map before compacting; `rig compact --state`,
-  `--cancel` and `--skip-map` inspect, stop or skip that wait. The `claude-compaction-restore`
+  `--cancel` and `--skip-map` inspect, stop or skip that wait. If preparation stops at an ordinary
+  approval, a manual `rig compact` keeps waiting for someone to answer it, within its 180-second
+  budget; OpenRig never answers it, and the request times out after 240 seconds. The `claude-compaction-restore`
   skill covers writing and reading the map; `claude-compact-in-place` no longer ships. After a
   managed compaction, refocus waits for the restore request, which names the `refocusing` skill
   (the daemon installs it globally); three failed refocus attempts in a row for one occupant post
@@ -840,7 +849,10 @@ your circumstances is configuration, and the ones that are not, another agent ca
 - **`rig config get` / `reset` / `init-workspace`** — read one value, change a system-wide setting
   and put it back exactly as it was, or additively lay down the canonical project scaffold on a
   box that has none. Instance startup uses the same additive initializer for the surrounding
-  `state`, `context`, `skills`, `topology`, and operational roots.
+  `state`, `context`, `skills`, `topology`, and operational roots. With `transport.local_user_guard`
+  on (off by default; `rig config set transport.local_user_guard true`), a Mac's local `rig` requests
+  stop only when the daemon's reported, `ps`-corroborated user differs from yours; unknown evidence
+  lets the call through. It isn't authentication or isolation.
 - **`rig policy permissions list` / `show` / `current` / `apply`** — what permission policy is
   actually in effect: discovers custom policy specs, validates refs (malformed can never read as
   valid OR absent), shows what would apply. The older `rig policy list|show|current|apply` forms
