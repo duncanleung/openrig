@@ -26,17 +26,15 @@ Conventions: `status:` frontmatter field (`proposed` / `accepted` / `superseded`
 
 ## Issue Tracking
 
-Tickets are tracked in the Obsidian vault at `~/Documents/obsidian-local-life-manager/projects/openrig/tickets/`. Do NOT use Linear for ticket operations. Use the ticket CLI:
+Tickets are tracked in the Obsidian vault at `~/Documents/obsidian-vault/projects/openrig/tickets/`. Do NOT use Linear for ticket operations.
 
 ```bash
-TICKET_CLI=~/Documents/obsidian-local-life-manager/_system/bin/ticket
-$TICKET_CLI list --project openrig --status backlog       # view backlog
-$TICKET_CLI show RIG-12 --json                             # read a ticket
-$TICKET_CLI update RIG-12 --status in-progress             # transition state
-$TICKET_CLI list --ranked                                  # priority queue
+# Tickets are markdown files — no CLI needed
+ls ~/Documents/obsidian-vault/projects/openrig/tickets/
+cat ~/Documents/obsidian-vault/projects/openrig/tickets/RIG-N.md
 ```
 
-Ticket IDs use the `RIG-N` format (e.g., `RIG-12`, `RIG-99`). The CLI enforces atomic ID allocation and validates enum values. Do not hand-edit ticket frontmatter.
+Ticket IDs use the `RIG-N` format (e.g., `RIG-12`, `RIG-99`). Do not hand-edit ticket frontmatter.
 
 ## Code review guardrails
 
@@ -229,9 +227,10 @@ conversation. Explain the failure and help with the chosen fallback; do not atta
 Over headless SSH, explain that no visible terminal opened; tell the person to open a new terminal window or
 tab and give one complete connection and attachment command using the current Herdr endpoint, as in the guide.
 No, SSH and headless use are valid background outcomes. If the person chooses a manual operator attachment after
-a failure, find the `operator.agent` row with `rig ps --nodes --rig kernel --json`. Give the exact
-`env -u TMUX tmux attach-session -t '=<canonicalSessionName>'` with the observed name filled in for a new terminal
-on the same host and user (over SSH, connect there first). Ctrl-b, then d detaches without stopping it.
+a failure, find the `operator.agent` row with
+`rig ps --nodes --rig kernel --json --fields logicalId,canonicalSessionName,tmuxAttachCommand`. Give `env -u TMUX` followed by
+that row's `tmuxAttachCommand`, exactly as listed (it names the daemon's tmux server when that isn't the default
+one), for a new terminal on the same host and user (over SSH, connect there first). Ctrl-b, then d detaches without stopping it.
 Ask the person's goal and project folder, then hand them to the ready operator; do not implement the project yourself.
 Find the `operator.agent` row with `rig ps --nodes --rig kernel --json` and use its `canonicalSessionName` with
 `rig send <canonicalSessionName> 'This is the agent that installed OpenRig. The person will answer in your pane. Goal: <goal>. Project folder: <absolute path>.'`,
@@ -264,27 +263,3 @@ were handed and what counts as done. If you are setting up a world pack for your
 `rig context get world-example` has a fill-in template.
 
 <!-- END OpenRig MANAGED BLOCK: openrig-onboarding-02.md -->
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
