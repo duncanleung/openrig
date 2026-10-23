@@ -1,5 +1,5 @@
 --- a/factory-loop/SKILL.md	2026-10-23 02:47:56
-+++ b/factory-loop/SKILL.md	2026-10-23 03:17:02
++++ b/factory-loop/SKILL.md	2026-10-23 03:30:53
 @@ -43,9 +43,9 @@
                                              │           └──────────────────────────┘
                                              │
@@ -29,31 +29,36 @@
  
  This skill composes with — does not override — the existing orchestrator validation gate
  (`role.md:23-40`). The gate says "validate every non-mechanical plan." The `/ticket-loop` classifier
-@@ -590,16 +595,17 @@
+@@ -590,16 +595,22 @@
  Must return a valid seat position. If it fails, warn that state tracking will use status files
  instead of the queue (degraded mode).
  
 -### 5. Skill availability
 +### 5. Seat availability
-+
-+The seats run `/ticket-loop`, `/pr-review-lifecycle` and `/phase-gate`, so the orchestrator does
-+not need the skill files. Verify the seats exist. Do NOT call the `Skill` tool to test a skill.
  
 -Verify `/ticket-loop`, `/pr-review-lifecycle`, and `/phase-gate` are available. Check:
++The seats run `/ticket-loop`, `/pr-review-lifecycle` and `/phase-gate`, so the orchestrator does
++not need the skill files. Verify the seats exist. Do NOT call the `Skill` tool to test a skill.
++
  ```bash
 -ls ~/.claude/skills/ticket-loop/SKILL.md 2>/dev/null && echo "ticket-loop: available"
 -ls ~/Documents/Develop/openrig/packages/daemon/assets/plugins/openrig-core/skills/pr-review-lifecycle/SKILL.md 2>/dev/null && echo "pr-review-lifecycle: available"
 -ls ~/.claude/skills/phase-gate/SKILL.md 2>/dev/null && echo "phase-gate: available"
-+rig whoami --json | jq -r '.peers[].logicalId'
++PEERS=$(rig whoami --json | jq -r '.peers[].sessionName')
++for SEAT in ${TOPOLOGY_IMPLEMENT_SEAT} ${TOPOLOGY_REVIEW_SEAT} ${TOPOLOGY_ADVISOR_SEAT}; do
++  echo "$PEERS" | grep -qx "${SEAT}@${RIG_NAME}" || echo "MISSING: ${SEAT}@${RIG_NAME}"
++done
  ```
  
 -All three must exist. If any is missing, stop.
-+The implement seat, the review seat and (for non-AUTO tickets) the advisor seat must appear in the
-+list. If one is missing, stop.
++Seat addresses are `<seat>@<rig>` (for example `dev-impl@openrig`), which is the `sessionName`
++field. The `logicalId` field (`dev.impl`) is dot-separated and does not match the topology names.
++The implement seat, the review seat and (for non-AUTO tickets) the advisor seat must not print
++`MISSING`. If one does, stop.
  
  ### 6. Configuration file (auto-generate if missing)
  
-@@ -972,10 +978,10 @@
+@@ -972,10 +983,10 @@
  IMPLEMENT_SEAT="${TOPOLOGY_IMPLEMENT_SEAT}@${RIG_NAME}"
  
  # Verify seat exists and is responsive
@@ -68,7 +73,7 @@
  fi
  ```
  
-@@ -1053,14 +1059,22 @@
+@@ -1053,14 +1064,22 @@
  The orchestrator does not poll continuously. It waits for input (the result message) and runs
  the lease check only at the heartbeat interval.
  
@@ -96,7 +101,7 @@
  
  **Processing the result (both modes):**
  
-@@ -1172,28 +1186,36 @@
+@@ -1172,28 +1191,36 @@
  HEAD_SHA=$(gh pr view ${PR_NUMBER} --repo ${GH_REPO} --json headRefOid --jq '.headRefOid')
  ```
  
@@ -127,12 +132,12 @@
 -`/phase-gate` to return its assessment. If `/phase-gate` runs inline (no advisor seat or standalone
 -mode), the validation runs in the orchestrator's context.
 +Park the queue item as in Step 2c (`PHASE=validate`), and unpark when `GATE_RESULT` arrives.
- 
++
 +**No advisor seat (not configured, or missing):** Do NOT run `/phase-gate` or a validator inline.
 +Transition to `blocked` with `block_phase: validating`, report "advisor seat unavailable" to the
 +human. Park the queue item with `rig queue block ${QITEM_ID} --on "external:seat-available:${TOPOLOGY_ADVISOR_SEAT}" --continuation "retry gate dispatch for ${TICKET_ID}" --wake-after 15m`, and retry the dispatch when the wake fires. The human can unblock sooner with `rig queue update ${QITEM_ID} --state in-progress`. The gate stays mandatory. An inline run would load
 +the skill body into the orchestrator and would also remove the seat boundary.
-+
+ 
  **Wait-for-result procedure:** Same as Steps 2c and 2f — poll every 60s, run lease checks. If the
 -validation stalls (advisor seat goes idle), `/phase-gate` reports the failure and the orchestrator
 -transitions to `blocked` with `block_phase: validating`.
@@ -146,7 +151,7 @@
  
  | Gate result | Action |
  |-------------|--------|
-@@ -1227,13 +1249,30 @@
+@@ -1227,13 +1254,30 @@
  `ADVISOR_RESULT` for non-AUTO tickets. If the advisor seat is unavailable, the orchestrator blocks
  — it does not skip validation. This is a mandatory gate, not an optional check.
  
@@ -183,7 +188,7 @@
  ---
  
  ### 2f — Dispatch review (state: `reviewing`)
-@@ -1309,10 +1348,13 @@
+@@ -1309,10 +1353,13 @@
  crash. If the review seat goes idle without reporting, transition to `blocked` with
  `block_phase: reviewing`.
  
@@ -200,7 +205,7 @@
  
  **Merge-stop contract (both modes):** When invoked from `/factory-loop`, the review evaluates
  merge readiness (Steps 5a–5d) but **does not execute Step 5e** (the merge command). The review
-@@ -1321,8 +1363,7 @@
+@@ -1321,8 +1368,7 @@
  human approval (or after confirming the merge policy permits auto-merge for this ticket's
  classification and advisor outcome).
  
@@ -210,7 +215,7 @@
  
  This is a composition boundary, not a logic override. The review still evaluates all five merge
  conditions. The factory loop adds the sixth condition: recorded human approval (or policy-based
-@@ -1330,7 +1371,7 @@
+@@ -1330,7 +1376,7 @@
  
  ### 2f — Handle review result
  
@@ -219,7 +224,7 @@
  
  | `outcome` field | State transition | Action |
  |-----------------|-----------------|--------|
-@@ -1780,11 +1821,10 @@
+@@ -1780,11 +1826,10 @@
  **When:** `TICKET_LOOP_RESULT` arrives with `classification=ADJUDICATE_LIGHT` or
  `classification=ADJUDICATE_HEAVY`. AUTO-classified tickets skip this gate.
  
@@ -235,7 +240,7 @@
  
  **Why mandatory.** In human-out-of-the-loop autonomous operation, the implementation seat plans
  and builds the first approach it finds. `/phase-gate` provides an independent second opinion via
-@@ -1955,9 +1995,9 @@
+@@ -1955,9 +2000,9 @@
      │   (includes /phase-gate pre-implement)   │                   │
      │◀── TICKET_LOOP_RESULT ──│                │                   │
      │                         │                │                   │
@@ -248,7 +253,7 @@
      │◀── GATE_RESULT ─────────────────────────-│  gate:validation) │
      │                         │                │                   │
      │── rig send /code-review-dual ───────────────────────────────▶│
-@@ -1979,7 +2019,7 @@
+@@ -1979,7 +2024,7 @@
  GATE_RESULT: subject=<ID> boundary=post-implement result=<PASS|FAIL|WARN> findings=<N> high=<N> blocking=<N> validator=<skill> qitem=<gate_qitem_id|null> note=<one-line>
  ```
  
@@ -257,7 +262,7 @@
  production. The orchestrator receives the gate result and uses `result` to determine the
  state transition (see Step 2e).
  
-@@ -1998,14 +2038,17 @@
+@@ -1998,14 +2043,17 @@
  **Seat availability check:** Before dispatching to a named seat, verify it exists:
  
  ```bash
