@@ -15,12 +15,20 @@ operator in the OpenRig view.
 
 ## Before you start
 
-You need Node.js 22 or 24 and tmux, on macOS or Linux. On Linux, the
-distribution's own Node.js can be older (Ubuntu 24.04's is 18); install a
-supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`)
-or NodeSource. On a Mac with Apple
-silicon, use Node.js 22 (see the [compatibility
-history](../releases/v0.5.15.md#known-compatibility-limitation)). Native
+You need Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude
+Code or Codex account: one is enough, since the kernel operator adapts the
+shipped `starter` team to whichever you have. On Linux, the distribution's own
+Node.js can be older (Ubuntu 24.04's is 18); install a supported version with
+[nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac
+with Apple silicon, use Node.js 22 (see the [compatibility
+history](../releases/v0.5.15.md#known-compatibility-limitation)). On a Mac where
+you aren't an administrator, or where Homebrew belongs to another account (its
+`brew install` is refused), install Node.js in your own home folder with
+[nvm](https://github.com/nvm-sh/nvm): run `touch ~/.zshrc` (a new Mac account
+has none, and nvm's installer only adds itself to a profile file that already
+exists), then the install command on nvm's page, open a new terminal, and run
+`nvm install 22`. That needs no administrator password, and `npm install -g`
+then installs into your nvm folder. Native
 Windows isn't supported. On Windows, use WSL2: it's the Windows route OpenRig
 supports, though OpenRig's automated tests don't run on it yet. One user's
 [working setup](#wsl2-a-reported-working-setup) is below. Node 20 and
@@ -123,19 +131,20 @@ You can also read [`skills/rigs/SKILL.md`](../../skills/rigs/SKILL.md) directly.
 script will do and changes nothing:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.12/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.13/scripts/install.sh | sh -s -- --dry-run
 ```
 
 The same command without `--dry-run`,
-`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.12/scripts/install.sh | sh`, installs the
+`curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.13/scripts/install.sh | sh`, installs the
 latest published `@openrig/cli` with `npm install -g`,
 runs the Node.js and SQLite check, then `rig setup --dry-run` and `rig setup`. `rig setup` checks both Claude Code and
-Codex and may install a missing one, as described below. A failed step prints
-`FAILED [n/4] <command or check> (exit <code>)`. Where a provider isn't signed in yet, step 4 ends that way and
-`rig setup` lists each sign-in under "Some steps need attention". If the only remaining failures are provider
-sign-ins, the install steps finished: sign in to each selected provider as below, then continue at
-[Start the kernel](#start-the-kernel-and-check-its-state). To install only what the selected providers need, go step
-by step instead:
+Codex and may install a missing one, as described below. A failed step among the first three prints
+`FAILED [n/4] <command or check> (exit <code>)`. When `rig setup` (step 4) doesn't finish ready, for example because a
+provider isn't signed in yet, the script ends with `INSTALLED, SETUP NOT COMPLETE (exit <code>)`: the CLI is
+installed, and `rig setup` lists what's left under "Some steps need attention". If the only items left are provider
+sign-ins, sign in to each selected provider as below, then continue at
+[Start the kernel](#start-the-kernel-and-check-its-state); run `rig setup` again rather than reinstalling the CLI. To
+install only what the selected providers need, go step by step instead:
 
 ### Choose your providers
 
@@ -248,6 +257,17 @@ When the agent already runs inside Herdr, the command focuses a space with the
 same view and plan, or creates one if none matches, preserving its config and existing spaces. The
 caller's Herdr endpoint must match the daemon's endpoint; a mismatch is reported
 without opening a window or putting the view in another session.
+
+The shared TUI (`rig tui --shared`) runs in the daemon's tmux server, so its own environment never
+carries the Herdr you are looking at; the markers are on the tmux client attached to it. When you
+open a terminal view from it on Linux, the TUI passes the markers of the client that was active last
+(normally the one that pressed the key) to the command, which then opens the view in that Herdr. The
+chosen client may belong to a different viewer: tmux only counts keys a client types, so a key sent
+by an agent (`send-keys`) or by a control-mode client doesn't count as any client's activity, and the
+view opens in the Herdr of the interactive client that typed last, however long ago. With no client
+attached, more than one client active in the same second, or a client that isn't in Herdr or can't be
+read, nothing is passed and the result is what it was before. Other platforms, and every other way of
+running `rig terminal open`, keep the previous result too.
 
 On Linux, a local graphical display and a supported hosting terminal are required
 (Ghostty, GNOME Terminal, Konsole or xterm). Linux reports a window request; verify
@@ -543,6 +563,16 @@ This reminder is omitted from the default kernel view and entirely read-only wat
 views. If the provider cannot open, each labelled fallback command joins a different
 seat. Keep all returned commands
 complete when sharing them; a created workspace alone does not confirm visibility.
+
+### Built by the community
+
+Tools built around OpenRig are maintained by their authors. We have not tested them;
+this list does not promise support or compatibility with your OpenRig version.
+
+- **[Rig HQ](https://github.com/dmelo/rig-hq)**, by [dmelo](https://github.com/dmelo):
+  a read-only pixel-office viewer for rigs, seats, attention and queue handoffs, as
+  described in the [author's introduction](https://github.com/mvschwarz/openrig/discussions/879).
+  The author reports testing it with OpenRig 0.6.5. See its repository for setup and support.
 
 ## Continue real project work
 

@@ -1,3 +1,4 @@
+import { currentClaudeMcpMenu } from "./claude-mcp-menu.js";
 import stringWidth from "string-width";
 import { CODEX_TURN_STATUS_PATTERN } from "./codex-pane-patterns.js";
 import { randomUUID } from "node:crypto";
@@ -32,7 +33,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { latestHookPermissionPending, latestHookWaitsOnPerson, type AgentActivityStore } from "./agent-activity-store.js";
 import type { EventBus } from "./event-bus.js";
 import type { AgentActivity } from "./types.js";
-import type { GuardTarget, SeatDeliveryGuard } from "./seat-delivery-guard.js";
+import { DeliveryGuardError, type GuardTarget, type SeatDeliveryGuard } from "./seat-delivery-guard.js";
 import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
@@ -515,14 +516,17 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
     : null;
   const claudeComposer = findClaudeComposer(paneContent, options);
   const oldQuestionEnd = promptScanLines.lastIndexOf(CLAUDE_QUESTION_FOOTER);
+  const permissionPromptEvidence = findPatternEvidence(promptScanLines, PERMISSION_PROMPT_PATTERNS);
   // A complete later empty composer with a recognized Claude bar makes the preceding question history.
   // Keep draft handling and selectors without this dialog boundary unchanged.
   const selectionLines = claudeComposer?.framed &&
       CLAUDE_ANCHORED_MODE_FOOTER.test(claudeComposer.bar) &&
       IDLE_PROMPT_PATTERNS.some(pattern => pattern.test(claudeComposer.text)) &&
       oldQuestionEnd >= 0 && oldQuestionEnd < promptScanLines.length - 1
-    ? promptScanLines.slice(oldQuestionEnd + 1) : promptScanLines;
-  const selectionPromptEvidence = findCurrentClaudeQuestion(paneContent) ??
+    ? promptScanLines.slice(oldQuestionEnd + 1)
+    : options.runtime === "codex" && !permissionPromptEvidence
+      ? codexCurrentSelectionLines(paneContent) ?? promptScanLines : promptScanLines;
+  const selectionPromptEvidence = currentClaudeMcpMenu(paneContent) ?? findCurrentClaudeQuestion(paneContent) ??
     findPatternEvidence(selectionLines, [COMPOSER_SELECTION_SCAN_PATTERN]);
   if (selectionPromptEvidence) {
     return {
@@ -535,7 +539,6 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   // OPR.0.4.1.10 (FR-1c): a permission/confirmation question is attention even when its selector is
   // not in view — checked before the idle short-circuits so a permission block above an idle-looking
   // footer never reads as idle (which would let a default send land on it).
-  const permissionPromptEvidence = findPatternEvidence(promptScanLines, PERMISSION_PROMPT_PATTERNS);
   if (permissionPromptEvidence) {
     return {
       state: "attention",
@@ -1213,6 +1216,19 @@ function codexTurnStatusAt(box: { lines: string[]; inputAt: number }): number {
   return -1;
 }
 
+/** Codex 0.160.0's parent bottom-pane renderer replaces the normal composer for a modal; inline choices and
+ *  previews follow the running status. Only scope generic selector history at this adjacent normal-frame slot.
+ *  A draft, queued input, different visible version, missing footer or intervening content keeps the full scan.
+ *  Source: openai/codex a956835d, tui/src/bottom_pane/mod.rs:2164-2310. Permission detectors keep their own scan. */
+function codexCurrentSelectionLines(pane: string): string[] | null {
+  if (readInputBox(pane, "codex", "") !== "empty") return null;
+  const box = codexInputBox(pane)!;
+  let status = box.inputAt - 1;
+  while (status >= 0 && !box.lines[status]!.trim()) status--;
+  if (status < 0 || !CODEX_TURN_STATUS_PATTERN.test(box.lines[status]!)) return null;
+  return trimPaneLines(box.lines.slice(status).join("\n"));
+}
+
 /** Whether a Claude Code frame shows a running turn: `esc to interrupt` in the footer under its input box, or a
  *  live status row above the box (timer-less rows included): in the two rows above the box's opening rule, where
  *  Claude Code 2.1.296 draws its status row over a one-row margin whatever the box's height, or as
@@ -1528,6 +1544,10 @@ export interface SendOpts {
   onInputEffect?: (phase: "pasted" | "submitted") => void;
   /** Internal managed lifecycle prerequisite; never accepted from HTTP send options. */
   beforeWrite?: () => void;
+  /** The caller's request. Aborted while the send still waits, before any input starts, the send ends with
+   *  `caller_cancelled` and never writes, then or later. Once input may have started it is ignored: the result stays
+   *  attempted or written. Queue wakes and committed outbox deliveries have no caller and ignore it. */
+  signal?: AbortSignal;
   /** Stable caller request ID, reused for readback after transport uncertainty. */
   deliveryId?: string;
   auditPointer?: string;
@@ -1578,6 +1598,18 @@ export interface SendOpts {
    *  renders as "[Pasted text #N +X lines]"; X must match this count for the placeholder to count
    *  as evidence of THIS piece. */
   expectedStagedLineCount?: number;
+}
+
+const CALLER_CANCELLED = "caller_cancelled";
+
+/** The caller's cancellation signal, or none for sends no caller owns (queue wakes, committed outbox deliveries). */
+function callerSignal(opts?: SendOpts): AbortSignal | undefined {
+  return opts?.queueWake || opts?.committedOutboxIds ? undefined : opts?.signal;
+}
+
+function callerCancelled(sessionName: string): SendResult {
+  return { ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: CALLER_CANCELLED,
+    error: `The request was cancelled before any input started. Nothing was typed into '${sessionName}', and nothing will be.` };
 }
 
 // OPR.0.4.3.30 — options for the fan-out path (`broadcast()`). Superset of SendOpts.
@@ -1668,6 +1700,9 @@ export interface CaptureResult {
   lines?: number;
   error?: string;
   reason?: string;
+  /** Claude Code and Codex seats, when the caller asked: what the live input box holds, and which part is likely a
+   *  harness suggestion. */
+  inputBox?: InputBoxAnnotation;
 }
 
 export interface BroadcastResult {
@@ -2096,6 +2131,8 @@ export class SessionTransport {
   async send(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     const guard = this.tmuxAdapter.deliveryGuard;
     if (!guard) {
+      // No guard, so no recorded delivery to read back: a caller already gone ends the send here.
+      if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
       const result = await this.sendUnguarded(sessionName, text, opts);
       if (result.ok && result.sent !== false) {
         await this.reconcileStartupReadiness(sessionName).catch(() => {});
@@ -2130,6 +2167,9 @@ export class SessionTransport {
           if (prior.deliveryState === "retained" || prior.deliveryState === "retired") return retainedResult();
         }
       }
+      // A recorded delivery has answered with its own outcome above; with nothing recorded, a caller already gone
+      // ends the send here.
+      if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
       // #1084 — the idle wait must not occupy the seat's serial lease: a long
       // --wait-for-idle inside guard.operation holds up other sends and queue
       // creates to this seat for the whole wait. The lease-free wait, main's
@@ -2167,7 +2207,14 @@ export class SessionTransport {
       }
       const result = await guard.operation(sessionName, async () => {
         if (this.guardedDelivery && !sendOpts?.submitOnly && guard.needsInputCheck(sessionName)) {
-          return this.guardedDelivery.send(sessionName, text, sendOpts ?? {}, ids);
+          // Up to its durable record a draft-aware send is still the caller's: one that went away while this send
+          // waited for the lease ends here, unless a record for this delivery already exists. DraftAwareDelivery.send
+          // commits that record synchronously before its first await, so no cancellation lands between this check
+          // and the commit; after the commit a caller going away doesn't cancel it.
+          if (callerSignal(sendOpts)?.aborted && !this.guardedDelivery.existing(sessionName, text, sendOpts ?? {}, ids)) {
+            return callerCancelled(sessionName);
+          }
+          return this.guardedDelivery.send(sessionName, text, { ...sendOpts, signal: undefined }, ids);
         }
         const prior = this.guardedDelivery?.existing(sessionName, text, sendOpts ?? {}, ids);
         return prior ?? this.sendUnguarded(sessionName, text, sendOpts);
@@ -2175,6 +2222,8 @@ export class SessionTransport {
         const prior = this.guardedDelivery?.existing(sessionName, text, sendOpts ?? {}, ids);
         if (prior) return prior;
         if (opts?.submitOnly) return { ok: false, sessionName, sent: false, reason: "typing_guard_enabled", error: "Typing guard prevents submit-only; no Enter was sent." };
+        // Nothing is retained yet: a caller that went away while this send waited for the lease ends it here.
+        if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
         this.db.transaction(() => {
           for (const id of ids) {
             const prior = opts?.committedOutboxIds ? outbox.getById(id) : null;
@@ -2342,6 +2391,7 @@ export class SessionTransport {
       timeoutMs,
       binding: { sessionName, nodeId: meta.nodeId, occupant: meta.occupant, pane: meta.pane },
       readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
+      signal: callerSignal(opts), cancelledBy: "caller",
     });
     if (!preWait.ok) {
       return { ok: false, failure: {
@@ -2545,15 +2595,29 @@ export class SessionTransport {
         };
       }
       this.tmuxAdapter.deliveryGuard?.expectStagedInput(sessionName, expected);
+      // This Enter is the request's first input, so a caller that has gone ends it here, before any key, as for a paste.
+      const cancel = callerSignal(opts);
+      if (cancel?.aborted) return callerCancelled(sessionName);
       const targetFailure = await checkClaudeTarget();
       if (targetFailure) return targetFailure;
       const copyModeFailure = await leavePaneMode("Nothing was submitted.");
       if (copyModeFailure) return copyModeFailure;
-      const submitResult = await this.runStage(
-        "session_transport.submit",
-        () => this.tmuxAdapter.sendKeys(sessionName, ["Enter"]),
-        (result) => result.ok ? "ok" : "failed",
-      );
+      if (cancel?.aborted) return callerCancelled(sessionName);
+      // The last check runs in the adapter, immediately before the key (after its guard checks).
+      const beforeKey = cancel ? () => { if (cancel.aborted) throw new DeliveryGuardError(CALLER_CANCELLED, "caller cancelled before the key"); } : undefined;
+      let submitResult;
+      try {
+        submitResult = await this.runStage(
+          "session_transport.submit",
+          () => beforeKey ? this.tmuxAdapter.sendKeys(sessionName, ["Enter"], beforeKey) : this.tmuxAdapter.sendKeys(sessionName, ["Enter"]),
+          (result) => result.ok ? "ok" : "failed",
+        );
+      } catch (error) {
+        // Unguarded, the adapter's pre-key check throws instead of returning a result; no key was sent.
+        if (error instanceof DeliveryGuardError && error.code === CALLER_CANCELLED && cancel?.aborted) return callerCancelled(sessionName);
+        throw error;
+      }
+      if (!submitResult.ok && submitResult.code === CALLER_CANCELLED && cancel?.aborted) return callerCancelled(sessionName);
       if (!submitResult.ok) {
         return { ok: false, sessionName, reason: "submit_failed", outcome: "failed", error: `submitOnly: Enter did not land on '${sessionName}': ${submitResult.message}` };
       }
@@ -2572,6 +2636,7 @@ export class SessionTransport {
         timeoutMs: waitForIdleMs,
         binding: observed?.binding,
         readinessFromPaneOnly: opts?.readinessFromPaneOnly === true,
+        signal: callerSignal(opts), cancelledBy: "caller",
       });
       waitEvidence = {
         activity: waitResult.activity,
@@ -2629,6 +2694,7 @@ export class SessionTransport {
           timeoutLabelMs: waitForIdleMs,
           binding: observed?.binding,
           readinessFromPaneOnly: opts.readinessFromPaneOnly === true,
+          signal: callerSignal(opts), cancelledBy: "caller",
         });
         waitEvidence = {
           activity: rewait.activity,
@@ -2799,6 +2865,8 @@ export class SessionTransport {
       text = appendDeliveredSegment(text, this.now().getTime() - Date.parse(opts.stampISO));
     }
 
+    // A caller that went away while this send waited: nothing has been written, so nothing ever is.
+    if (callerSignal(opts)?.aborted) return observe({ ...callerCancelled(sessionName), ...(waitMode ? waitEvidence : {}) });
     // Recheck the selected recipient after readiness/capture awaits, at the input boundary.
     const targetFailure = await checkClaudeTarget();
     if (targetFailure) return observe(targetFailure);
@@ -2807,6 +2875,11 @@ export class SessionTransport {
 
     // 3. Deliver ordinary messages as paste, audited prompt answers as key input.
     if (observed) observed.sentHash = hashSentText(text);
+    // The caller's cancellation is checked once more at the adapter's last step before the paste (after its buffer
+    // setup). A refusal there is proven pre-input and returns caller_cancelled; Enter below never checks it.
+    const cancel = callerSignal(opts);
+    if (cancel?.aborted) return observe({ ...callerCancelled(sessionName), ...(waitMode ? waitEvidence : {}) });
+    const beforePaste = cancel ? () => { opts?.beforeWrite?.(); if (cancel.aborted) throw new DeliveryGuardError(CALLER_CANCELLED, "caller cancelled before the paste"); } : opts?.beforeWrite;
     // Set once the text write has been handed to the adapter: from then on a throw is not "nothing sent".
     let writeIssued = false;
     const tagIssued = (error: unknown): never => {
@@ -2818,11 +2891,14 @@ export class SessionTransport {
       () => {
         opts?.beforeWrite?.();
         writeIssued = true;
-        if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, opts?.beforeWrite, { bracketed: false });
-        return opts?.beforeWrite ? this.tmuxAdapter.sendText(sessionName, text, opts.beforeWrite) : this.tmuxAdapter.sendText(sessionName, text);
+        if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, beforePaste, { bracketed: false });
+        return beforePaste ? this.tmuxAdapter.sendText(sessionName, text, beforePaste) : this.tmuxAdapter.sendText(sessionName, text);
       },
       (result) => result.ok ? "ok" : "failed",
     ).catch(tagIssued);
+    if (!textResult.ok && textResult.code === CALLER_CANCELLED && cancel?.aborted) {
+      return observe({ ...callerCancelled(sessionName), ...(waitMode ? waitEvidence : {}) });
+    }
     if (!textResult.ok) {
       // A draft refusal is the guard holding the write before any input; it is not an attempted write.
       const policyRefusal = typeof textResult.code === "string" && textResult.code.startsWith("draft_");
@@ -3011,6 +3087,8 @@ export class SessionTransport {
     attachmentType: string | null;
     timeoutMs: number;
     signal?: AbortSignal;
+    /** Whose cancellation the signal carries: managed preparation (the default) or the send's caller. */
+    cancelledBy?: "caller";
     binding?: ObservedBinding;
     readinessFromPaneOnly?: boolean;
     // Optional display value for timeout messages. The deadline always comes
@@ -3053,12 +3131,15 @@ export class SessionTransport {
         };
     };
 
+    const cancelReason = input.cancelledBy === "caller" ? CALLER_CANCELLED : "preparation_cancelled";
     const cancelled = () => ({
       ok: false as const,
-      reason: "preparation_cancelled",
-      error: "Managed preparation ended; no compact authorized.",
+      reason: cancelReason,
+      error: input.cancelledBy === "caller"
+        ? "The request was cancelled while it waited for the seat to be idle. No text was sent, and none will be."
+        : "Managed preparation ended; no compact authorized.",
       activity: last ?? {
-        state: "unknown" as const, reason: "preparation_cancelled", evidenceSource: "pane_heuristic" as const,
+        state: "unknown" as const, reason: cancelReason, evidenceSource: "pane_heuristic" as const,
         sampledAt: this.now().toISOString(), evidence: null,
       },
       waitedMs: Math.max(0, Math.min(input.timeoutMs, input.timeoutMs - (deadline - Date.now()))),
@@ -3069,7 +3150,9 @@ export class SessionTransport {
       if (input.signal?.aborted) return cancelled();
       if (attempts > 0 && Date.now() > deadline) return expire();
       attempts++;
-      const activity = await this.observeReadinessWithin(input, deadline - Date.now());
+      // A caller's cancellation also ends a pending observation (the abandoned read is ignored, never delivered on).
+      // Managed preparation's wait keeps its own behaviour: it doesn't race the read against its signal.
+      const activity = await this.observeReadinessWithin(input, deadline - Date.now(), input.cancelledBy === "caller" ? input.signal : undefined);
       if (input.signal?.aborted) return cancelled();
       if (activity === null || Date.now() > deadline) return expire();
       last = activity;
@@ -3096,22 +3179,28 @@ export class SessionTransport {
     }
   }
 
-  /** One readiness observation, raced against the time left before the wait's deadline. Null
-   *  when the deadline wins; the abandoned observation is ignored, never delivered on. */
+  /** One readiness observation, raced against the time left before the wait's deadline and, when given, the
+   *  caller's cancellation. Null when the deadline or the cancellation wins; the abandoned observation is ignored,
+   *  never delivered on. */
   private async observeReadinessWithin(
     input: { sessionName: string; runtime: string | null; attachmentType: string | null; binding?: ObservedBinding; readinessFromPaneOnly?: boolean },
     remainingMs: number,
+    cancel?: AbortSignal,
   ): Promise<AgentActivity | null> {
+    if (cancel?.aborted) return null;
     const observation = this.classifySendReadiness(input);
     observation.catch(() => undefined);
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
     try {
       return await Promise.race([
         observation,
         new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), Math.max(0, remainingMs)); }),
+        ...(cancel ? [new Promise<null>((resolve) => { onAbort = () => resolve(null); cancel.addEventListener("abort", onAbort, { once: true }); })] : []),
       ]);
     } finally {
       if (timer !== undefined) clearTimeout(timer);
+      if (cancel && onAbort) cancel.removeEventListener("abort", onAbort);
     }
   }
 
@@ -3418,7 +3507,10 @@ export class SessionTransport {
     }
   }
 
-  async capture(sessionName: string, opts?: { lines?: number }): Promise<CaptureResult> {
+  /** `inputBox`: also describe a Claude Code or Codex seat's live input box (three more tmux reads), for callers that
+   *  use it: the capture route asks when its request does (`rig capture`, the MCP tool). `inputBoxBudget` is the time
+   *  those reads may still take, shared across a fan-out; a single capture gets its own CAPTURE_INPUT_BOX_DEADLINE_MS. */
+  async capture(sessionName: string, opts?: { lines?: number; inputBox?: boolean; inputBoxBudget?: InputBoxBudget }): Promise<CaptureResult> {
     const sessionMeta = this.getSessionMeta(sessionName);
     if (sessionMeta.attachmentType === "external_cli") {
       return {
@@ -3474,7 +3566,46 @@ export class SessionTransport {
 
     await this.reconcileStartupReadiness(sessionName).catch(() => {});
 
-    return { ok: true, sessionName, content, lines };
+    const runtime = sessionMeta.runtime;
+    const inputBox = opts?.inputBox && (runtime === "claude-code" || runtime === "codex")
+      ? await this.captureInputBox(sessionName, runtime, opts.inputBoxBudget ?? { remainingMs: CAPTURE_INPUT_BOX_DEADLINE_MS })
+      : undefined;
+    return { ok: true, sessionName, content, lines, ...(inputBox ? { inputBox } : {}) };
+  }
+
+  /** The input box, or unknown when its reads don't finish within the budget's remaining time (or none is left): the
+   *  pane text is already in hand, so a slow read never holds the capture. The time spent comes off the budget. A read
+   *  still pending then settles on its own, unused. */
+  private async captureInputBox(sessionName: string, runtime: "claude-code" | "codex", budget: InputBoxBudget): Promise<InputBoxAnnotation> {
+    if (budget.remainingMs <= 0) return annotateInputBox(null, null, runtime, { budgetSpent: true });
+    const started = this.now().getTime();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<InputBoxAnnotation>((resolve) => {
+      timer = setTimeout(() => resolve(annotateInputBox(null, null, runtime, { timedOut: true })), budget.remainingMs);
+    });
+    try {
+      return await Promise.race([this.readInputBoxAnnotation(sessionName, runtime), late]);
+    } finally {
+      clearTimeout(timer);
+      budget.remainingMs -= this.now().getTime() - started;
+    }
+  }
+
+  /** One styled read of the visible screen with the cursor read before and after it: a cursor that moved, or a pane
+   *  that resized, in between is reported as moved; when only one read succeeds, its reading is passed on as seen once.
+   *  Never throws. */
+  private async readInputBoxAnnotation(sessionName: string, runtime: "claude-code" | "codex"): Promise<InputBoxAnnotation> {
+    try {
+      const before = await this.tmuxAdapter.getPaneCursorPosition(sessionName);
+      const screen = await this.tmuxAdapter.capturePaneContent(sessionName, 0, { escapeSequences: true });
+      const after = await this.tmuxAdapter.getPaneCursorPosition(sessionName);
+      const steady = before && after && before.x === after.x && before.y === after.y
+        && before.width === after.width && before.height === after.height ? after : null;
+      const cursorSeenOnce = (before === null) !== (after === null) ? before ?? after : null;
+      return annotateInputBox(screen, steady, runtime, { cursorMoved: before !== null && after !== null && steady === null, cursorSeenOnce });
+    } catch {
+      return annotateInputBox(null, null, runtime);
+    }
   }
 
   async broadcast(target: TargetSpec, text: string, opts?: BroadcastOpts): Promise<BroadcastResult> {
@@ -3684,4 +3815,209 @@ export class SessionTransport {
 
     return false;
   }
+}
+
+/** A region of the visible screen: zero-based rows and columns as tmux reports the cursor, end column exclusive. */
+export interface InputBoxSpan {
+  startRow: number;
+  startCol: number;
+  endRow: number;
+  endCol: number;
+  /** The region's text, one line per screen row (a soft-wrapped line spans rows). */
+  text: string;
+}
+
+/**
+ * What a capture says about a Claude Code or Codex seat's live input box: its text, where it is, and which part is
+ * likely a harness suggestion (ghost text) rather than something the person typed. Read from one styled capture of
+ * the visible screen and the cursor, never from scrollback or the terminal output above the box. A heuristic: a
+ * person can move the cursor, text wraps, and harness versions differ, so conflicting or missing evidence reads
+ * `unknown` rather than a guess.
+ */
+export interface InputBoxAnnotation {
+  status: "empty" | "typed" | "likely-suggestion" | "typed-with-suggestion" | "unknown" | "no-input-box";
+  confidence: "high" | "medium" | "low" | "unknown";
+  /** tmux's cursor on the visible screen (zero-based), or null when it couldn't be read or moved during the read. */
+  cursor: { x: number; y: number; width: number; height: number } | null;
+  /** All the text in the input box. */
+  input: InputBoxSpan | null;
+  /** The part of `input` that is likely a harness suggestion. */
+  suggestion: InputBoxSpan | null;
+  evidence: string[];
+  /** One sentence for the reader: what the box holds and how much to trust it. */
+  hint: string;
+}
+
+const INPUT_CONTINUATION_COLUMN = 2; // Claude Code and Codex indent an input's later rows by two cells
+// How long a capture's input-box reads may take in all before the box reports unknown: one seat's three reads, or a
+// whole fan-out's (the send path's INPUT_BOX_READ_DEADLINE_MS bounds one read each).
+export const CAPTURE_INPUT_BOX_DEADLINE_MS = 1_000;
+
+/** The time a capture's input-box reads may still take; the capture route shares one across a fan-out. */
+export interface InputBoxBudget {
+  remainingMs: number;
+}
+// Claude Code's input frame rule, as findClaudeComposer and the composer-boundary reader match it (a label may sit in it).
+const CLAUDE_FRAME_RULE = /^─{3,}(?: .+ ─+)?$/;
+
+/** The input box's rows on the screen: Claude Code's prompt row inside its frame (the opening rule directly above it,
+ *  through the row before the closing rule), or Codex's box as codexInputBox reads it. A committed prompt row in the
+ *  transcript, or a prompt-looking line in output, has no opening rule above it. Null when no input box is recognized
+ *  (a selector, a menu instead of a box, busy output with no box, another layout). */
+function inputBoxRows(lines: string[], runtime: "claude-code" | "codex"): { first: number; last: number; empty?: boolean } | null {
+  if (runtime === "codex") {
+    const box = codexInputBox(lines.join("\n"));
+    if (!box) return null;
+    return { first: box.inputAt, last: box.inputAt + Math.max(box.rows.length, 1) - 1, empty: box.text === "" };
+  }
+  const promptClass = composerPromptClassForRuntime("claude-code");
+  const first = findComposerInputLineIndex(lines, promptClass);
+  if (first < 1 || composerNumberedChoicePattern(promptClass).test(lines[first]!.trimStart())) return null;
+  // A rule at the prompt's own indent: an input's later rows are indented, so a rule typed inside it never closes it.
+  const indent = /^[ \t]*/.exec(lines[first]!)![0];
+  const frame = (line: string) => line.startsWith(indent) && CLAUDE_FRAME_RULE.test(line.slice(indent.length).trimEnd());
+  if (!frame(lines[first - 1]!)) return null;
+  let close = first + 1;
+  while (close < lines.length && !frame(lines[close]!)) close++;
+  return close < lines.length ? { first, last: close - 1 } : null;
+}
+
+export function annotateInputBox(
+  styledScreen: string | null,
+  cursor: { x: number; y: number; width: number; height: number } | null,
+  runtime: "claude-code" | "codex",
+  opts: {
+    cursorMoved?: boolean;
+    timedOut?: boolean;
+    budgetSpent?: boolean;
+    /** The cursor as the one successful read of two saw it; it can show the cursor outside the box, never confirm it in. */
+    cursorSeenOnce?: { x: number; y: number } | null;
+  } = {},
+): InputBoxAnnotation {
+  const harness = runtime === "codex" ? "Codex" : "Claude Code";
+  const result = (status: InputBoxAnnotation["status"], confidence: InputBoxAnnotation["confidence"], hint: string,
+    input: InputBoxSpan | null = null, suggestion: InputBoxSpan | null = null, evidence: string[] = []): InputBoxAnnotation =>
+    ({ status, confidence, cursor, input, suggestion, evidence, hint });
+  const budget = `${CAPTURE_INPUT_BOX_DEADLINE_MS / 1000} s`;
+  if (opts.timedOut) {
+    return result("unknown", "unknown", `The input box's reads didn't finish within this capture's ${budget} budget, so it wasn't checked.`,
+      null, null, ["input box reads timed out"]);
+  }
+  if (opts.budgetSpent) {
+    return result("unknown", "unknown", `The input box wasn't read: this capture's ${budget} budget for input-box reads was spent on earlier seats.`,
+      null, null, ["input box budget spent"]);
+  }
+  if (!styledScreen?.trim()) return result("unknown", "unknown", "The screen couldn't be read, so the input box wasn't checked.");
+  const cells = styledLines(styledScreen);
+  const lines = cells.map((row) => row.map((cell) => cell.ch).join(""));
+  const box = inputBoxRows(lines, runtime);
+  if (!box) return result("no-input-box", "unknown", `No ${harness} input box was recognized on the screen.`);
+
+  // Each box row's text cells with their screen columns. The first row's text starts after the prompt glyph and its
+  // space, a later row's after its two-cell indent.
+  const rows: Array<{ row: number; cells: Array<{ ch: string; faint: boolean; col: number }> }> = [];
+  for (let row = box.first; row <= box.last; row++) {
+    let col = 0;
+    const placed = (cells[row] ?? []).map((cell) => { const at = col; col += stringWidth(cell.ch); return { ...cell, col: at }; });
+    const glyphAt = row === box.first ? placed.findIndex((cell) => cell.ch === "❯" || cell.ch === "›") : -1;
+    const startCol = row === box.first ? (glyphAt >= 0 ? placed[glyphAt]!.col + 2 : INPUT_CONTINUATION_COLUMN) : INPUT_CONTINUATION_COLUMN;
+    let text = placed.filter((cell) => cell.col >= startCol);
+    while (text.length && !text[text.length - 1]!.ch.trim()) text = text.slice(0, -1);
+    rows.push({ row, cells: text });
+  }
+  const startCol = rows[0]!.cells[0]?.col ?? (lines[box.first]!.search(/[❯›]/) + 2);
+  const spanOf = (from: { row: number; col: number }, to: { row: number; col: number }): InputBoxSpan => ({
+    startRow: from.row, startCol: from.col, endRow: to.row, endCol: to.col,
+    text: rows.filter((r) => r.row >= from.row && r.row <= to.row)
+      .map((r) => r.cells.filter((cell) => (r.row > from.row || cell.col >= from.col) && (r.row < to.row || cell.col < to.col)).map((cell) => cell.ch).join(""))
+      .join("\n"),
+  });
+  const textRows = rows.filter((r) => r.cells.length > 0);
+  const outsideBox = (at: { y: number }) => at.y < box.first || at.y > box.last;
+  // A cursor seen outside the box by the one read that worked still contradicts the box being the live one.
+  const seenOutside = cursor === null && !opts.cursorMoved && opts.cursorSeenOnce != null && outsideBox(opts.cursorSeenOnce);
+  const seenOutsideEvidence = "cursor outside the input box (the other cursor read failed)";
+  if (box.empty || textRows.length === 0) {
+    // Only a steady cursor in the box shows it's the live one: an empty frame drawn in output has the cursor below it, a
+    // moved cursor means the box may have changed, and a missing cursor shows nothing either way.
+    if (cursor !== null && !outsideBox(cursor)) return result("empty", "high", "The input box is empty.", null, null, ["no text in the input box"]);
+    if (cursor !== null || seenOutside) {
+      return result("unknown", "unknown", `An empty ${harness} input box was recognized, but the cursor is outside it, so it may not be the live box.`,
+        null, null, ["no text in the input box", cursor !== null ? "cursor outside the input box" : seenOutsideEvidence]);
+    }
+    if (opts.cursorMoved) {
+      return result("unknown", "unknown", `The ${harness} input box read empty, but the cursor moved during the capture, so it may have changed.`,
+        null, null, ["no text in the input box", "cursor moved during the capture"]);
+    }
+    return result("unknown", "unknown", `An empty ${harness} input box was recognized, but the cursor couldn't be read, so it may not be the live box.`,
+      null, null, ["no text in the input box", "cursor unavailable"]);
+  }
+  const lastRow = textRows[textRows.length - 1]!;
+  const lastCell = lastRow.cells[lastRow.cells.length - 1]!;
+  const end = { row: lastRow.row, col: lastCell.col + stringWidth(lastCell.ch) };
+  const input = spanOf({ row: box.first, col: startCol }, end);
+  const quote = (text: string) => {
+    const flat = text.replace(/\s*\n\s*/g, " ").trim();
+    return `"${flat.length > 60 ? `${flat.slice(0, 57)}...` : flat}"`;
+  };
+
+  const styled = /\x1b\[/.test(styledScreen);
+  const textCells = rows.flatMap((r) => r.cells.filter((cell) => cell.ch.trim()).map((cell) => ({ ...cell, row: r.row })));
+  const allFaint = styled && textCells.every((cell) => cell.faint);
+  const noneFaint = styled && textCells.every((cell) => !cell.faint);
+  // Claude Code's `Try "…"` words are a person's possible words too, so they count only where there's no styling to go
+  // on, and at most as a possible (medium) suggestion. With styling, the faint text decides.
+  const tryShape = runtime === "claude-code" && CLAUDE_TRY_SUGGESTION.test(input.text.replace(/\s+/g, ""));
+  const trySuggestion = tryShape && !styled;
+  const evidence: string[] = [];
+  if (tryShape) evidence.push("Claude Code's Try \"...\" words");
+  evidence.push(!styled ? "no styling in the capture" : allFaint ? "text drawn faint" : noneFaint ? "text not faint" : "part of the text drawn faint");
+
+  const inBox = cursor !== null && cursor.y >= box.first && cursor.y <= box.last;
+  const atStart = inBox && cursor!.y === box.first && cursor!.x === startCol;
+  const atEnd = inBox && cursor!.y === end.row && cursor!.x === end.col;
+  if (cursor === null) evidence.unshift(opts.cursorMoved ? "cursor moved during the capture" : seenOutside ? seenOutsideEvidence : "cursor unavailable");
+  else evidence.unshift(!inBox ? "cursor outside the input box" : atStart ? "cursor at the input's start" : atEnd ? "cursor after the text" : "cursor inside the text");
+  const why = evidence.join("; ");
+
+  const likelySuggestion = (confidence: "high" | "medium") => result("likely-suggestion", confidence, confidence === "high"
+    ? `The input box shows ${quote(input.text)}, likely a ${harness} suggestion (${why}), not something the person typed: it isn't their intent, a draft or a staged command.`
+    : `The input box shows ${quote(input.text)}, possibly a ${harness} suggestion (${why}; medium confidence): don't take it as the person's intent, and don't assume it isn't their draft.`,
+    input, input, evidence);
+  const typed = (confidence: InputBoxAnnotation["confidence"]) => result("typed", confidence,
+    `The input box holds ${quote(input.text)}, likely typed by the person and not yet sent (${why}).`, input, null, evidence);
+  const unknown = () => result("unknown", "unknown",
+    `The input box shows ${quote(input.text)}; whether the person typed it or it's a ${harness} suggestion is unknown (${why}).`, input, null, evidence);
+
+  // A moved cursor or one seen outside the box contradicts any reading; only an unavailable cursor leaves the styling or
+  // the Try words to go on, at medium confidence.
+  if (cursor === null || !inBox) {
+    if (cursor === null && !opts.cursorMoved && !seenOutside && (allFaint || trySuggestion)) return likelySuggestion("medium");
+    return unknown();
+  }
+  if (atStart) {
+    if (allFaint) return likelySuggestion("high");
+    if (!styled) return likelySuggestion("medium");
+    // Claude Code draws its suggestion faint (Codex draws its placeholder faint too); unfaint text with the cursor at its
+    // start may be a draft the person moved the cursor back through, in either harness.
+    return unknown();
+  }
+  if (atEnd) {
+    if (noneFaint) return typed("high");
+    if (!styled) return typed("medium");
+    return unknown();
+  }
+  // The cursor is inside the text: the person moved it, or typed a prefix and the harness suggests the rest after it.
+  const split = textCells.findIndex((cell) => cell.row > cursor.y || (cell.row === cursor.y && cell.col >= cursor.x));
+  const before = split < 0 ? textCells : textCells.slice(0, split);
+  const after = split < 0 ? [] : textCells.slice(split);
+  if (styled && before.length > 0 && after.length > 0 && before.every((cell) => !cell.faint) && after.every((cell) => cell.faint)) {
+    const suggestion = spanOf({ row: cursor.y, col: cursor.x }, end);
+    const typedPart = spanOf({ row: box.first, col: startCol }, { row: cursor.y, col: cursor.x });
+    return result("typed-with-suggestion", "high",
+      `The input box holds ${quote(typedPart.text)}, likely typed by the person, then ${quote(suggestion.text)}, likely a ${harness} suggestion after the cursor (${why}; the text after the cursor is faint): the suggestion isn't their intent.`,
+      input, suggestion, [...evidence, "the text after the cursor is faint"]);
+  }
+  if (noneFaint) return typed("medium");
+  return unknown();
 }

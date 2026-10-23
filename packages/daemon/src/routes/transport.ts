@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import type { SessionTransport, TargetSpec } from "../domain/session-transport.js";
+import { CAPTURE_INPUT_BOX_DEADLINE_MS, type SessionTransport, type TargetSpec } from "../domain/session-transport.js";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { requireSenderIdentity, transportSenderSession } from "./require-sender-identity.js";
 import type { OutboxHandler } from "../domain/outbox-handler.js";
@@ -111,6 +111,8 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       submitOnly: body.submitOnly,
       expectedStagedText: body.expectedStagedText,
       expectedStagedLineCount: body.expectedStagedLineCount,
+      // The caller's request: if it goes away while the send still waits, nothing is typed later.
+      signal: c.req.raw.signal,
     });
 
     if (result.outcome === "retained") return c.json(result);
@@ -118,6 +120,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     if (!result.ok) {
       const statusMap: Record<string, number> = {
         typing_guard_enabled: 409,
+        caller_cancelled: 409,
         guard_target_unknown: 409,
         guard_target_changed: 409,
         delivery_identity_conflict: 409,
@@ -193,7 +196,11 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       rig?: string;
       pod?: string;
       lines?: number;
+      inputBox?: boolean;
     }>();
+    // Read an agent seat's input box only when the request asks: `rig capture` and the MCP tool do; send --verify and
+    // walk read only the pane text.
+    const inputBox = body.inputBox === true;
 
     // Multi-target: rig or pod
     if (body.rig || body.pod) {
@@ -206,9 +213,11 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
         return c.json({ ok: false, error: resolved.error }, 404);
       }
 
+      // One budget for the whole fan-out's input-box reads, so slow tmux adds at most that to the request.
+      const inputBoxBudget = { remainingMs: CAPTURE_INPUT_BOX_DEADLINE_MS };
       const results = [];
       for (const session of resolved.sessions) {
-        const result = await transport.capture(session.sessionName, { lines: body.lines });
+        const result = await transport.capture(session.sessionName, { lines: body.lines, inputBox, inputBoxBudget });
         results.push(result);
       }
       return c.json({ results });
@@ -219,7 +228,7 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       return c.json({ error: "Provide session, rig, or pod to capture" }, 400);
     }
 
-    const result = await transport.capture(body.session, { lines: body.lines });
+    const result = await transport.capture(body.session, { lines: body.lines, inputBox });
     if (!result.ok) {
       const statusMap: Record<string, number> = {
         session_missing: 404,
@@ -296,6 +305,8 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       actorSession: derivedActor, // transport-derived, never the body claim
       envelopeSender, // the From: is the DERIVED identity (never the body value) — orch ruling (a)
       ...(derivedActor ? { identityProvenance: "transport:v1" } : {}),
+      // Recipients not yet started when the caller goes away are not written; started ones keep their results.
+      signal: c.req.raw.signal,
     });
 
     // A3b (P22 follow-on, planner-ruled IN scope): auto-record the fan-out — N rows, ONE per RESOLVED

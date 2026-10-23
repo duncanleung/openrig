@@ -10,144 +10,6 @@ It's the open-source system behind my AI civilization experiments.
 
 **Guide:** [Getting started](docs/reference/getting-started.md) · **Stuck?** [Help](docs/reference/help.md) · **Questions:** [Q&A](https://github.com/mvschwarz/openrig/discussions/92) · **Updates and demos:** [@_feralmachine on X](https://x.com/_feralmachine)
 
-## Fork additions
-
-This is a fork of [mvschwarz/openrig](https://github.com/mvschwarz/openrig) with four areas added on top of the stock daemon: **Fleet Analytics** (ingestion + query layer for session and review data), **Runtime Fallback** (automatic model swap on provider limits), **Onboarding Trim** (55% reduction of managed block weight), and **Skills & Governance** (retro, wiki, ADRs). Everything below this section is from upstream. The additions are in `packages/daemon` and `packages/cli`.
-
-### Fleet Analytics
-
-Stock OpenRig manages rigs, seats, queues, and terminals. It does not observe what agents did during their sessions or how much they cost. Fleet Analytics adds an ingestion pipeline and query layer that turns session transcripts and review logs into structured, queryable data.
-
-**Four analytics tables** (SQLite, inside the daemon's existing database):
-
-| Table | Stores | Source |
-|-------|--------|--------|
-| `session_digests` | Per-session summary: turns, tool calls, errors, compaction boundaries, irreversible actions | `reduce-transcript.mjs` parses each `.jsonl` transcript |
-| `review_runs` | Per-review summary: PR, mode, model mix, must-fix/suggestion/dismissed counts, cross-stack agreement | `metrics.json` from `~/.claude/logs/code-review/` |
-| `review_findings` | Individual findings per review: file, lines, category, severity, verdict | `report.json` from the same log directories |
-| `daily_token_snapshots` | Per-seat per-model per-day token usage rollup | Aggregated from `usage_samples` (existing daemon table) |
-
-**Ingestion** runs automatically inside the daemon:
-
-- `FleetIngestionService` reconciles on a configurable interval (default 5 min).
-- It discovers `.jsonl` transcripts under `~/.claude/projects/`, runs `reduce-transcript.mjs` on each (max 3 concurrent), and upserts the digest.
-- It scans `~/.claude/logs/code-review/*/metrics.json` for review runs and their findings.
-- It rolls up token usage from the daemon's existing `usage_samples` table into daily snapshots.
-- A source hash (first 4KB + file size + mtime) prevents re-processing unchanged files.
-- Lifecycle hooks trigger immediate ingestion when a session closes.
-- An overlap guard prevents concurrent reconciliation runs.
-
-**Query layer** — HTTP and CLI:
-
-```bash
-# HTTP endpoints (all support ?rig=, ?seat=, ?since=, ?until=, ?limit=, ?offset=)
-GET /fleet/digests
-GET /fleet/reviews
-GET /fleet/reviews/:traceId/findings
-GET /fleet/snapshots
-GET /fleet/stats
-GET /fleet/aggregate/tokens        # ?by=rig-day|seat (tokens, not dollars)
-GET /fleet/aggregate/reviews
-GET /fleet/aggregate/sessions
-GET /fleet/summary
-GET /fleet/dashboard              # self-contained HTML
-
-# CLI commands (same filters via flags, plus --json)
-rig fleet digests --rig my-rig --since 2026-10-01
-rig fleet reviews --limit 10 --json
-rig fleet findings <traceId>
-rig fleet snapshots --seat dev-impl --since 2026-10-05
-rig fleet stats
-rig fleet summary --since 2026-10-01
-rig fleet aggregate tokens --by seat
-rig fleet dashboard --out ./fleet-dashboard.html   # see docs/reference/fleet-aggregation.md
-```
-
-**Questions Fleet Analytics answers:**
-- Which seats had the most errors this week?
-- What is the must-fix rate across all reviews?
-- How many tokens did the research pod use yesterday?
-- Which sessions had compaction losses or irreversible actions?
-
-**Fork-only files:**
-
-| File | Purpose |
-|------|---------|
-| `packages/daemon/src/domain/fleet-store.ts` | Schema, upsert writers, query methods for 4 analytics tables |
-| `packages/daemon/src/domain/fleet-ingestion-service.ts` | Auto-ingestion: transcript parsing, review scanning, token rollup |
-| `packages/daemon/src/routes/fleet-store.ts` | HTTP POST (ingestion) + GET (query) endpoints |
-| `packages/cli/src/commands/fleet.ts` | `rig fleet` subcommands |
-| `packages/daemon/src/db/migrations/096–099` | DDL for the 4 analytics tables |
-
-### Runtime Fallback (RIG-43)
-
-When a provider hits a usage limit (e.g., Anthropic rate limits on Opus), a seat stops working. The operator must manually swap the model.
-
-`RuntimeFallbackService` automates this:
-
-1. A seat detects a provider usage-limit event.
-2. The daemon swaps it to a configured fallback runtime/model (e.g., Opus → Sonnet, or Opus → Claude on a different provider).
-3. The swap has a configurable expiry. When it passes, the daemon swaps back to the original runtime.
-4. The swap uses the existing `SeatHandoverService` for session migration.
-
-Guards prevent race conditions: in-flight dedup, DB-level TOCTOU checks, and a sweeping guard that prevents lost wakeups during concurrent swap-back triggers.
-
-**Fork-only files:**
-
-| File | Purpose |
-|------|---------|
-| `packages/daemon/src/domain/runtime-fallback-service.ts` | Forward/reverse swap logic, expiry scheduling, event-bus integration |
-| `packages/daemon/src/db/migrations/090–091` | `fallback_runtime`, `fallback_model`, `fallback_state`, `fallback_expires_at` columns on node table |
-
-### Onboarding Trim
-
-Stock OpenRig injects ~13.6KB of managed onboarding content into every project's `CLAUDE.md`. Across a 16-project fleet, that is ~218KB of system-prompt weight.
-
-This fork trims the 5 managed blocks by 55% (13.6KB → 6.2KB) while preserving all behaviorally tested content — the selection probe, operator-contact wording, skill references, and recovery directives. The trim was validated against the daemon's `default-onboarding-pack.test.ts` contract tests.
-
-| Block | Before | After | Saved |
-|-------|--------|-------|-------|
-| `CULTURE-default.md` | 1,296B | 479B | 817B |
-| `openrig-start.md` | 2,479B | 1,346B | 1,133B |
-| `openrig-project-guidance.md` | 2,611B | 1,105B | 1,506B |
-| `openrig-onboarding-01.md` | 3,272B | 1,821B | 1,451B |
-| `openrig-onboarding-02.md` | 3,940B | 1,418B | 2,522B |
-
-### Skills & Governance
-
-Fork-added skills exist in two locations based on who uses them:
-
-**Daemon-delivered skills** (in `packages/daemon/assets/plugins/openrig-core/skills/`, available to all rig seats):
-
-| Skill | Purpose |
-|-------|---------|
-| `/wiki-update` | Create or update wiki pages in `wiki/` for cross-session knowledge that ADRs and CLAUDE.md do not capture |
-| `/queue-handoff` | Transfer durable work to another seat via the queue system |
-| `/pr-review-lifecycle` | End-to-end PR review orchestration |
-| `/session-compaction-and-restore` | Compaction checkpoint and restore workflow |
-
-**Operator skills** (in `~/.claude/skills/`, invoked manually by the operator):
-
-| Skill | Purpose |
-|-------|---------|
-| `/retro` | Session retrospective — analyzes a transcript digest across 8 categories (navigation waste, coding standards, safety guardrails, etc.) and produces prioritized environment improvements |
-
-**Wiki system** — 7 pages in `wiki/` provide cross-session memory: conventions, corrections, failed approaches, and operational context that survive seat replacement. Wiki content is treated as untrusted data (evidence, not authority).
-
-**ADRs** — 5 architectural decision records in `docs/decisions/`:
-
-| ADR | Decision |
-|-----|----------|
-| 0001 | Migrate custom orchestration skills to OpenRig-native plugin skills |
-| 0002 | PR review lifecycle as a standalone skill |
-| 0003 | Fork-specific validation gate in orchestrator role |
-| 0004 | Native plan validation skill |
-| 0005 | Separate universal guidance file for project features |
-
-**Reference docs** — `docs/reference/writing-for-agents.md` provides a framework for writing effective agent instructions (no-ops, sediment, negation traps).
-
----
-
 ## See it running
 
 ![The OpenRig TUI: the build rig as a graph, then as a table of seats with runtime, model, context and state, then one seat in detail (real recording, 10 seconds)](assets/readme/openrig-agents-working.gif)
@@ -158,16 +20,16 @@ Not setting this up today? Get the next walkthrough and occasional OpenRig updat
 
 ## Install and first run
 
-Requires Node.js 22 or 24 and tmux, on macOS or Linux. On Linux, the distribution's own Node.js can be older (Ubuntu 24.04's is 18); install a supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac with Apple silicon, use Node.js 22 ([compatibility history](docs/releases/v0.5.15.md#known-compatibility-limitation)). On Windows, use WSL2, the Windows route OpenRig supports; native Windows isn't supported. OpenRig's automated tests don't run on WSL2 yet; see [one user's working setup](docs/reference/getting-started.md#wsl2-a-reported-working-setup). Launching a rig writes provider hooks and workspace trust settings. Before running the commands below, read [what OpenRig changes on your machine](#what-openrig-changes-on-your-machine) and back up the relevant files.
+Requires Node.js 22 or 24 and tmux, on macOS or Linux, and one working Claude Code or Codex account: one is enough, since the kernel operator adapts the shipped `starter` team to whichever you have. On Linux, the distribution's own Node.js can be older (Ubuntu 24.04's is 18); install a supported version with [nvm](https://github.com/nvm-sh/nvm) (`nvm install 22`) or NodeSource. On a Mac with Apple silicon, use Node.js 22 ([compatibility history](docs/releases/v0.5.15.md#known-compatibility-limitation)). On a Mac where you aren't an administrator, or where Homebrew belongs to another account (its `brew install` is refused), install Node.js in your own home folder with [nvm](https://github.com/nvm-sh/nvm): run `touch ~/.zshrc` (a new Mac account has none, and nvm's installer only adds itself to a profile file that already exists), then the install command on nvm's page, open a new terminal, and run `nvm install 22`. That needs no administrator password, and `npm install -g` then installs into your nvm folder. On Windows, use WSL2, the Windows route OpenRig supports; native Windows isn't supported. OpenRig's automated tests don't run on WSL2 yet; see [one user's working setup](docs/reference/getting-started.md#wsl2-a-reported-working-setup). Launching a rig writes provider hooks and workspace trust settings. Before running the commands below, read [what OpenRig changes on your machine](#what-openrig-changes-on-your-machine) and back up the relevant files.
 
-**One command.** This runs OpenRig's install script from the `v0.6.12` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
+**One command.** This runs OpenRig's install script from the `v0.6.13` release. It checks Node.js and npm, installs the latest published `@openrig/cli` with `npm install -g`, runs the Node.js and SQLite check, then runs `rig setup --dry-run` and `rig setup`. The first line prints that plan and changes nothing:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.12/scripts/install.sh | sh -s -- --dry-run
-curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.12/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.13/scripts/install.sh | sh -s -- --dry-run
+curl -fsSL https://raw.githubusercontent.com/mvschwarz/openrig/v0.6.13/scripts/install.sh | sh
 ```
 
-If a provider isn't signed in yet, the last step reports `FAILED [4/4]`, and `rig setup` lists the sign-in under "Some steps need attention". If the only remaining failures are provider sign-ins, the install steps finished; sign in to each selected provider as below and continue.
+If `rig setup` doesn't finish ready, for example because a provider isn't signed in yet, the script ends with `INSTALLED, SETUP NOT COMPLETE`: the CLI is installed, and `rig setup` lists what's left under "Some steps need attention". If the only items left are provider sign-ins, sign in to each selected provider as below and continue; run `rig setup` again rather than reinstalling the CLI.
 
 **Or step by step:**
 
@@ -299,7 +161,7 @@ using a published package, since repository guidance can be ahead of npm.
 | --- | --- |
 | **npm installation** | Installs the CLI (`rig` and `openrig-tui`), bundled components and dependencies under your npm prefix (with Bun, under Bun's global directory). OpenRig's postinstall checks the Node.js version and that the SQLite module loads; Bun may block this script. It does not run daemon or provider setup. |
 | **`rig setup`** | Attempts missing tools and writes an OpenRig block in `~/.tmux.conf` for mouse support and scrollback. Installs herdr by default on macOS and Linux unless declined with `--no-herdr`; an unavailable herdr install is a warning. On macOS the installing agent offers Ghostty, and `--ghostty` attempts it after acceptance. Existing cmux settings are left unchanged. `--full` adds workstation tools. `--dry-run` shows setup's plan without applying it. |
-| **Daemon startup** | Creates/updates instance state under `OPENRIG_HOME` (normally `~/.openrig`), including its database and managed plugin resources. Seeds the `openrig-skills` discovery skill, the `refocusing` skill and the person-facing `rigs` skill in `~/.claude/skills` and `~/.agents/skills`, subject to existing version ownership. With `runtime.codex.hooks_enabled` enabled (the default), writes Codex hook configuration and trust records as described below—even before a rig launches. |
+| **Daemon startup** | Creates/updates instance state under `OPENRIG_HOME` (normally `~/.openrig`), including its database and managed plugin resources. Seeds the `openrig-skills` discovery skill, the `refocusing` skill and the person-facing `rigs` skill in `~/.claude/skills` and `~/.agents/skills`, subject to existing version ownership. When a Codex seat is already recorded and `runtime.codex.hooks_enabled` is enabled (the default), ensures its hook configuration and trust records as described below. With no recorded Codex seat, enabled hooks wait for its first launch; disabled hooks still remove a stale OpenRig-managed hook block, if present. |
 | **Rig/seat launch and attachment** | Creates tmux sessions, supplies seat identity and daemon connection environment, and projects selected guidance, skills, plugins and runtime resources into the workspace. Managed startup pre-trusts the workspace. Claude context collection can also be provisioned for attached sessions and refreshed during monitoring. In a Git repository, newly created files under `.codex/plugins/shared:openrig-core/` (or the unqualified `.codex/plugins/openrig-core/`) are added to the repository's Git `info/exclude` inside an `# BEGIN OpenRig generated files` block; new `AGENTS.md`, `CLAUDE.md` and `CLAUDE.local.md` files stay visible with a warning. |
 | **Bundle install** (`rig bundle install`, or `rig up` with a `.rigbundle` or GitHub link) | Writes the bundle's files into the install target: `--target`, or the current directory for `rig up` and for a GitHub link. `rig bundle install` with a local archive needs `--target`. Routes its declared skills, plugins and context packs into your libraries. A GitHub link's archive is kept under `OPENRIG_HOME/bundle-imports/`, and installs are recorded in `OPENRIG_HOME/bundle-audit.jsonl`. A bundle that carries a project creates it under `workspace.projects_root` and records it, with the rig's association, in the workspace catalog. |
 | **Explicit permission configuration** | The built-in bootstrap does **not** add `rig` command allow rules to your settings files; a team seat with no permission policy, per-seat choice or (for Codex) named profile gets the per-launch [team default](docs/reference/rig-spec.md#team-launch-defaults) instead. Agent-guided setup recommends keeping it and requires your actual answer before the agent [adds remembered rules at your chosen scope](docs/reference/getting-started.md#have-your-agent-configure-permissions). No/no answer keeps the team default and preserves settings; existing choices and stricter rules remain relevant. Broader access is separate. |
@@ -313,7 +175,9 @@ user's home; changing `OPENRIG_HOME` alone does not isolate provider configurati
   writes `HOME/.claude.json`, and also `<CLAUDE_CONFIG_DIR>/.claude.json` when the
   daemon has that variable set. In the workspace, `.claude/settings.local.json` receives
   the context collector's `statusLine` command and selected activity hooks;
-  the collector script lives under `.openrig/`, and the activity-hook relay under
+  a user's own status-line command is preserved, so it can prevent collector
+  installation. Selected settings resources can still replace overlapping keys.
+  The collector script lives under `.openrig/`, and the activity-hook relay under
   the instance's `state/claude-activity-hooks/`. Selected settings/MCP resources can also
   change that settings file and `.mcp.json`. The shared settings resource sets
   `permissions.defaultMode` to `acceptEdits` and enables Exa/Context7 MCP entries;
@@ -323,8 +187,10 @@ user's home; changing `OPENRIG_HOME` alone does not isolate provider configurati
   To keep your own status line alongside the collector, see
   [Custom Claude status line](docs/reference/claude-status-line.md).
 - **Codex:** writes the daemon's `CODEX_HOME/config.toml` (normally
-  `~/.codex/config.toml`). Startup enables hooks, adds the OpenRig activity relay
-  commands and pre-writes trust hashes for those commands. Seat startup adds
+  `~/.codex/config.toml`). With hooks enabled, daemon startup ensures the OpenRig
+  activity relay commands and their trust hashes when a Codex seat is already
+  recorded; otherwise the first Codex launch does so. With hooks disabled, startup
+  can remove a stale OpenRig-managed hook block even without a Codex seat. Seat startup adds
   `trust_level = "trusted"` for the workspace; selected config resources can
   add MCP settings. Managed launches pass `-c check_for_update_on_startup=false`,
   which writes no config; a recognized update notice that still appears can be
@@ -390,9 +256,12 @@ separates the desired selection from the last launch arguments; neither proves
 native enforcement. See the [permission guide](docs/reference/getting-started.md#per-seat-permission-mode).
 
 Managed hook blocks target OpenRig's entries and retain unrelated hooks, but
-trust entries, selected resource keys and Claude's existing status-line command
-can be replaced. Some writers recover unreadable settings as empty objects;
-this is not a complete preservation or rollback guarantee. Back up relevant
+trust entries and selected resource keys can be replaced. Claude's collector,
+activity-hook and JSON resource writers leave unreadable or malformed settings
+untouched; this is not a product-wide preservation guarantee. Codex's workspace
+trust writer can treat an unreadable `config.toml` as empty and write a new trust
+configuration. Read-modify-write operations can also race other writers; there
+is no complete preservation or rollback guarantee. Back up relevant
 files before first use. Daemon/bootstrap writes are automatic and do not each
 have an interactive preview; `rig setup --dry-run` does not preview every later
 startup effect.

@@ -137,6 +137,7 @@ export type RigEvent =
   // S5 (OPR.0.5.4.7) — seat-lifecycle audit trail: the three supported seat verbs each persist
   // their mutation with actor + reason in the same transaction as the mutation itself.
   | { type: "node.model_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
+  | { type: "node.cwd_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; reason: string; operator: string | null }
   | { type: "node.effort_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string | null; reason: string; operator: string | null }
   | { type: "node.permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; actor: string; reason: string; source: "seat_selection"; effect: "future_launches_only" }
   | { type: "node.policy_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; launchPosture: "floor" | "full_bypass" | "auto"; reason: string; operator: string }
@@ -866,7 +867,10 @@ export interface NodeDetailEntry extends NodeInventoryEntry {
   binding: Binding | null;
   startupFiles: Array<{ path: string; deliveryHint: string; required: boolean }>;
   startupActions: Array<{ type: string; value: string }>;
-  installedResources: Array<{ id: string; category: string; targetPath: string }>;
+  /** `targetPath` is where a resource is known to be installed, or "" when that isn't shown. For guidance, it is the
+   *  file the runtime merges into, and only while that file holds a complete block with this id; `declaredTarget` is the spec's `target`
+   *  (parsed, never used to write), and `effectiveTarget` the file the runtime would merge into. */
+  installedResources: Array<{ id: string; category: string; targetPath: string; declaredTarget?: string; effectiveTarget?: string }>;
   recentEvents: Array<{ type: string; createdAt: string; payload: Record<string, unknown> }>;
   infrastructureStartupCommand: string | null;
   peers: NodeDetailPeer[];
