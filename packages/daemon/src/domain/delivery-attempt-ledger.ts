@@ -23,6 +23,9 @@ export class DeliveryAttemptLedger implements CaptureObserverSink {
   /** Never throws and never blocks the send path: a malformed input is dropped. */
   record(input: ObservationInput): void {
     try {
+      // Only a send that typed into the pane is a delivery attempt. `retained_no_write` wrote nothing, and a failed
+      // send (`ok: false`) did not complete, so neither may let composer text read as attempt-correlated.
+      if (input.seam !== "send_verify" || input.regexResult?.ok !== true) return;
       if (!input.sentHash || !input.binding?.sessionName) return;
       const session = input.binding.sessionName;
       const list = this.bySession.get(session) ?? [];

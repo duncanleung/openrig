@@ -103,7 +103,7 @@ describe("StuckSeatObserver (RIG-123)", () => {
     });
 
     it("correlates with a delivery attempt on the same node and occupant, still without claiming delivery failed", async () => {
-      ledger.record({ seam: "send_verify", attemptId: "att-1", binding: { sessionName: SEAT.session, nodeId: "n1", occupant: "g1", pane: "%1" }, runtime: "claude-code", sentHash: "h1", pre: { state: "not_requested" }, post: { state: "not_requested" }, regexResult: {}, completedAt: iso(T0 - 5000) } as ObservationInput);
+      ledger.record({ seam: "send_verify", attemptId: "att-1", binding: { sessionName: SEAT.session, nodeId: "n1", occupant: "g1", pane: "%1" }, runtime: "claude-code", sentHash: "h1", pre: { state: "not_requested" }, post: { state: "not_requested" }, regexResult: { ok: true }, completedAt: iso(T0 - 5000) } as ObservationInput);
       composer.set(SEAT.session, "text");
       const obs = build();
       await obs.scan();
@@ -115,7 +115,7 @@ describe("StuckSeatObserver (RIG-123)", () => {
     });
 
     it("ignores an attempt sent to a previous occupant (before the swap)", async () => {
-      ledger.record({ seam: "send_verify", attemptId: "old", binding: { sessionName: SEAT.session, nodeId: "n1", occupant: "g0", pane: "%1" }, runtime: "claude-code", sentHash: "h0", pre: { state: "not_requested" }, post: { state: "not_requested" }, regexResult: {}, completedAt: iso(T0 - 60_000) } as ObservationInput);
+      ledger.record({ seam: "send_verify", attemptId: "old", binding: { sessionName: SEAT.session, nodeId: "n1", occupant: "g0", pane: "%1" }, runtime: "claude-code", sentHash: "h0", pre: { state: "not_requested" }, post: { state: "not_requested" }, regexResult: { ok: true }, completedAt: iso(T0 - 60_000) } as ObservationInput);
       states.set(SEAT.session, { seatNodeId: "n1", activity: "idle-at-prompt", lastSwap: { generation: "g1", at: iso(T0 - 10_000) } });
       composer.set(SEAT.session, "text");
       const obs = build();
@@ -339,7 +339,7 @@ describe("StuckSeatObserver review fixes (RIG-123)", () => {
   }
   const attempt = (id: string, occupant: string, completedAt: number) => ledger.record({
     seam: "send_verify", attemptId: id, binding: { sessionName: SEAT.session, nodeId: "n1", occupant, pane: "%1" }, runtime: "claude-code",
-    sentHash: "h", pre: { state: "not_requested" }, post: { state: "not_requested" }, regexResult: {}, completedAt: iso(completedAt),
+    sentHash: "h", pre: { state: "not_requested" }, post: { state: "not_requested" }, regexResult: { ok: true }, completedAt: iso(completedAt),
   } as ObservationInput);
   const cov = (o: StuckSeatObserver, d: string, rig?: string) => o.snapshot({ rig }).coverage.find((c) => c.detector === d)!;
 
@@ -518,7 +518,7 @@ describe("StuckSeatObserver review fixes (RIG-123)", () => {
 describe("DeliveryAttemptLedger", () => {
   const input = (attemptId: string, sentHash: string | null, session = "s@r"): ObservationInput => ({
     seam: "send_verify", attemptId, binding: { sessionName: session, nodeId: "n", occupant: null, pane: null }, runtime: "claude-code",
-    sentHash, pre: { state: "not_requested" }, post: { state: "not_requested" }, regexResult: {}, completedAt: "2026-10-24T00:00:00Z",
+    sentHash, pre: { state: "not_requested" }, post: { state: "not_requested" }, regexResult: { ok: true }, completedAt: "2026-10-24T00:00:00Z",
   });
 
   it("keeps only sends (non-null hash), newest first, one row per attempt, bounded per session", () => {
@@ -530,6 +530,17 @@ describe("DeliveryAttemptLedger", () => {
     expect(ids).toHaveLength(LEDGER_ATTEMPTS_PER_SESSION);
     expect(ids[0]).toBe("a5");
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("rejects retained_no_write, failed sends and sends with no result, so none can read as a delivery attempt", () => {
+    const l = new DeliveryAttemptLedger();
+    l.record({ ...input("retained", "h1"), seam: "retained_no_write" });
+    l.record({ ...input("failed", "h2"), regexResult: { ok: false, reason: "pane_in_mode" } });
+    l.record({ ...input("no-result", "h3"), regexResult: {} });
+    l.record({ ...input("probe", "h4"), seam: "probe_activity" });
+    expect(l.attemptsFor("s@r")).toEqual([]);
+    l.record(input("ok", "h5"));
+    expect(l.attemptsFor("s@r").map((a) => a.attemptId)).toEqual(["ok"]);
   });
 
   it("never throws on malformed input and tee isolates a failing sink", () => {

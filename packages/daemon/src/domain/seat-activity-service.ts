@@ -454,8 +454,6 @@ export class SeatActivityService {
     return seat?.inventory != null && (sessionName === undefined || seat.sessionName === sessionName);
   }
 
-  /** Resolve by CURRENT session name (projection convenience) — state itself stays
-   *  keyed by the durable seat nodeId. */
   /**
    * RIG-123 — classify a permission block for a running seat without a pre-tracked request.
    * Request polling only runs for requests a hook registered; this asks the same visible-prompt reader on demand.
@@ -482,6 +480,8 @@ export class SeatActivityService {
     return { state: seat.permissions.size > 0 ? "suspected" : "unavailable", source: seat.permissions.size > 0 ? "oracle" : null };
   }
 
+  /** Resolve by CURRENT session name (projection convenience) — state itself stays
+   *  keyed by the durable seat nodeId. */
   getSeatStateBySession(sessionName: string): ArbitratedSeatState | null {
     const seatNodeId = this.sessionToSeat.get(sessionName);
     return seatNodeId ? this.getSeatState(seatNodeId) : null;
