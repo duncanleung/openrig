@@ -281,15 +281,15 @@ export class TurnAnomalyDetector {
       ? `CASE WHEN d2.generation_uuid IS NOT NULL AND d2.generation_uuid = (
             SELECT t.generation_uuid FROM occupant_tenures t WHERE t.node_id = d2.node_id ORDER BY t.generation_ordinal DESC LIMIT 1
           ) THEN 1 ELSE 0 END`
-      // Parenthesised: a bare 0 in ORDER BY is a column position, and SQLite rejects it.
-      : "(0)";
+      // No term at all: a constant in ORDER BY is read as a column position, and SQLite rejects it.
+      : null;
     const rows = this.db.prepare(`
       SELECT d.native_session_id, d.seat_session, d.seat_name, d.node_logical_id, d.rig_name, d.generation_uuid,
              d.total_turns, d.conversation_turns, ${stallColumn}, d.ingested_at
         FROM session_digests d
        WHERE d.id = (
          SELECT d2.id FROM session_digests d2 WHERE d2.seat_session = d.seat_session
-          ORDER BY ${currentTenure} DESC, COALESCE(d2.transcript_modified_at, '') DESC, d2.ingested_at DESC, d2.id DESC LIMIT 1)
+          ORDER BY ${currentTenure ? `${currentTenure} DESC,` : ""} COALESCE(d2.transcript_modified_at, '') DESC, d2.ingested_at DESC, d2.id DESC LIMIT 1)
     `).all() as DigestRow[];
 
     const seenCurrent = new Set<string>();
