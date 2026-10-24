@@ -11,6 +11,7 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import type { SeatActivityService } from "../src/domain/seat-activity-service.js";
+import type { TurnAnomalyDetector, TurnAnomalyFinding, TurnAnomalySnapshot } from "../src/domain/turn-anomaly-detector.js";
 import { STUCK_DETECTORS, type StuckFinding, type StuckSeatObserver, type StuckSeatSnapshot } from "../src/domain/stuck-seat-observer.js";
 import {
   computeOperationalSummary,
@@ -93,8 +94,23 @@ describe("operational summary (RIG-120)", () => {
       ...over,
     }),
   });
+  /** RIG-79 — a turn-anomaly detector whose last scan was clean and complete. */
+  const turnStub = (over: Partial<TurnAnomalySnapshot> = {}): Pick<TurnAnomalyDetector, "snapshot"> => ({
+    snapshot: () => ({
+      scannedAt: NOW.toISOString(), windowMs: 1_800_000, findings: [], recentlyClosed: [], warming: 0,
+      coverage: { status: "complete" as const, examined: 1 },
+      ...over,
+    }),
+  });
+  const turnFinding = (): TurnAnomalyFinding => ({
+    episodeId: 1, kind: "high_ratio", session: "dev-impl@alpha", rig: "alpha", role: "implementer",
+    subject: { nativeSessionId: "n1", generation: "g1" },
+    window: { windowMs: 1_800_000, coveredMs: 1_800_000, assistantTurns: 80, userMessages: 1, ratio: 80, threshold: 20 },
+    lifetime: { assistantTurns: 180, userMessages: 11, zeroConversation: false }, corroboration: [],
+    openedAt: NOW.toISOString(), lastSeenAt: NOW.toISOString(),
+  });
   const summarize = (extra: Partial<Parameters<typeof computeOperationalSummary>[0]> = {}): OperationalSummary =>
-    computeOperationalSummary({ rigRepo, queueRepo, watchdogRepo, seatActivity: seatActivity(), stuckSeats: stuckStub(), now: NOW, ...extra });
+    computeOperationalSummary({ rigRepo, queueRepo, watchdogRepo, seatActivity: seatActivity(), stuckSeats: stuckStub(), turnAnomalies: turnStub(), now: NOW, ...extra });
   const cov = (s: OperationalSummary, source: string) => s.coverage.find((c) => c.source === source)!;
 
   it("reads terminal input from the node inventory oracle, not from queue rows", async () => {
@@ -361,6 +377,30 @@ describe("operational summary (RIG-120)", () => {
       const observer = { snapshot: () => { calls.push("snapshot"); return stuckStub().snapshot(); }, scan: () => { calls.push("scan"); } };
       summarize({ stuckSeats: observer as never });
       expect(calls).toEqual(["snapshot"]);
+    });
+  });
+
+  describe("RIG-79 turn anomalies", () => {
+    it("turns a finding into attention and exposes window, threshold, role and zero-conversation", () => {
+      const s = summarize({ turnAnomalies: turnStub({ findings: [turnFinding()] }) });
+      expect(s.verdict).toBe("attention");
+      expect(s.turnAnomalies).toMatchObject({ count: 1, windowMs: 1_800_000 });
+      expect(s.turnAnomalies!.findings[0]).toMatchObject({ role: "implementer", window: { threshold: 20, ratio: 80 }, lifetime: { zeroConversation: false } });
+    });
+
+    it("keeps the verdict indeterminate when the detector is not wired or its coverage is partial", () => {
+      const unwired = summarize({ turnAnomalies: undefined });
+      expect(unwired.turnAnomalies).toBeNull();
+      expect(unwired.coverage.find((c) => c.source === "turnAnomalies")).toMatchObject({ status: "unavailable" });
+      expect(unwired.verdict).toBe("indeterminate");
+      const stale = summarize({ turnAnomalies: turnStub({ coverage: { status: "partial", examined: 2, reason: "turn-anomaly scan is stale" } }) });
+      expect(stale.verdict).toBe("indeterminate");
+    });
+
+    it("adds no finding and a complete coverage entry when the detector is complete and finds nothing", () => {
+      const s = summarize();
+      expect(s.turnAnomalies).toMatchObject({ count: 0, findings: [] });
+      expect(s.coverage.find((c) => c.source === "turnAnomalies")).toMatchObject({ status: "complete" });
     });
   });
 });

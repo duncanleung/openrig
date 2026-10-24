@@ -144,6 +144,8 @@ import { WorkflowRuntime } from "./domain/workflow-runtime.js";
 import { resolveWorkflowHumanDestination } from "./domain/workflow-human-destination.js";
 import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepalive.js";
 import { makeIdleGateQitemPolicy } from "./domain/policies/idle-gate-qitem.js";
+import { makeTurnAnomalyPolicy } from "./domain/policies/turn-anomaly.js";
+import { TurnAnomalyDetector } from "./domain/turn-anomaly-detector.js";
 import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME } from "./domain/policies/parked-owner-consumer.js";
 import { diagnoseRigParked } from "./domain/parked-query.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
@@ -563,6 +565,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // RIG-123 — stuck-seat observation. The ledger is an always-on delivery-attempt sink (metadata only: attempt id,
   // identity, sent hash; never text). The observer acquires on its own timer and caches; summaries only read it.
   const deliveryAttemptLedger = new DeliveryAttemptLedger();
+  // RIG-79 — fleet turn-anomaly detection reads the fleet store (database), never the terminal, so it is a separate service.
+  const turnAnomalyDetector = new TurnAnomalyDetector({ db });
   const stuckSeatObserver = new StuckSeatObserver({
     listSeats: (rigFilter): SeatTarget[] => {
       const rigs = rigRepo.listRigs().filter((r) => !rigFilter || r.id === rigFilter || r.name === rigFilter);
@@ -1410,6 +1414,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     seatActivityService,
     seatStructuralActivityService,
     stuckSeatObserver,
+    turnAnomalyDetector,
     seatIdentityReconciler,
     // OPR.0.4.4.21 — agentActivity feeds the rig-rollup attention
     // predicate's needs_input signal (synchronous events lookup only).
@@ -2191,6 +2196,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           reconcileStuckExceptions: (id) => workflowRuntime?.reconcileStuckExceptions(id) ?? 0,
         }),
         makeIdleGateQitemPolicy({ db, seatActivity: seatActivityService }),
+        // RIG-79: windowed assistant-turn:user-message anomalies, told to the job target (the delivery recipient).
+        makeTurnAnomalyPolicy({ detector: turnAnomalyDetector }),
         // OPR.0.5.6.24 F-14: the parked-owner consumer — the WHOLE shipped
         // parked diagnosis (diagnoseRigParked over the arbitrated oracle +
         // destination-scoped obligations + wake status; the same derivation

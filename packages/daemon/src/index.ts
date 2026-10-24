@@ -361,6 +361,8 @@ export async function startServer(port?: number) {
         stuckSweepTimer = startStuckSweepScheduler(deps);
         // RIG-123 — the stuck-seat observer acquires on its own cadence; summaries read its cache.
         deps.stuckSeatObserver?.start();
+        // RIG-79 — the turn-anomaly detector samples the fleet store on its own timer so health is populated without a watchdog job.
+        deps.turnAnomalyDetector?.start();
         // S01 — wake-or-escalate on batons: a failed baton wake retries on schedule,
         // then escalates through recorded rungs; never a silent park.
         wakeLadderScheduler = startWakeLadderScheduler(deps);
@@ -402,6 +404,7 @@ export async function startServer(port?: number) {
       ["seat-activity", () => deps.seatActivityService?.stop()],
       // Drains an in-flight scan, so tmux is not closed under a pending capture.
       ["stuck-seat-observer", () => deps.stuckSeatObserver?.stop()],
+      ["turn-anomaly-detector", () => deps.turnAnomalyDetector?.stop()],
       ["seat-structural-activity", () => deps.seatStructuralActivityService?.stop()],
       ["seat-identity", () => deps.seatIdentityReconciler?.stop()],
       ["periodic-snapshot", () => deps.periodicSnapshotScheduler?.stop()],
