@@ -317,6 +317,8 @@ interface OperationalSummaryView {
   humanGates: { count: number; items: Array<{ qitemId: string; state: string; destination: string; blockedOn: string | null; summary: string | null; evidenceRef: string | null; updatedAt: string }> };
   stalledWork: { count: number; items: Array<{ qitemId: string; owner: string; evidence: string | null; updatedAt: string }> };
   watchdog: { activeJobs: number; newestEvaluationAt: string | null; neverEvaluated: number; stale: Array<{ jobId: string; policy: string; target: string; lastEvaluationAt: string | null }> } | null;
+  /** RIG-123 — cached stuck-seat findings. Absent on a daemon that predates the observer. */
+  stuckSeats?: { count: number; scannedAt: string | null; findings: Array<{ kind: string; session: string; confidence: string; openedAt: string; stale: boolean; detail: string; durationUncertain?: boolean }> } | null;
   coverage: OperationalCoverage[];
   verdict: "attention" | "clear" | "indeterminate";
 }
@@ -342,7 +344,7 @@ function operationalError(status: number, data: unknown): HealthCliError {
 
 function renderOperationalQuiet(s: OperationalSummaryView): void {
   const incomplete = s.coverage.filter((c) => c.status !== "complete").length;
-  console.log(`verdict=${s.verdict} seats=${s.seats.total} attention-required=${s.seats.attentionRequired} terminal-input=${s.terminalInput.count} human-gates=${s.humanGates.count} stalled=${s.stalledWork.count} incomplete-sources=${incomplete} observed=${s.observedAt}`);
+  console.log(`verdict=${s.verdict} seats=${s.seats.total} attention-required=${s.seats.attentionRequired} terminal-input=${s.terminalInput.count} human-gates=${s.humanGates.count} stalled=${s.stalledWork.count}${s.stuckSeats ? ` stuck-seats=${s.stuckSeats.count}` : ""} incomplete-sources=${incomplete} observed=${s.observedAt}`);
 }
 
 function renderOperational(s: OperationalSummaryView): void {
@@ -367,6 +369,12 @@ function renderOperational(s: OperationalSummaryView): void {
   console.log(`Stalled work (claimed, no meaningful change): ${s.stalledWork.count}`);
   for (const w of s.stalledWork.items) {
     console.log(`  ${w.qitemId}  owner=${w.owner}${w.evidence ? `  ${w.evidence}` : ""}`);
+  }
+  if (s.stuckSeats) {
+    console.log(`Stuck seats (cached scan${s.stuckSeats.scannedAt ? ` at ${s.stuckSeats.scannedAt}` : ": none has completed"}): ${s.stuckSeats.count}`);
+    for (const f of s.stuckSeats.findings) {
+      console.log(`  ${f.session}  ${f.kind}  ${f.confidence}${f.stale ? "  STALE" : ""}${f.durationUncertain ? "  duration-uncertain" : ""}  since ${f.openedAt}  ${f.detail}`);
+    }
   }
   if (s.watchdog) {
     console.log(`Watchdog: ${s.watchdog.activeJobs} active job(s); newest evaluation=${s.watchdog.newestEvaluationAt ?? "none"}; never evaluated=${s.watchdog.neverEvaluated}; stale=${s.watchdog.stale.length}`);

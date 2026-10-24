@@ -359,6 +359,8 @@ export async function startServer(port?: number) {
         retentionTimer = startQueueRetentionScheduler(deps);
         // S02 — the standing stuck sweep: nobody has to remember to run the verbs.
         stuckSweepTimer = startStuckSweepScheduler(deps);
+        // RIG-123 — the stuck-seat observer acquires on its own cadence; summaries read its cache.
+        deps.stuckSeatObserver?.start();
         // S01 — wake-or-escalate on batons: a failed baton wake retries on schedule,
         // then escalates through recorded rungs; never a silent park.
         wakeLadderScheduler = startWakeLadderScheduler(deps);
@@ -398,6 +400,7 @@ export async function startServer(port?: number) {
       ["watchdog", () => deps.watchdogScheduler?.stop()],
       ["draft-delivery", () => deps.sessionTransport?.guardedDelivery?.stop()],
       ["seat-activity", () => deps.seatActivityService?.stop()],
+      ["stuck-seat-observer", () => deps.stuckSeatObserver?.stop()],
       ["seat-structural-activity", () => deps.seatStructuralActivityService?.stop()],
       ["seat-identity", () => deps.seatIdentityReconciler?.stop()],
       ["periodic-snapshot", () => deps.periodicSnapshotScheduler?.stop()],

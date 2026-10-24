@@ -6,6 +6,7 @@ import {
 } from "../domain/health-projection.js";
 import type { HealthProjectionService } from "../domain/health-detectors.js";
 import { computeOperationalSummary, UnknownRigError } from "../domain/operational-summary.js";
+import type { StuckSeatObserver } from "../domain/stuck-seat-observer.js";
 import type { RigRepository } from "../domain/rig-repository.js";
 import type { QueueRepository } from "../domain/queue-repository.js";
 import type { WatchdogJobsRepository } from "../domain/watchdog-jobs-repository.js";
@@ -61,11 +62,26 @@ export function healthRoutes(): Hono {
         queueRepo: c.get("queueRepo" as never) as QueueRepository | undefined,
         watchdogRepo: c.get("watchdogJobsRepo" as never) as WatchdogJobsRepository | undefined,
         seatActivity: c.get("seatActivityService" as never) as SeatActivityService | undefined,
+        stuckSeats: c.get("stuckSeatObserver" as never) as StuckSeatObserver | undefined,
         rig: c.req.query("rig") || undefined,
       }));
     } catch (error) {
       if (error instanceof UnknownRigError) return c.json({ error: "rig_not_found", message: error.message }, 404);
       return c.json({ error: "operational_summary_failed", message: error instanceof Error ? error.message : String(error) }, 500);
+    }
+  });
+
+  // RIG-123 — an explicit, scoped stuck-seat scan. The summary above never scans; this route is the only
+  // request-time acquisition, and the caller asks for it. `?rig=<name>` scopes the capture to one rig.
+  app.post("/operational/scan", async (c) => {
+    const observer = c.get("stuckSeatObserver" as never) as StuckSeatObserver | undefined;
+    if (!observer) return c.json({ error: "stuck_seat_observer_unavailable", message: "stuck-seat observer is not wired" }, 503);
+    const rig = c.req.query("rig") || undefined;
+    try {
+      await observer.scan({ rig });
+      return c.json({ ok: true, scope: rig ?? null });
+    } catch (error) {
+      return c.json({ error: "stuck_seat_scan_failed", message: error instanceof Error ? error.message : String(error) }, 500);
     }
   });
 

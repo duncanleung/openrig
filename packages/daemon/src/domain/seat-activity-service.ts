@@ -456,6 +456,30 @@ export class SeatActivityService {
 
   /** Resolve by CURRENT session name (projection convenience) — state itself stays
    *  keyed by the durable seat nodeId. */
+  /**
+   * RIG-123 — classify a permission block for a running seat without a pre-tracked request.
+   * Request polling only runs for requests a hook registered; this asks the same visible-prompt reader on demand.
+   * `confirmed`: the oracle holds a confirmed `permission_prompt`. `suspected`: the oracle holds an unverified
+   * request, or the reader sees a prompt (the reader also answers true for a `selection_prompt`, so a reader-only
+   * sighting never reads as confirmed). `none`: the reader saw no prompt. `unavailable`: nothing established a state.
+   * Read-only: sends no keys. The reader's capture is the only terminal I/O.
+   */
+  async classifyPermissionPrompt(sessionName: string): Promise<{ state: "confirmed" | "suspected" | "none" | "unavailable"; source: "oracle" | "reader" | null }> {
+    const seatNodeId = this.sessionToSeat.get(sessionName);
+    const seat = seatNodeId ? this.ladder.get(seatNodeId) : undefined;
+    if (!seat || seat.retired) return { state: "unavailable", source: null };
+    const needs = seat.arbitrated.needsInput;
+    if (needs.count > 0 && needs.reason === "permission_prompt") return { state: "confirmed", source: "oracle" };
+    if (needs.count > 0 && needs.reason === "permission_request_unverified") return { state: "suspected", source: "oracle" };
+    if (!this.permissionPromptReader) return { state: "unavailable", source: null };
+    const runtime = seat.inventory?.runtime ?? "codex";
+    const visible = await this.permissionPromptReader(sessionName, runtime).catch(() => null);
+    if (seat.retired || seat.sessionName !== sessionName) return { state: "unavailable", source: null };
+    if (visible === true) return { state: "suspected", source: "reader" };
+    if (visible === false) return { state: "none", source: "reader" };
+    return { state: seat.permissions.size > 0 ? "suspected" : "unavailable", source: seat.permissions.size > 0 ? "oracle" : null };
+  }
+
   getSeatStateBySession(sessionName: string): ArbitratedSeatState | null {
     const seatNodeId = this.sessionToSeat.get(sessionName);
     return seatNodeId ? this.getSeatState(seatNodeId) : null;
@@ -782,6 +806,12 @@ export class SeatActivityService {
       decidedBy,
       seq: changed ? seat.arbitrated.seq + 1 : seat.arbitrated.seq,
       changedAt: changed ? this.now().toISOString() : seat.arbitrated.changedAt,
+      idleSince: nextActivity !== "idle-at-prompt"
+        ? null
+        : seat.arbitrated.activity === "idle-at-prompt" && seat.arbitrated.idleSince
+          ? seat.arbitrated.idleSince
+          // First arbitration after a (re)start has no prior activity: the idle start is not observed.
+          : { at: this.now().toISOString(), transitionObserved: seat.arbitrated.activity !== "unknown" },
       rungs: this.rungsView(seat),
     };
     if (changed) {

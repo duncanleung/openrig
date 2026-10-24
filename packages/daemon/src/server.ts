@@ -200,6 +200,8 @@ export interface AppDeps {
    * construct AppDeps directly don't need to provide one.
    */
   seatActivityService?: import("./domain/seat-activity-service.js").SeatActivityService;
+  /** RIG-123 — the independent stuck-seat observer. The operational summary reads its cached findings only. */
+  stuckSeatObserver?: import("./domain/stuck-seat-observer.js").StuckSeatObserver;
   /** 5b82324b — the structural pane-activity cache; feeds attachAgentActivity so ACTIVITY is real. */
   seatStructuralActivityService?: import("./domain/seat-structural-activity-service.js").SeatStructuralActivityService;
   /** OPR.0.4.3.19 — periodic liveness identity reconciler (started post-bind). */
@@ -643,6 +645,7 @@ export function createApp(deps: AppDeps): Hono {
     // /api/rigs/:id/nodes route can enrich entries with terminalActive +
     // hasAssignedWork via attachTerminalActivityAndWork.
     c.set("seatActivityService" as never, deps.seatActivityService);
+    c.set("stuckSeatObserver" as never, deps.stuckSeatObserver);
     c.set("seatStructuralActivityService" as never, deps.seatStructuralActivityService);
     c.set("activityHookToken" as never, deps.activityHookToken);
     c.set("serviceOrchestrator" as never, deps.serviceOrchestrator);

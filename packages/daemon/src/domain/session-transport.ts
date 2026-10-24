@@ -1544,6 +1544,23 @@ export function readInputBox(pane: string | null, runtime: "claude-code" | "code
   return boxHoldsText(stripBoxGlyph(pane.split("\n").slice(markerLine! - 1, closingRuleLine! - 1)), text);
 }
 
+/** RIG-123 — does the composer hold text, with no sent text to compare against? Reuses the same composer
+ *  recognizers as `readInputBox`. A ghost "Try ..." suggestion and a queued-message placeholder read as empty
+ *  (not typed input); a collapsed paste reads as text. Anything unrecognized reads unknown, never empty. */
+export function readComposerOccupancy(pane: string | null, runtime: "claude-code" | "codex"): "empty" | "text" | "unknown" {
+  if (!pane?.trim()) return "unknown";
+  if (namesAnotherClientVersion(pane, runtime)) return "unknown";
+  if (runtime === "codex") {
+    const box = codexInputBox(pane);
+    if (box === null) return "unknown";
+    return box.text ? "text" : "empty";
+  }
+  const { body } = composerRegion(pane, runtime);
+  if (body === null) return "unknown";
+  if (!body || body === QUEUED_PLACEHOLDER || CLAUDE_TRY_SUGGESTION.test(body)) return "empty";
+  return "text";
+}
+
 export interface SendOpts {
   /** Internal provenance derived by the authenticated transport route. */
   identityProvenance?: string;
