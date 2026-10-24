@@ -21,6 +21,7 @@ const UPDATABLE_POLICIES = new Set([
   "workflow-keepalive",
   "idle-gate-qitem",
   "context-usage-threshold",
+  "turn-anomaly",
 ]);
 
 /** The session the daemon registers its own jobs as (continuity and auto idle-gate watchdogs). */

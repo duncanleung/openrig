@@ -319,6 +319,7 @@ interface OperationalSummaryView {
   watchdog: { activeJobs: number; newestEvaluationAt: string | null; neverEvaluated: number; stale: Array<{ jobId: string; policy: string; target: string; lastEvaluationAt: string | null }> } | null;
   /** RIG-123 — cached stuck-seat findings. Absent on a daemon that predates the observer. */
   stuckSeats?: { count: number; scannedAt: string | null; findings: Array<{ kind: string; session: string; confidence: string; openedAt: string; stale: boolean; detail: string; durationUncertain?: boolean }> } | null;
+  turnAnomalies?: { count: number; scannedAt: string | null; windowMs: number; warming: number; findings: Array<{ kind: string; session: string; role: string; window: { assistantTurns: number; userMessages: number; ratio: number | null; threshold: number; windowMs: number }; corroboration: Array<{ type: string }> }> } | null;
   coverage: OperationalCoverage[];
   verdict: "attention" | "clear" | "indeterminate";
 }
@@ -344,7 +345,7 @@ function operationalError(status: number, data: unknown): HealthCliError {
 
 function renderOperationalQuiet(s: OperationalSummaryView): void {
   const incomplete = s.coverage.filter((c) => c.status !== "complete").length;
-  console.log(`verdict=${s.verdict} seats=${s.seats.total} attention-required=${s.seats.attentionRequired} terminal-input=${s.terminalInput.count} human-gates=${s.humanGates.count} stalled=${s.stalledWork.count}${s.stuckSeats ? ` stuck-seats=${s.stuckSeats.count}` : ""} incomplete-sources=${incomplete} observed=${s.observedAt}`);
+  console.log(`verdict=${s.verdict} seats=${s.seats.total} attention-required=${s.seats.attentionRequired} terminal-input=${s.terminalInput.count} human-gates=${s.humanGates.count} stalled=${s.stalledWork.count}${s.stuckSeats ? ` stuck-seats=${s.stuckSeats.count}` : ""}${s.turnAnomalies ? ` turn-anomalies=${s.turnAnomalies.count}` : ""} incomplete-sources=${incomplete} observed=${s.observedAt}`);
 }
 
 function renderOperational(s: OperationalSummaryView): void {
@@ -374,6 +375,16 @@ function renderOperational(s: OperationalSummaryView): void {
     console.log(`Stuck seats (cached scan${s.stuckSeats.scannedAt ? ` at ${s.stuckSeats.scannedAt}` : ": none has completed"}): ${s.stuckSeats.count}`);
     for (const f of s.stuckSeats.findings) {
       console.log(`  ${f.session}  ${f.kind}  ${f.confidence}${f.stale ? "  STALE" : ""}${f.durationUncertain ? "  duration-uncertain" : ""}  since ${f.openedAt}  ${f.detail}`);
+    }
+  }
+  if (s.turnAnomalies) {
+    console.log(`Turn anomalies (${Math.round(s.turnAnomalies.windowMs / 60_000)}-min window, scan${s.turnAnomalies.scannedAt ? ` at ${s.turnAnomalies.scannedAt}` : ": none has completed"}): ${s.turnAnomalies.count}`);
+    for (const f of s.turnAnomalies.findings) {
+      const w = f.window;
+      const shape = f.kind === "zero_conversation"
+        ? `${w.assistantTurns} assistant turns, 0 user messages`
+        : `${w.assistantTurns}:${w.userMessages} = ${(w.ratio ?? 0).toFixed(1)}:1`;
+      console.log(`  ${f.session}  ${f.kind}  [${f.role}]  ${shape}  threshold ${w.threshold}:1${f.corroboration.length ? `  reducer: ${[...new Set(f.corroboration.map((c) => c.type))].join(",")}` : ""}`);
     }
   }
   if (s.watchdog) {
