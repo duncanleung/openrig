@@ -10,6 +10,7 @@ import { hasLiveHumanGate } from "./queue-repository.js";
 import type { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 import type { SeatActivityService } from "./seat-activity-service.js";
 import type { ClosedEpisode, StuckFinding, StuckSeatObserver } from "./stuck-seat-observer.js";
+import type { ClosedTurnEpisode, TurnAnomalyDetector, TurnAnomalyFinding } from "./turn-anomaly-detector.js";
 import { isHumanSeatSessionRef } from "./session-name.js";
 import { attachTerminalActivityAndWork, getNodeInventoryForRigs } from "./node-inventory.js";
 
@@ -25,7 +26,7 @@ export type OperationalVerdict = "attention" | "clear" | "indeterminate";
 
 export interface CoverageEntry {
   source: "seats" | "terminalInput" | "humanGates" | "stalledWork" | "watchdog"
-    | "stuckSeats:permission_blocked" | "stuckSeats:persistent_composer_input" | "stuckSeats:idle_with_expected_work";
+    | "stuckSeats:permission_blocked" | "stuckSeats:persistent_composer_input" | "stuckSeats:idle_with_expected_work" | "turnAnomalies";
   status: SourceStatus;
   examined: number;
   /** Row cap of the source read, when it has one. */
@@ -50,6 +51,11 @@ export interface OperationalSummary {
   } | null;
   /** RIG-123 — cached stuck-seat findings from the independent observer. Null when the observer is not wired. */
   stuckSeats: { count: number; scannedAt: string | null; findings: StuckFinding[]; recentlyClosed: ClosedEpisode[] } | null;
+  /**
+   * RIG-79 — windowed assistant-turn:user-message anomalies from the fleet store. Null when the detector is not wired.
+   * Independent of watchdog alert delivery and suppression. Latency bound: fleet ingestion cadence (default 5 min).
+   */
+  turnAnomalies: { count: number; scannedAt: string | null; windowMs: number; warming: number; findings: TurnAnomalyFinding[]; recentlyClosed: ClosedTurnEpisode[] } | null;
   coverage: CoverageEntry[];
   verdict: OperationalVerdict;
 }
@@ -61,6 +67,8 @@ export interface OperationalSummaryDeps {
   seatActivity?: SeatActivityService;
   /** Cached findings only: the summary reads `snapshot()` and never triggers a scan. */
   stuckSeats?: Pick<StuckSeatObserver, "snapshot">;
+  /** Cached episodes only: the summary reads `snapshot()` and never triggers a scan. */
+  turnAnomalies?: Pick<TurnAnomalyDetector, "snapshot">;
   /** Rig name or id. Omitted = every unarchived rig on this daemon. */
   rig?: string;
   now?: Date;
@@ -216,9 +224,22 @@ export function computeOperationalSummary(deps: OperationalSummaryDeps): Operati
     }
   }
 
+  // Turn anomalies: the fleet store's windowed ratio findings. A missing or stale detector is a coverage gap, not "clear".
+  let turnAnomalies: OperationalSummary["turnAnomalies"] = null;
+  if (deps.turnAnomalies) {
+    const snap = deps.turnAnomalies.snapshot(scoped ? { rigNames: [...rigNames] } : {});
+    turnAnomalies = {
+      count: snap.findings.length, scannedAt: snap.scannedAt, windowMs: snap.windowMs, warming: snap.warming,
+      findings: snap.findings, recentlyClosed: snap.recentlyClosed,
+    };
+    coverage.push({ source: "turnAnomalies", status: snap.coverage.status, examined: snap.coverage.examined, ...(snap.coverage.reason ? { reason: snap.coverage.reason } : {}) });
+  } else {
+    coverage.push({ source: "turnAnomalies", status: "unavailable", examined: 0, reason: "turn-anomaly detector is not wired" });
+  }
+
   // An attention_required seat is a finding on its own (failed restore, startup or identity mismatch).
   const anyFinding = terminalSeats.length > 0 || gateItems.length > 0 || stalledItems.length > 0 || attentionRequired > 0
-    || (stuckSeats?.count ?? 0) > 0;
+    || (stuckSeats?.count ?? 0) > 0 || (turnAnomalies?.count ?? 0) > 0;
   const complete = coverage.every((c) => c.status === "complete");
   const verdict: OperationalVerdict = anyFinding ? "attention" : complete ? "clear" : "indeterminate";
 
@@ -232,6 +253,7 @@ export function computeOperationalSummary(deps: OperationalSummaryDeps): Operati
     stalledWork: { count: stalledItems.length, items: stalledItems },
     watchdog,
     stuckSeats,
+    turnAnomalies,
     coverage,
     verdict,
   };

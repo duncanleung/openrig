@@ -7,6 +7,7 @@ import {
 import type { HealthProjectionService } from "../domain/health-detectors.js";
 import { computeOperationalSummary, UnknownRigError } from "../domain/operational-summary.js";
 import type { StuckSeatObserver } from "../domain/stuck-seat-observer.js";
+import type { TurnAnomalyDetector } from "../domain/turn-anomaly-detector.js";
 import type { RigRepository } from "../domain/rig-repository.js";
 import type { QueueRepository } from "../domain/queue-repository.js";
 import type { WatchdogJobsRepository } from "../domain/watchdog-jobs-repository.js";
@@ -63,6 +64,7 @@ export function healthRoutes(): Hono {
         watchdogRepo: c.get("watchdogJobsRepo" as never) as WatchdogJobsRepository | undefined,
         seatActivity: c.get("seatActivityService" as never) as SeatActivityService | undefined,
         stuckSeats: c.get("stuckSeatObserver" as never) as StuckSeatObserver | undefined,
+        turnAnomalies: c.get("turnAnomalyDetector" as never) as TurnAnomalyDetector | undefined,
         rig: c.req.query("rig") || undefined,
       }));
     } catch (error) {

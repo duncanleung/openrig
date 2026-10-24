@@ -202,6 +202,8 @@ export interface AppDeps {
   seatActivityService?: import("./domain/seat-activity-service.js").SeatActivityService;
   /** RIG-123 — the independent stuck-seat observer. The operational summary reads its cached findings only. */
   stuckSeatObserver?: import("./domain/stuck-seat-observer.js").StuckSeatObserver;
+  /** RIG-79 — fleet turn-anomaly detector. The operational summary reads its cached episodes only. */
+  turnAnomalyDetector?: import("./domain/turn-anomaly-detector.js").TurnAnomalyDetector;
   /** 5b82324b — the structural pane-activity cache; feeds attachAgentActivity so ACTIVITY is real. */
   seatStructuralActivityService?: import("./domain/seat-structural-activity-service.js").SeatStructuralActivityService;
   /** OPR.0.4.3.19 — periodic liveness identity reconciler (started post-bind). */
@@ -646,6 +648,7 @@ export function createApp(deps: AppDeps): Hono {
     // hasAssignedWork via attachTerminalActivityAndWork.
     c.set("seatActivityService" as never, deps.seatActivityService);
     c.set("stuckSeatObserver" as never, deps.stuckSeatObserver);
+    c.set("turnAnomalyDetector" as never, deps.turnAnomalyDetector);
     c.set("seatStructuralActivityService" as never, deps.seatStructuralActivityService);
     c.set("activityHookToken" as never, deps.activityHookToken);
     c.set("serviceOrchestrator" as never, deps.serviceOrchestrator);

@@ -237,6 +237,9 @@ const QUIET_SKIP_REASONS = new Set<string>([
   // seats), NOT via a per-scan log.
   "seat_needs_input",
   "activity_stale_unknown",
+  // RIG-79 turn-anomaly: a clean fleet and an already-told episode set are routine; the SENT notice is the audited signal.
+  "no_turn_anomaly",
+  "turn_anomaly_unchanged",
 ]);
 
 export interface EvaluationResult {
