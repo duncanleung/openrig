@@ -281,7 +281,8 @@ export class TurnAnomalyDetector {
       ? `CASE WHEN d2.generation_uuid IS NOT NULL AND d2.generation_uuid = (
             SELECT t.generation_uuid FROM occupant_tenures t WHERE t.node_id = d2.node_id ORDER BY t.generation_ordinal DESC LIMIT 1
           ) THEN 1 ELSE 0 END`
-      : "0";
+      // Parenthesised: a bare 0 in ORDER BY is a column position, and SQLite rejects it.
+      : "(0)";
     const rows = this.db.prepare(`
       SELECT d.native_session_id, d.seat_session, d.seat_name, d.node_logical_id, d.rig_name, d.generation_uuid,
              d.total_turns, d.conversation_turns, ${stallColumn}, d.ingested_at

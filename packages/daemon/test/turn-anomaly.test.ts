@@ -181,6 +181,16 @@ describe("turn-anomaly: detector episodes", () => {
     expect(snap.recentlyClosed).toHaveLength(0);
   });
 
+  it("picks the current session without a tenure table (fallback order by transcript mtime)", () => {
+    db.exec(`DROP TABLE occupant_tenures`);
+    digest({ total: 100, conv: 10 });
+    digest({ native: "native-old", gen: "gen-OLD", total: 900, conv: 300 });
+    db.prepare(`UPDATE session_digests SET transcript_modified_at = '2026-10-24T09:00:00.000Z' WHERE native_session_id = 'native-1'`).run();
+    db.prepare(`UPDATE session_digests SET transcript_modified_at = '2026-10-23T09:00:00.000Z' WHERE native_session_id = 'native-old'`).run();
+    expect(() => detector.scan()).not.toThrow();
+    expect(detector.snapshot().coverage).toMatchObject({ status: "complete", examined: 1 });
+  });
+
   it("restarts history on a decrease that stays above the window baseline (180 after 200, baseline 100)", () => {
     runWindow({ total: 100, conv: 10 }, { total: 200, conv: 11 });
     expect(detector.snapshot().findings).toHaveLength(1);
