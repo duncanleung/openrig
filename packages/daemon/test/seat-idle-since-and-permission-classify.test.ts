@@ -111,6 +111,14 @@ describe("classifyPermissionPrompt (RIG-123)", () => {
     expect(await throwing.svc.classifyPermissionPrompt(SESSION)).toEqual({ state: "unavailable", source: null });
   });
 
+  it("a reading is dropped when the occupant is replaced while the screen is read", async () => {
+    let swap!: () => void;
+    const h = harness(async () => { swap(); return true; });
+    swap = () => h.svc.declareOccupantSwap(SEAT, "gen-2");
+    h.hook("idle-at-prompt");
+    expect(await h.svc.classifyPermissionPrompt(SESSION)).toEqual({ state: "unavailable", source: null });
+  });
+
   it("an unknown session or an unwired reader is unavailable", async () => {
     const h = harness();
     h.hook("idle-at-prompt");

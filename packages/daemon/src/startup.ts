@@ -586,7 +586,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     },
     attempts: deliveryAttemptLedger,
     // Owed work: pending or in-progress rows. A blocked row is an intentional park and does not count.
-    expectedWork: (session) => queueRepoInstance.listOpenObligations(session, 100).filter((o) => o.state !== "blocked").length,
+    expectedWork: (session) => queueRepoInstance.countActionableObligations(session),
+    resolveRig: (rigFilter) => rigRepo.listRigs().filter((r) => r.id === rigFilter || r.name === rigFilter).map((r) => r.name),
   });
   // OPR.0.4.3.19 — SeatIdentityReconciler owns the liveness identity verdict
   // (the THIRD axis). Reconciles each running seat's pane PID/command against

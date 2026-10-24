@@ -337,6 +337,24 @@ describe("operational summary (RIG-120)", () => {
       expect([...scope!]).toEqual(["alpha"]);
     });
 
+    it("owed-work count is not hidden by newer parked rows (no row cap before the state filter)", async () => {
+      const owner = "dev-impl@alpha";
+      await queueRepo.create({ sourceSession: "orch-lead@alpha", destinationSession: owner, body: "old work", summary: "old pending" } as never);
+      for (let i = 0; i < 105; i++) await humanBlockedRow(owner);
+      expect(queueRepo.listOpenObligations(owner, 100).filter((o) => o.state !== "blocked")).toHaveLength(0); // the capped read loses it
+      expect(queueRepo.countActionableObligations(owner)).toBe(1);
+    });
+
+    it("a scoped summary takes coverage from the fleet scan or a scan of that rig, not another rig's", () => {
+      freshWatchdog();
+      seat("dev.impl", "alpha", { activity: "idle-at-prompt" });
+      let asked: { rig?: string } | undefined;
+      summarize({ rig: "alpha", stuckSeats: { snapshot: (o) => { asked = o; return stuckStub().snapshot(); } } });
+      expect(asked?.rig).toBe("alpha");
+      summarize({ stuckSeats: { snapshot: (o) => { asked = o; return stuckStub().snapshot(); } } });
+      expect(asked?.rig).toBeUndefined();
+    });
+
     it("reads the cache only: the summary never calls scan", () => {
       freshWatchdog();
       const calls: string[] = [];

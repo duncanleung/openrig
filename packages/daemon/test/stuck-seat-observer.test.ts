@@ -311,6 +311,210 @@ describe("StuckSeatObserver (RIG-123)", () => {
   });
 });
 
+describe("StuckSeatObserver review fixes (RIG-123)", () => {
+  const BETA: SeatTarget = { rig: "beta", logicalId: "dev.qa", session: "dev-qa@beta", runtime: "claude-code" };
+  let nowMs: number;
+  let seats: SeatTarget[];
+  let states: Map<string, State>;
+  let permission: Map<string, { state: "confirmed" | "suspected" | "none" | "unavailable"; source: "oracle" | "reader" | null }>;
+  let composer: Map<string, ComposerReading>;
+  let listCalls: Array<string | undefined>;
+  let ledger: DeliveryAttemptLedger;
+  const iso = (ms: number) => new Date(ms).toISOString();
+  const idleState = (id: string, swap: State["lastSwap"] = null): State => ({ seatNodeId: id, activity: "idle-at-prompt", idleSince: null, lastSwap: swap });
+
+  function build(over: Partial<StuckSeatObserverDeps> = {}): StuckSeatObserver {
+    return new StuckSeatObserver({
+      listSeats: (rig) => { listCalls.push(rig); return seats.filter((s) => !rig || s.rig === rig); },
+      seatActivity: {
+        getSeatStateBySession: (s: string) => (states.get(s) ?? null) as never,
+        classifyPermissionPrompt: async (s: string) => permission.get(s) ?? { state: "none", source: "reader" },
+      },
+      readComposers: async (targets) => new Map(targets.map((t) => [t.session, composer.get(t.session) ?? "empty"])),
+      attempts: ledger,
+      expectedWork: () => 0,
+      now: () => new Date(nowMs),
+      ...over,
+    });
+  }
+  const attempt = (id: string, occupant: string, completedAt: number) => ledger.record({
+    seam: "send_verify", attemptId: id, binding: { sessionName: SEAT.session, nodeId: "n1", occupant, pane: "%1" }, runtime: "claude-code",
+    sentHash: "h", pre: { state: "not_requested" }, post: { state: "not_requested" }, regexResult: {}, completedAt: iso(completedAt),
+  } as ObservationInput);
+  const cov = (o: StuckSeatObserver, d: string, rig?: string) => o.snapshot({ rig }).coverage.find((c) => c.detector === d)!;
+
+  beforeEach(() => {
+    nowMs = T0;
+    seats = [SEAT];
+    states = new Map([[SEAT.session, idleState("n1")]]);
+    permission = new Map();
+    composer = new Map();
+    listCalls = [];
+    ledger = new DeliveryAttemptLedger();
+  });
+
+  it("a scoped scan of an empty rig does not publish fleet coverage or freshness", async () => {
+    composer.set(SEAT.session, "unknown");
+    const obs = build();
+    await obs.scan();
+    expect(cov(obs, "persistent_composer_input").status).toBe("unavailable");
+    await obs.scan({ rig: "ghost" }); // no seats: complete for that scope only
+    expect(cov(obs, "persistent_composer_input").status).toBe("unavailable");
+    expect(cov(obs, "persistent_composer_input", "ghost").status).toBe("complete");
+  });
+
+  it("scoped freshness: a rig scan does not refresh the fleet", async () => {
+    const obs = build();
+    await obs.scan();
+    nowMs += 10 * 60_000;
+    await obs.scan({ rig: "alpha" });
+    expect(obs.snapshot().coverage.every((c) => c.status === "partial")).toBe(true); // fleet scan is stale
+    expect(obs.snapshot({ rig: "alpha" }).scannedAt).toBe(iso(nowMs));
+    expect(obs.snapshot({ rig: "alpha" }).coverage.every((c) => c.status !== "partial" || c.reason?.includes("older"))).toBe(true);
+  });
+
+  it("before any scan covers a scope that scope is unavailable, not clear", () => {
+    const obs = build();
+    expect(obs.snapshot({ rig: "alpha" }).coverage.every((c) => c.status === "unavailable")).toBe(true);
+  });
+
+  it("scans for different scopes both run; the second is not dropped", async () => {
+    seats = [SEAT, BETA];
+    states.set(BETA.session, idleState("n2"));
+    const obs = build();
+    await Promise.all([obs.scan({ rig: "alpha" }), obs.scan({ rig: "beta" })]);
+    expect(listCalls.sort()).toEqual(["alpha", "beta"]);
+    expect(obs.snapshot({ rig: "beta" }).scannedAt).not.toBeNull();
+    expect(obs.snapshot({ rig: "alpha" }).scannedAt).not.toBeNull();
+  });
+
+  it("the same scope requested twice joins one scan", async () => {
+    const obs = build();
+    await Promise.all([obs.scan({ rig: "alpha" }), obs.scan({ rig: "alpha" })]);
+    expect(listCalls).toEqual(["alpha"]);
+  });
+
+  it("drops a permission reading when the occupant is replaced during the capture", async () => {
+    const obs = build({
+      seatActivity: {
+        getSeatStateBySession: (s: string) => (states.get(s) ?? null) as never,
+        classifyPermissionPrompt: async (s: string) => {
+          states.set(s, idleState("n1", { generation: "g2", at: iso(nowMs) })); // swap lands while the screen is read
+          return { state: "confirmed", source: "reader" };
+        },
+      },
+    });
+    await obs.scan();
+    expect(obs.snapshot().findings).toEqual([]);
+    expect(cov(obs, "permission_blocked").status).toBe("unavailable");
+  });
+
+  it("drops a composer reading when the occupant is replaced during the batched capture", async () => {
+    composer.set(SEAT.session, "text");
+    const obs = build({
+      readComposers: async (targets) => {
+        states.set(SEAT.session, idleState("n1", { generation: "g2", at: iso(nowMs) }));
+        return new Map(targets.map((t) => [t.session, "text" as ComposerReading]));
+      },
+    });
+    await obs.scan();
+    nowMs += DEFAULT_COMPOSER_GRACE_MS;
+    await obs.scan(); // first scan after the swap starts its own grace
+    expect(obs.snapshot().findings.filter((f) => f.kind === "persistent_composer_input")).toEqual([]);
+  });
+
+  it("an occupant replacement closes the old episode even when the new occupant cannot be read", async () => {
+    permission.set(SEAT.session, { state: "confirmed", source: "oracle" });
+    const obs = build();
+    await obs.scan();
+    const first = obs.snapshot().findings[0]!.episodeId;
+    states.set(SEAT.session, idleState("n1", { generation: "g2", at: iso(nowMs) }));
+    permission.set(SEAT.session, { state: "unavailable", source: null });
+    nowMs += 1000;
+    await obs.scan();
+    expect(obs.snapshot().findings).toEqual([]);
+    expect(obs.snapshot().recentlyClosed[0]).toMatchObject({ episodeId: first, reason: "occupant_changed" });
+  });
+
+  it("removing a rig's last seat closes its episodes on a scoped scan", async () => {
+    permission.set(SEAT.session, { state: "confirmed", source: "oracle" });
+    const obs = build({ resolveRig: (r) => [r] });
+    await obs.scan();
+    seats = [];
+    nowMs += 1000;
+    await obs.scan({ rig: "alpha" });
+    expect(obs.snapshot().findings).toEqual([]);
+    expect(obs.snapshot().recentlyClosed[0]).toMatchObject({ reason: "seat_gone" });
+  });
+
+  it("a scoped scan leaves another rig's episodes alone even when its own rig is empty", async () => {
+    seats = [SEAT, BETA];
+    states.set(BETA.session, idleState("n2"));
+    permission.set(BETA.session, { state: "confirmed", source: "oracle" });
+    const obs = build({ resolveRig: (r) => [r] });
+    await obs.scan();
+    seats = [BETA];
+    await obs.scan({ rig: "alpha" });
+    expect(obs.snapshot().findings.map((f) => f.rig)).toEqual(["beta"]);
+  });
+
+  it("a returning session does not inherit the grace interval of its previous life", async () => {
+    composer.set(SEAT.session, "text");
+    const obs = build({ resolveRig: (r) => [r] });
+    await obs.scan();
+    nowMs += DEFAULT_COMPOSER_GRACE_MS - 1000;
+    seats = [];
+    await obs.scan();
+    nowMs += 2000;
+    seats = [SEAT];
+    await obs.scan(); // would be past the old grace; the removal reset it
+    expect(obs.snapshot().findings.filter((f) => f.kind === "persistent_composer_input")).toEqual([]);
+  });
+
+  it("composer text that changes between scans is still one persisting composer", async () => {
+    composer.set(SEAT.session, "text");
+    const obs = build();
+    await obs.scan();
+    nowMs += DEFAULT_COMPOSER_GRACE_MS;
+    await obs.scan();
+    expect(obs.snapshot().findings.filter((f) => f.kind === "persistent_composer_input")).toHaveLength(1);
+  });
+
+  it("an old occupant's send that completes after the swap is not correlated; the new occupant's is", async () => {
+    states.set(SEAT.session, idleState("n1", { generation: "g1", at: iso(T0 - 10_000) }));
+    attempt("late-old", "g0", T0 - 1000); // finished after the swap, but sent to g0
+    composer.set(SEAT.session, "text");
+    const obs = build();
+    await obs.scan();
+    nowMs += DEFAULT_COMPOSER_GRACE_MS;
+    await obs.scan();
+    expect(obs.snapshot().findings[0]).toMatchObject({ correlation: "uncorrelated" });
+    attempt("new", "g1", T0 + 5000);
+    nowMs += 1000;
+    await obs.scan();
+    expect(obs.snapshot().findings[0]).toMatchObject({ correlation: "attempt-correlated", deliveryAttempt: { attemptId: "new" } });
+  });
+
+  it("stop() waits for the scan in flight and nothing from it is committed", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    composer.set(SEAT.session, "text");
+    const obs = build({ readComposers: async (t) => { await gate; return new Map(t.map((x) => [x.session, "text" as ComposerReading])); } });
+    const scanning = obs.scan();
+    await new Promise((r) => setTimeout(r, 0)); // the scan is now waiting on the gated capture
+    let stopped = false;
+    const stopping = obs.stop().then(() => { stopped = true; });
+    await Promise.resolve();
+    expect(stopped).toBe(false);
+    release();
+    await Promise.all([scanning, stopping]);
+    expect(stopped).toBe(true);
+    expect(obs.snapshot().scannedAt).toBeNull();
+    await obs.scan(); // a stopped observer takes no new scan
+    expect(listCalls).toHaveLength(1);
+  });
+});
+
 describe("DeliveryAttemptLedger", () => {
   const input = (attemptId: string, sentHash: string | null, session = "s@r"): ObservationInput => ({
     seam: "send_verify", attemptId, binding: { sessionName: session, nodeId: "n", occupant: null, pane: null }, runtime: "claude-code",

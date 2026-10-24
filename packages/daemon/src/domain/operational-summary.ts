@@ -200,7 +200,7 @@ export function computeOperationalSummary(deps: OperationalSummaryDeps): Operati
   // reading as healthy: a detector without fresh evidence is partial or unavailable, so the verdict stays indeterminate.
   let stuckSeats: OperationalSummary["stuckSeats"] = null;
   if (deps.stuckSeats) {
-    const snap = deps.stuckSeats.snapshot({ rigNames });
+    const snap = deps.stuckSeats.snapshot({ rigNames, ...(scoped ? { rig: deps.rig } : {}) });
     stuckSeats = {
       count: snap.findings.length,
       scannedAt: snap.scannedAt,

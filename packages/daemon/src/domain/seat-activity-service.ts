@@ -473,8 +473,10 @@ export class SeatActivityService {
     if (needs.count > 0 && needs.reason === "permission_request_unverified") return { state: "suspected", source: "oracle" };
     if (!this.permissionPromptReader) return { state: "unavailable", source: null };
     const runtime = seat.inventory?.runtime ?? "codex";
+    const occupant = seat.arbitrated.lastSwap;
     const visible = await this.permissionPromptReader(sessionName, runtime).catch(() => null);
-    if (seat.retired || seat.sessionName !== sessionName) return { state: "unavailable", source: null };
+    // The screen was read for the occupant that held the seat before the await; a replacement owns none of it.
+    if (seat.retired || seat.sessionName !== sessionName || seat.arbitrated.lastSwap !== occupant) return { state: "unavailable", source: null };
     if (visible === true) return { state: "suspected", source: "reader" };
     if (visible === false) return { state: "none", source: "reader" };
     return { state: seat.permissions.size > 0 ? "suspected" : "unavailable", source: seat.permissions.size > 0 ? "oracle" : null };

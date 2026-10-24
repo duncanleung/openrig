@@ -400,6 +400,7 @@ export async function startServer(port?: number) {
       ["watchdog", () => deps.watchdogScheduler?.stop()],
       ["draft-delivery", () => deps.sessionTransport?.guardedDelivery?.stop()],
       ["seat-activity", () => deps.seatActivityService?.stop()],
+      // Drains an in-flight scan, so tmux is not closed under a pending capture.
       ["stuck-seat-observer", () => deps.stuckSeatObserver?.stop()],
       ["seat-structural-activity", () => deps.seatStructuralActivityService?.stop()],
       ["seat-identity", () => deps.seatIdentityReconciler?.stop()],
