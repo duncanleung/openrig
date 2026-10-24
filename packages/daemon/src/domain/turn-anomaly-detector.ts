@@ -35,6 +35,8 @@ export const DEFAULT_TURN_THRESHOLDS: Readonly<Record<TurnRole, number>> = {
 const MIN_WINDOW_COVERAGE = 0.5;
 /** A digest this much older than the window is not a live session; its episodes close. */
 const STALE_DIGEST_WINDOWS = 2;
+/** A baseline older than this many windows cannot support the window (a scan gap): history restarts. */
+const MAX_BASELINE_WINDOWS = 1.5;
 /** The newest sample is refreshed at least this often so the baseline never lags further than the window. */
 const HEARTBEAT_DIVISOR = 6;
 const DEFAULT_SCAN_MAX_AGE_MS = 30_000;
@@ -219,7 +221,11 @@ export class TurnAnomalyDetector {
   private readonly db: Database.Database;
   private readonly now: () => Date;
   private timer: ReturnType<typeof setInterval> | null = null;
-  private lastScan: { at: number; examined: number; warming: number; total: number; unavailable?: string } | null = null;
+  private lastScan: {
+    at: number; examined: number; warming: number; total: number; unavailable?: string;
+    /** The same counts per rig ("" = digests with no rig), so a scoped read never borrows fleet-wide numbers. */
+    byRig: Map<string, { examined: number; warming: number; total: number }>;
+  } | null = null;
 
   constructor(deps: TurnAnomalyDetectorDeps) {
     this.db = deps.db;
@@ -260,33 +266,55 @@ export class TurnAnomalyDetector {
     // judge, and that must read as "not covered", never as "clear".
     const columns = new Set((this.db.prepare(`PRAGMA table_info(session_digests)`).all() as Array<{ name: string }>).map((c) => c.name));
     if (!columns.has("total_turns") || !columns.has("conversation_turns")) {
-      this.lastScan = { at: now, examined: 0, warming: 0, total: 0, unavailable: "fleet store has no session_digests table; fleet migrations are not applied" };
+      this.lastScan = { at: now, examined: 0, warming: 0, total: 0, unavailable: "fleet store has no session_digests table; fleet migrations are not applied", byRig: new Map() };
       return;
     }
     // `stall_patterns` arrived in a later migration; corroboration is simply absent on a database that lacks it.
     const stallColumn = columns.has("stall_patterns") ? "d.stall_patterns" : "'[]' AS stall_patterns";
 
-    // The current session of each seat is its newest digest. Older digests of the same seat are replaced sessions.
+    // The current session of each seat is chosen by seat identity, not by ingestion order: re-ingesting an old
+    // transcript refreshes `ingested_at` and must not displace the live session. A digest stamped with the node's
+    // newest occupant tenure wins; then the transcript's own modification time (a file fact, untouched by ingestion).
+    const tenures = (this.db.prepare(`PRAGMA table_info(occupant_tenures)`).all() as unknown[]).length > 0;
+    const hasNode = columns.has("node_id");
+    const currentTenure = tenures && hasNode
+      ? `CASE WHEN d2.generation_uuid IS NOT NULL AND d2.generation_uuid = (
+            SELECT t.generation_uuid FROM occupant_tenures t WHERE t.node_id = d2.node_id ORDER BY t.generation_ordinal DESC LIMIT 1
+          ) THEN 1 ELSE 0 END`
+      : "0";
     const rows = this.db.prepare(`
       SELECT d.native_session_id, d.seat_session, d.seat_name, d.node_logical_id, d.rig_name, d.generation_uuid,
              d.total_turns, d.conversation_turns, ${stallColumn}, d.ingested_at
         FROM session_digests d
-       WHERE d.id = (SELECT d2.id FROM session_digests d2 WHERE d2.seat_session = d.seat_session ORDER BY d2.ingested_at DESC, d2.id DESC LIMIT 1)
+       WHERE d.id = (
+         SELECT d2.id FROM session_digests d2 WHERE d2.seat_session = d.seat_session
+          ORDER BY ${currentTenure} DESC, COALESCE(d2.transcript_modified_at, '') DESC, d2.ingested_at DESC, d2.id DESC LIMIT 1)
     `).all() as DigestRow[];
 
     const seenCurrent = new Set<string>();
     let examined = 0;
     let warming = 0;
+    const byRig = new Map<string, { examined: number; warming: number; total: number }>();
+    const rigStat = (rig: string | null) => {
+      const key = rig ?? "";
+      let st = byRig.get(key);
+      if (!st) byRig.set(key, st = { examined: 0, warming: 0, total: 0 });
+      return st;
+    };
     const tx = this.db.transaction(() => {
+      // Expired history goes before any evaluation, so a scan after a long gap cannot pick an hours-old baseline.
+      this.db.prepare(`DELETE FROM turn_anomaly_samples WHERE sampled_at < ?`).run(new Date(now - windowMs * MAX_BASELINE_WINDOWS).toISOString());
       for (const row of rows) {
+        rigStat(row.rig_name).total++;
         const ingestedMs = Date.parse(row.ingested_at.includes("T") ? row.ingested_at : `${row.ingested_at.replace(" ", "T")}Z`);
         // A digest that stopped refreshing is a session that ended or a fleet feed that stalled: either way, it is no
         // longer evidence of a live runaway, so its episodes close instead of staying open forever.
         if (!Number.isFinite(ingestedMs) || now - ingestedMs > windowMs * STALE_DIGEST_WINDOWS) continue;
         seenCurrent.add(row.native_session_id);
         examined++;
+        rigStat(row.rig_name).examined++;
         const verdict = this.evaluateSession(row, now, nowIso);
-        if (verdict === "warming") warming++;
+        if (verdict === "warming") { warming++; rigStat(row.rig_name).warming++; }
       }
       // Episodes whose subject is no longer a current, fresh session.
       const open = this.db.prepare(`SELECT id, native_session_id, seat_session FROM turn_anomaly_episodes WHERE closed_at IS NULL`)
@@ -297,17 +325,28 @@ export class TurnAnomalyDetector {
         const replaced = currentBySeat.has(ep.seat_session) && currentBySeat.get(ep.seat_session) !== ep.native_session_id;
         this.closeEpisode(ep.id, nowIso, replaced ? "subject_replaced" : "digest_stale");
       }
-      // Samples only matter inside the window; keep one extra window of slack for the baseline lookup.
-      this.db.prepare(`DELETE FROM turn_anomaly_samples WHERE sampled_at < ?`).run(new Date(now - windowMs * 2).toISOString());
     });
     tx();
-    this.lastScan = { at: now, examined, warming, total: rows.length };
+    this.lastScan = { at: now, examined, warming, total: rows.length, byRig };
   }
 
   private evaluateSession(row: DigestRow, now: number, nowIso: string): "judged" | "warming" {
     const { windowMs } = this.config;
     const role = resolveTurnRole(row, this.config.roleOverrides);
     const windowStart = new Date(now - windowMs).toISOString();
+
+    // Any decrease against the NEWEST sample is a rewritten transcript, even when the counters still sit above the
+    // window baseline (180 after 200 with a baseline of 100 would otherwise read as +80). History restarts.
+    const newest = this.db.prepare(`
+      SELECT sampled_at, total_turns, conversation_turns FROM turn_anomaly_samples
+       WHERE native_session_id = ? ORDER BY sampled_at DESC LIMIT 1
+    `).get(row.native_session_id) as SampleRow | undefined;
+    if (newest && (row.total_turns < newest.total_turns || row.conversation_turns < newest.conversation_turns)) {
+      this.db.prepare(`DELETE FROM turn_anomaly_samples WHERE native_session_id = ?`).run(row.native_session_id);
+      this.closeSessionEpisodes(row.native_session_id, nowIso, "counter_reset");
+      this.recordSample(row, now, nowIso);
+      return "warming";
+    }
 
     const baselineRow = (this.db.prepare(`
       SELECT sampled_at, total_turns, conversation_turns FROM turn_anomaly_samples
@@ -318,6 +357,14 @@ export class TurnAnomalyDetector {
         SELECT sampled_at, total_turns, conversation_turns FROM turn_anomaly_samples
          WHERE native_session_id = ? ORDER BY sampled_at ASC LIMIT 1
       `).get(row.native_session_id) as SampleRow | undefined);
+
+    // A baseline too old for the window (a scan gap) would stretch the window over hours: restart warm-up instead.
+    if (baselineRow && now - Date.parse(baselineRow.sampled_at) > windowMs * MAX_BASELINE_WINDOWS) {
+      this.db.prepare(`DELETE FROM turn_anomaly_samples WHERE native_session_id = ?`).run(row.native_session_id);
+      this.closeSessionEpisodes(row.native_session_id, nowIso, "history_gap");
+      this.recordSample(row, now, nowIso);
+      return "warming";
+    }
 
     const verdict = judgeWindow({
       role,
@@ -338,7 +385,10 @@ export class TurnAnomalyDetector {
 
     if (verdict.kind === null) {
       if (verdict.reason === "below_threshold") this.closeSessionEpisodes(row.native_session_id, nowIso, "recovered");
-      else if (verdict.reason === "insufficient_history") return "warming";
+      else if (verdict.reason === "insufficient_history") {
+        this.closeSessionEpisodes(row.native_session_id, nowIso, "insufficient_history");
+        return "warming";
+      }
       return "judged";
     }
 
@@ -390,6 +440,15 @@ export class TurnAnomalyDetector {
 
   /** Cached episodes: reading never scans. `rigNames` limits the result to those rigs; omitted = every rig. */
   snapshot(opts: { rigNames?: readonly string[] } = {}): TurnAnomalySnapshot {
+    // Coverage and warming describe the requested scope only: another rig's digests are not evidence about this one.
+    const scope = this.lastScan
+      ? [...this.lastScan.byRig].filter(([rig]) => !opts.rigNames || opts.rigNames.includes(rig)).map(([, st]) => st)
+      : [];
+    const scoped = {
+      examined: scope.reduce((n, st) => n + st.examined, 0),
+      warming: scope.reduce((n, st) => n + st.warming, 0),
+      total: scope.reduce((n, st) => n + st.total, 0),
+    };
     const inRig = (rig: string | null) => !opts.rigNames || (rig !== null && opts.rigNames.includes(rig));
     const open = (this.db.prepare(`SELECT * FROM turn_anomaly_episodes WHERE closed_at IS NULL ORDER BY opened_at ASC, id ASC`).all() as EpisodeRow[])
       .filter((e) => inRig(e.rig_name));
@@ -421,11 +480,11 @@ export class TurnAnomalyDetector {
     } else if (this.lastScan.unavailable) {
       coverage = { status: "unavailable", examined: 0, reason: this.lastScan.unavailable };
     } else if (this.now().getTime() - this.lastScan.at > staleAfterMs) {
-      coverage = { status: "partial", examined: this.lastScan.examined, reason: "turn-anomaly scan is stale" };
-    } else if (this.lastScan.examined === 0) {
-      coverage = { status: "partial", examined: 0, reason: this.lastScan.total === 0 ? "fleet store holds no session digests" : "no session digest is fresh; fleet ingestion may be stalled" };
+      coverage = { status: "partial", examined: scoped.examined, reason: "turn-anomaly scan is stale" };
+    } else if (scoped.examined === 0) {
+      coverage = { status: "partial", examined: 0, reason: scoped.total === 0 ? (opts.rigNames ? "fleet store holds no session digests for this rig" : "fleet store holds no session digests") : "no session digest is fresh; fleet ingestion may be stalled" };
     } else {
-      coverage = { status: "complete", examined: this.lastScan.examined };
+      coverage = { status: "complete", examined: scoped.examined };
     }
 
     return {
@@ -436,7 +495,7 @@ export class TurnAnomalyDetector {
         episodeId: e.id, kind: e.kind, session: e.seat_session, rig: e.rig_name, openedAt: e.opened_at,
         closedAt: e.closed_at as string, reason: e.close_reason ?? "closed",
       })),
-      warming: this.lastScan?.warming ?? 0,
+      warming: scoped.warming,
       coverage,
     };
   }

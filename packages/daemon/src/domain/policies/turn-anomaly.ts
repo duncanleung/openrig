@@ -38,8 +38,9 @@ export function makeTurnAnomalyPolicy(deps: TurnAnomalyPolicyDeps): Policy {
       const snap = deps.detector.snapshot();
       if (snap.findings.length === 0) return { action: "skip", reason: "no_turn_anomaly" };
 
-      // A recipient is told again only when the set of open episodes changes. Episode ids are never reused.
-      const condition = createHash("sha256").update(snap.findings.map((f) => f.episodeId).sort((a, b) => a - b).join(",")).digest("hex").slice(0, 16);
+      // A recipient is told again only when the set of open episodes changes, or when the recipient itself changes
+      // (a replaced occupant has not been told). Episode ids are never reused.
+      const condition = createHash("sha256").update(`${job.occupantGeneration ?? ""}|${snap.findings.map((f) => f.episodeId).sort((a, b) => a - b).join(",")}`).digest("hex").slice(0, 16);
       if (job.lastFiredCondition === condition) {
         return { action: "skip", reason: "turn_anomaly_unchanged", notes: { condition, open: snap.findings.length } };
       }

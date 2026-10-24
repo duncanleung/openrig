@@ -164,6 +164,60 @@ describe("turn-anomaly: detector episodes", () => {
     expect(snap.recentlyClosed[0]).toMatchObject({ reason: "subject_replaced" });
   });
 
+  it("keeps the seat's current tenure when an older transcript is re-ingested later", () => {
+    db.pragma("foreign_keys = OFF");
+    db.prepare(`INSERT INTO occupant_tenures (id, node_id, generation_ordinal, generation_uuid, kind) VALUES ('t1', 'node-1', 1, 'gen-OLD', 'initial'), ('t2', 'node-1', 2, 'gen-A', 'handover')`).run();
+    digest({ total: 100, conv: 10 });
+    digest({ native: "native-old", gen: "gen-OLD", total: 900, conv: 300 });
+    db.prepare(`UPDATE session_digests SET node_id = 'node-1'`).run();
+    detector.scan();
+    advance(31 * MIN);
+    digest({ total: 180, conv: 11 });
+    digest({ native: "native-old", gen: "gen-OLD", total: 900, conv: 300 }); // re-ingest: newest ingested_at
+    detector.scan();
+    const snap = detector.snapshot();
+    expect(snap.findings).toHaveLength(1);
+    expect(snap.findings[0]!.subject).toEqual({ nativeSessionId: "native-1", generation: "gen-A" });
+    expect(snap.recentlyClosed).toHaveLength(0);
+  });
+
+  it("restarts history on a decrease that stays above the window baseline (180 after 200, baseline 100)", () => {
+    runWindow({ total: 100, conv: 10 }, { total: 200, conv: 11 });
+    expect(detector.snapshot().findings).toHaveLength(1);
+    advance(MIN);
+    digest({ total: 180, conv: 11 }); detector.scan();
+    const snap = detector.snapshot();
+    expect(snap.findings).toHaveLength(0);
+    expect(snap.recentlyClosed[0]).toMatchObject({ reason: "counter_reset" });
+    expect(snap.warming).toBe(1);
+    expect((db.prepare(`SELECT COUNT(*) AS c FROM turn_anomaly_samples`).get() as { c: number }).c).toBe(1);
+  });
+
+  it("rejects an expired baseline after a scan gap instead of reporting hours as one window", () => {
+    digest({ total: 100, conv: 10 }); detector.scan();
+    advance(3 * 60 * MIN);
+    digest({ total: 400, conv: 11 }); detector.scan();
+    const snap = detector.snapshot();
+    expect(snap.findings).toHaveLength(0);
+    expect(snap.warming).toBe(1);
+    // History restarted from the current reading, so the next window judges only what follows the gap.
+    advance(31 * MIN);
+    digest({ total: 480, conv: 12 }); detector.scan();
+    expect(detector.snapshot().findings[0]).toMatchObject({ kind: "high_ratio", window: { assistantTurns: 80 } });
+  });
+
+  it("reports coverage and warming for the requested rig only", () => {
+    digest({ total: 10, conv: 5 });
+    digest({ native: "native-b", seat: "dev-impl@alpha2", rig: "alpha2", total: 10, conv: 5 });
+    detector.scan();
+    expect(detector.snapshot().coverage).toMatchObject({ status: "complete", examined: 2 });
+    expect(detector.snapshot({ rigNames: ["openrig"] })).toMatchObject({ warming: 1, coverage: { status: "complete", examined: 1 } });
+    const beta = detector.snapshot({ rigNames: ["beta"] });
+    expect(beta.warming).toBe(0);
+    expect(beta.coverage).toMatchObject({ status: "partial", examined: 0 });
+    expect(beta.coverage.reason).toMatch(/this rig/);
+  });
+
   it("closes the episode when the digest stops refreshing", () => {
     runWindow({ total: 100, conv: 10 }, { total: 180, conv: 11 });
     advance(61 * MIN); detector.scan();
@@ -301,6 +355,17 @@ describe("turn-anomaly: watchdog policy", () => {
     if (first.action !== "send") throw new Error("expected send");
     const again = await policy.evaluate(job({ lastFiredCondition: first.conditionReceipt! }));
     expect(again).toMatchObject({ action: "skip", reason: "turn_anomaly_unchanged" });
+  });
+
+  it("tells a replaced recipient again even though the episode set is unchanged", async () => {
+    openAnomaly();
+    const policy = makeTurnAnomalyPolicy({ detector });
+    const first = await policy.evaluate(job({ occupantGeneration: "R1" }));
+    if (first.action !== "send") throw new Error("expected send");
+    const same = await policy.evaluate(job({ occupantGeneration: "R1", lastFiredCondition: first.conditionReceipt! }));
+    expect(same).toMatchObject({ action: "skip", reason: "turn_anomaly_unchanged" });
+    const replaced = await policy.evaluate(job({ occupantGeneration: "R2", lastFiredCondition: first.conditionReceipt! }));
+    expect(replaced.action).toBe("send");
   });
 
   it("rejects a job without a delivery target", async () => {
