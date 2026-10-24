@@ -9,6 +9,7 @@ import type { QueueRepository } from "./queue-repository.js";
 import { hasLiveHumanGate } from "./queue-repository.js";
 import type { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 import type { SeatActivityService } from "./seat-activity-service.js";
+import type { ClosedEpisode, StuckFinding, StuckSeatObserver } from "./stuck-seat-observer.js";
 import { isHumanSeatSessionRef } from "./session-name.js";
 import { attachTerminalActivityAndWork, getNodeInventoryForRigs } from "./node-inventory.js";
 
@@ -23,7 +24,8 @@ export type SourceStatus = "complete" | "partial" | "unavailable";
 export type OperationalVerdict = "attention" | "clear" | "indeterminate";
 
 export interface CoverageEntry {
-  source: "seats" | "terminalInput" | "humanGates" | "stalledWork" | "watchdog";
+  source: "seats" | "terminalInput" | "humanGates" | "stalledWork" | "watchdog"
+    | "stuckSeats:permission_blocked" | "stuckSeats:persistent_composer_input" | "stuckSeats:idle_with_expected_work";
   status: SourceStatus;
   examined: number;
   /** Row cap of the source read, when it has one. */
@@ -46,6 +48,8 @@ export interface OperationalSummary {
     neverEvaluated: number;
     stale: Array<{ jobId: string; policy: string; target: string; lastEvaluationAt: string | null; intervalSeconds: number }>;
   } | null;
+  /** RIG-123 — cached stuck-seat findings from the independent observer. Null when the observer is not wired. */
+  stuckSeats: { count: number; scannedAt: string | null; findings: StuckFinding[]; recentlyClosed: ClosedEpisode[] } | null;
   coverage: CoverageEntry[];
   verdict: OperationalVerdict;
 }
@@ -55,6 +59,8 @@ export interface OperationalSummaryDeps {
   queueRepo?: QueueRepository;
   watchdogRepo?: WatchdogJobsRepository;
   seatActivity?: SeatActivityService;
+  /** Cached findings only: the summary reads `snapshot()` and never triggers a scan. */
+  stuckSeats?: Pick<StuckSeatObserver, "snapshot">;
   /** Rig name or id. Omitted = every unarchived rig on this daemon. */
   rig?: string;
   now?: Date;
@@ -190,8 +196,29 @@ export function computeOperationalSummary(deps: OperationalSummaryDeps): Operati
     coverage.push({ source: "watchdog", status: "unavailable", examined: 0, reason: "watchdog repository is not wired" });
   }
 
+  // Stuck seats: a projection of the observer's cached episodes. Per-detector coverage keeps "not observed" from
+  // reading as healthy: a detector without fresh evidence is partial or unavailable, so the verdict stays indeterminate.
+  let stuckSeats: OperationalSummary["stuckSeats"] = null;
+  if (deps.stuckSeats) {
+    const snap = deps.stuckSeats.snapshot({ rigNames, ...(scoped ? { rig: deps.rig } : {}) });
+    stuckSeats = {
+      count: snap.findings.length,
+      scannedAt: snap.scannedAt,
+      findings: snap.findings,
+      recentlyClosed: snap.recentlyClosed.filter((c) => endsWithRig(c.session, rigNames) || !scoped),
+    };
+    for (const c of snap.coverage) {
+      coverage.push({ source: `stuckSeats:${c.detector}`, status: c.status === "complete" ? "complete" : c.status, examined: c.examined, ...(c.reason ? { reason: c.reason } : {}) });
+    }
+  } else {
+    for (const detector of ["permission_blocked", "persistent_composer_input", "idle_with_expected_work"] as const) {
+      coverage.push({ source: `stuckSeats:${detector}`, status: "unavailable", examined: 0, reason: "stuck-seat observer is not wired" });
+    }
+  }
+
   // An attention_required seat is a finding on its own (failed restore, startup or identity mismatch).
-  const anyFinding = terminalSeats.length > 0 || gateItems.length > 0 || stalledItems.length > 0 || attentionRequired > 0;
+  const anyFinding = terminalSeats.length > 0 || gateItems.length > 0 || stalledItems.length > 0 || attentionRequired > 0
+    || (stuckSeats?.count ?? 0) > 0;
   const complete = coverage.every((c) => c.status === "complete");
   const verdict: OperationalVerdict = anyFinding ? "attention" : complete ? "clear" : "indeterminate";
 
@@ -204,6 +231,7 @@ export function computeOperationalSummary(deps: OperationalSummaryDeps): Operati
     humanGates: { count: gateItems.length, items: gateItems },
     stalledWork: { count: stalledItems.length, items: stalledItems },
     watchdog,
+    stuckSeats,
     coverage,
     verdict,
   };

@@ -11,6 +11,7 @@ import { QueueRepository } from "../src/domain/queue-repository.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { WatchdogJobsRepository } from "../src/domain/watchdog-jobs-repository.js";
 import type { SeatActivityService } from "../src/domain/seat-activity-service.js";
+import { STUCK_DETECTORS, type StuckFinding, type StuckSeatObserver, type StuckSeatSnapshot } from "../src/domain/stuck-seat-observer.js";
 import {
   computeOperationalSummary,
   OPERATIONAL_QUEUE_LIMIT,
@@ -84,8 +85,16 @@ describe("operational summary (RIG-120)", () => {
     return row;
   }
 
+  /** RIG-123 — a stuck-seat observer whose last scan was clean and complete, so RIG-120 cases stay about their own sources. */
+  const stuckStub = (over: Partial<StuckSeatSnapshot> = {}): Pick<StuckSeatObserver, "snapshot"> => ({
+    snapshot: () => ({
+      scannedAt: NOW.toISOString(), findings: [], recentlyClosed: [],
+      coverage: STUCK_DETECTORS.map((detector) => ({ detector, status: "complete" as const, examined: 1 })),
+      ...over,
+    }),
+  });
   const summarize = (extra: Partial<Parameters<typeof computeOperationalSummary>[0]> = {}): OperationalSummary =>
-    computeOperationalSummary({ rigRepo, queueRepo, watchdogRepo, seatActivity: seatActivity(), now: NOW, ...extra });
+    computeOperationalSummary({ rigRepo, queueRepo, watchdogRepo, seatActivity: seatActivity(), stuckSeats: stuckStub(), now: NOW, ...extra });
   const cov = (s: OperationalSummary, source: string) => s.coverage.find((c) => c.source === source)!;
 
   it("reads terminal input from the node inventory oracle, not from queue rows", async () => {
@@ -275,5 +284,83 @@ describe("operational summary (RIG-120)", () => {
     const s = summarize();
     expect(s.seats.total).toBe(0);
     expect(s.verdict).toBe("clear");
+  });
+
+  describe("stuck-seat section (RIG-123)", () => {
+    const finding = (over: Partial<StuckFinding> = {}): StuckFinding => ({
+      episodeId: "permission_blocked:dev-impl@alpha:1", kind: "permission_blocked", rig: "alpha", logicalId: "dev.impl",
+      session: "dev-impl@alpha", confidence: "confirmed", openedAt: NOW.toISOString(), lastObservedAt: NOW.toISOString(),
+      stale: false, detail: "permission prompt confirmed by the activity oracle", ...over,
+    });
+
+    it("projects cached findings and any finding makes the verdict attention", () => {
+      freshWatchdog();
+      seat("dev.impl", "alpha", { activity: "idle-at-prompt" });
+      const s = summarize({ stuckSeats: stuckStub({ findings: [finding()] }) });
+      expect(s.stuckSeats).toMatchObject({ count: 1, findings: [{ kind: "permission_blocked", confidence: "confirmed" }] });
+      expect(s.verdict).toBe("attention");
+    });
+
+    it("exposes one coverage entry per detector", () => {
+      freshWatchdog();
+      const s = summarize();
+      expect(s.coverage.map((c) => c.source).filter((x) => x.startsWith("stuckSeats:")).sort()).toEqual([
+        "stuckSeats:idle_with_expected_work", "stuckSeats:permission_blocked", "stuckSeats:persistent_composer_input",
+      ]);
+    });
+
+    it("incomplete detector coverage without findings is indeterminate, not clear", () => {
+      freshWatchdog();
+      const s = summarize({ stuckSeats: stuckStub({ coverage: [
+        { detector: "permission_blocked", status: "complete", examined: 3 },
+        { detector: "persistent_composer_input", status: "partial", examined: 2, reason: "1 seat(s) not observed: composer not readable" },
+        { detector: "idle_with_expected_work", status: "complete", examined: 3 },
+      ] }) });
+      expect(s.stuckSeats?.count).toBe(0);
+      expect(cov(s, "stuckSeats:persistent_composer_input")).toMatchObject({ status: "partial" });
+      expect(s.verdict).toBe("indeterminate");
+    });
+
+    it("an unwired observer reports unavailable coverage (indeterminate), not a healthy fleet", () => {
+      freshWatchdog();
+      const s = summarize({ stuckSeats: undefined });
+      expect(s.stuckSeats).toBeNull();
+      expect(cov(s, "stuckSeats:permission_blocked")).toMatchObject({ status: "unavailable" });
+      expect(s.verdict).toBe("indeterminate");
+    });
+
+    it("a --rig summary asks the observer for that rig's findings only", () => {
+      freshWatchdog();
+      seat("dev.impl", "alpha", { activity: "idle-at-prompt" });
+      let scope: ReadonlySet<string> | undefined;
+      summarize({ rig: "alpha", stuckSeats: { snapshot: (o) => { scope = o?.rigNames; return stuckStub().snapshot(); } } });
+      expect([...scope!]).toEqual(["alpha"]);
+    });
+
+    it("owed-work count is not hidden by newer parked rows (no row cap before the state filter)", async () => {
+      const owner = "dev-impl@alpha";
+      await queueRepo.create({ sourceSession: "orch-lead@alpha", destinationSession: owner, body: "old work", summary: "old pending" } as never);
+      for (let i = 0; i < 105; i++) await humanBlockedRow(owner);
+      expect(queueRepo.listOpenObligations(owner, 100).filter((o) => o.state !== "blocked")).toHaveLength(0); // the capped read loses it
+      expect(queueRepo.countActionableObligations(owner)).toBe(1);
+    });
+
+    it("a scoped summary takes coverage from the fleet scan or a scan of that rig, not another rig's", () => {
+      freshWatchdog();
+      seat("dev.impl", "alpha", { activity: "idle-at-prompt" });
+      let asked: { rig?: string } | undefined;
+      summarize({ rig: "alpha", stuckSeats: { snapshot: (o) => { asked = o; return stuckStub().snapshot(); } } });
+      expect(asked?.rig).toBe("alpha");
+      summarize({ stuckSeats: { snapshot: (o) => { asked = o; return stuckStub().snapshot(); } } });
+      expect(asked?.rig).toBeUndefined();
+    });
+
+    it("reads the cache only: the summary never calls scan", () => {
+      freshWatchdog();
+      const calls: string[] = [];
+      const observer = { snapshot: () => { calls.push("snapshot"); return stuckStub().snapshot(); }, scan: () => { calls.push("scan"); } };
+      summarize({ stuckSeats: observer as never });
+      expect(calls).toEqual(["snapshot"]);
+    });
   });
 });

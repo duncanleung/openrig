@@ -103,7 +103,10 @@ import { ResumeMetadataRefresher } from "./domain/resume-metadata-refresher.js";
 import { observeClaudePaneStartedAt } from "./domain/native-process-lineage.js";
 import { TranscriptStore } from "./domain/transcript-store.js";
 import { resumeRunningTranscriptCaptures, wireTranscriptCaptureStops } from "./domain/transcript-capture.js";
-import { probeSessionActivity, SessionTransport } from "./domain/session-transport.js";
+import { probeSessionActivity, readComposerOccupancy, SessionTransport } from "./domain/session-transport.js";
+import { DeliveryAttemptLedger, teeObserverSinks } from "./domain/delivery-attempt-ledger.js";
+import { StuckSeatObserver, type ComposerReading, type SeatTarget } from "./domain/stuck-seat-observer.js";
+import { getNodeInventoryForRigs } from "./domain/node-inventory.js";
 import { AgentActivityStore } from "./domain/agent-activity-store.js";
 import { HistoryQuery } from "./domain/history-query.js";
 import { AskService } from "./domain/ask-service.js";
@@ -557,6 +560,35 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // per running seat per tick + classifies motion STRUCTURALLY, so the `rig ps` ACTIVITY column reflects
   // real liveness for hook-less / stale-hook / turn-boundary seats WITHOUT a per-request capture storm.
   const seatStructuralActivityService = new SeatStructuralActivityService(tmuxAdapter);
+  // RIG-123 — stuck-seat observation. The ledger is an always-on delivery-attempt sink (metadata only: attempt id,
+  // identity, sent hash; never text). The observer acquires on its own timer and caches; summaries only read it.
+  const deliveryAttemptLedger = new DeliveryAttemptLedger();
+  const stuckSeatObserver = new StuckSeatObserver({
+    listSeats: (rigFilter): SeatTarget[] => {
+      const rigs = rigRepo.listRigs().filter((r) => !rigFilter || r.id === rigFilter || r.name === rigFilter);
+      const byRig = getNodeInventoryForRigs(db, new Set(rigs.map((r) => r.id)));
+      return [...byRig.values()].flat()
+        .filter((n) => n.nodeKind === "agent" && n.sessionStatus === "running" && n.canonicalSessionName)
+        .map((n) => ({ rig: n.rigName, logicalId: n.logicalId, session: n.canonicalSessionName!, runtime: n.runtime ?? null }));
+    },
+    seatActivity: seatActivityService,
+    // One batched capture for the candidate seats; the composer is read per runtime with the existing composer
+    // recognizers. It reports presence of typed text only, never the text.
+    readComposers: async (targets) => {
+      const out = new Map<string, ComposerReading>();
+      const captured = await tmuxAdapter.capturePanesContent(targets.map((t) => t.session), 40).catch(() => null);
+      for (const t of targets) {
+        const pane = captured?.get(t.session)?.text ?? null;
+        if (t.runtime !== "claude-code" && t.runtime !== "codex") { out.set(t.session, "unknown"); continue; }
+        out.set(t.session, readComposerOccupancy(pane, t.runtime));
+      }
+      return out;
+    },
+    attempts: deliveryAttemptLedger,
+    // Owed work: pending or in-progress rows. A blocked row is an intentional park and does not count.
+    expectedWork: (session) => queueRepoInstance.countActionableObligations(session),
+    resolveRig: (rigFilter) => rigRepo.listRigs().filter((r) => r.id === rigFilter || r.name === rigFilter).map((r) => r.name),
+  });
   // OPR.0.4.3.19 — SeatIdentityReconciler owns the liveness identity verdict
   // (the THIRD axis). Reconciles each running seat's pane PID/command against
   // the registered binding and persists the verdict so node-inventory can gate
@@ -1377,6 +1409,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // queue/assignment state (non-inference contract; see slice 15 IMPL-PRD §2.3).
     seatActivityService,
     seatStructuralActivityService,
+    stuckSeatObserver,
     seatIdentityReconciler,
     // OPR.0.4.4.21 — agentActivity feeds the rig-rollup attention
     // predicate's needs_input signal (synchronous events lookup only).
@@ -1405,7 +1438,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         eventBus,
         slowOpRecorder,
         activityEndpointFile: () => readActivityEndpointFile(OPENRIG_HOME),
-        captureObserver: shadow.capture?.observer,
+        captureObserver: teeObserverSinks(shadow.capture?.observer, deliveryAttemptLedger),
         runtimeAdapters: runtimeAdaptersMap,
         // transport.verify_input_box, read at each verified Claude Code or Codex send (absent or unreadable = off).
         verifyInputBox: () => {

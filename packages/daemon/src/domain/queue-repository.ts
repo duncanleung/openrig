@@ -3709,6 +3709,17 @@ export class QueueRepository {
     return choice?.kind === "fallback" ? describeReplyToFallback(choice) : null;
   }
 
+  /** Rows a seat must act on now: pending or in-progress. A blocked row is an intentional park and is not
+   *  counted. Filters in SQL, so no row cap can hide actionable work behind newer parked rows. */
+  countActionableObligations(destinationSession: string): number {
+    const addresses = this.resolveSessionAddresses(destinationSession);
+    const slots = addresses.map(() => "?").join(",");
+    const row = this.db.prepare(
+      `SELECT COUNT(*) AS n FROM queue_items WHERE destination_session IN (${slots}) AND state IN ('pending', 'in-progress')`,
+    ).get(...addresses) as { n: number };
+    return row.n;
+  }
+
   /** The parked query's obligation face: open rows to one destination, newest first, without the per-row
    *  projections list() derives (pickup, waiting view, delivery ledger), which this read never uses. */
   listOpenObligations(destinationSession: string, limit: number): Array<{ qitemId: string; state: "pending" | "in-progress" | "blocked"; summary: string | null }> {

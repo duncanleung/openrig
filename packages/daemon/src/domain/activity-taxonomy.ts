@@ -170,6 +170,12 @@ export interface ArbitratedSeatState {
   /** Monotonic arbitrated-state sequence (wait-after-seq consumes it). */
   seq: number;
   changedAt: string;
+  /** When the arbitrated activity last became `idle-at-prompt`, kept while it stays idle. Set from the
+   *  activity transition itself, never from `changedAt` (which also advances on input-count, reason and
+   *  evidence-source changes). `transitionObserved` is false when this process first saw the seat already
+   *  idle (for example after a daemon restart): `at` is then a lower bound, not the true start. Null when
+   *  the seat is not idle. */
+  idleSince?: { at: string; transitionObserved: boolean } | null;
   rungs: Array<{ rung: EvidenceRungId; sourceId: string; trust: RungTrust; lastEvidenceAt: string | null }>;
   /** The occupant swap is its OWN visible event, never an activity transition. */
   lastSwap: { generation: string; at: string } | null;
