@@ -129,6 +129,22 @@ import { queueDelegatedDecisionSchema } from "./migrations/123_queue_delegated_d
 import { contextUsageWatchdogUnitsSchema } from "./migrations/124_context_usage_watchdog_units.js";
 import { nodeAdvisorSchema } from "./migrations/125_node_advisor.js";
 import { operationCorrelationSchema } from "./migrations/127_operation_correlation.js";
+import { nodeRuntimeFallbackSchema } from "./migrations/090_node_runtime_fallback.js";
+import { nodeFallbackExpiresAtSchema } from "./migrations/091_node_fallback_expires_at.js";
+import { sessionDigestsSchema } from "./migrations/096_session_digests.js";
+import { reviewRunsSchema } from "./migrations/097_review_runs.js";
+import { reviewFindingsSchema } from "./migrations/098_review_findings.js";
+import { dailyTokenSnapshotsSchema } from "./migrations/099_daily_token_snapshots.js";
+import { digestTokenUsageSchema } from "./migrations/100_digest_token_usage.js";
+import { digestEscalationCountSchema } from "./migrations/101_digest_escalation_count.js";
+import { digestSessionTimestampsSchema } from "./migrations/102_digest_session_timestamps.js";
+import { digestSkillInvocationsSchema } from "./migrations/103_digest_skill_invocations.js";
+import { ticketAdmissionsSchema } from "./migrations/104_ticket_admissions.js";
+import { ticketFactoryControlSchema } from "./migrations/105_ticket_factory_control.js";
+import { ticketFactoryCutoverSchema } from "./migrations/106_ticket_factory_cutover.js";
+import { cronJobsSchema } from "./migrations/107_cron_jobs.js";
+import { digestStallPatternsSchema } from "./migrations/108_session_digest_stall_patterns.js";
+import { reviewSuppressRulesSchema } from "./migrations/109_review_suppress_rules.js";
 
 /** Ordered migrations; numbers may be reserved by independent changes. */
 
@@ -257,4 +273,20 @@ export const ALL_MIGRATIONS: Migration[] = [
   operationCorrelationSchema,
   terminalPolicySchema,
   turnAnomalySchema,
+  nodeRuntimeFallbackSchema,
+  nodeFallbackExpiresAtSchema,
+  sessionDigestsSchema,
+  reviewRunsSchema,
+  reviewFindingsSchema,
+  dailyTokenSnapshotsSchema,
+  digestTokenUsageSchema,
+  digestEscalationCountSchema,
+  digestSessionTimestampsSchema,
+  digestSkillInvocationsSchema,
+  ticketAdmissionsSchema,
+  ticketFactoryControlSchema,
+  ticketFactoryCutoverSchema,
+  cronJobsSchema,
+  digestStallPatternsSchema,
+  reviewSuppressRulesSchema,
 ];

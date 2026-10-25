@@ -2,8 +2,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import Database from "better-sqlite3";
 import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { migrate } from "../src/db/migrate.js";
-import { sessionDigestsSchema } from "../src/db/migrations/096_session_digests.js";
-import { digestStallPatternsSchema } from "../src/db/migrations/108_session_digest_stall_patterns.js";
 import {
   DEFAULT_TURN_THRESHOLDS, TurnAnomalyDetector, judgeWindow, resolveTurnRole,
 } from "../src/domain/turn-anomaly-detector.js";
@@ -106,7 +104,7 @@ describe("turn-anomaly: detector episodes", () => {
 
   beforeEach(() => {
     db = new Database(":memory:");
-    migrate(db, [...ALL_MIGRATIONS, sessionDigestsSchema, digestStallPatternsSchema]);
+    migrate(db, ALL_MIGRATIONS);
     clock = T0;
     detector = new TurnAnomalyDetector({ db, now: () => new Date(clock) });
   });
@@ -264,6 +262,8 @@ describe("turn-anomaly: detector episodes", () => {
     const bare = new Database(":memory:");
     try {
       migrate(bare, ALL_MIGRATIONS);
+      // A database that predates the fleet store has no digest table.
+      bare.exec("DROP TABLE session_digests");
       const d = new TurnAnomalyDetector({ db: bare, now: () => new Date(clock) });
       d.scan();
       expect(d.snapshot().coverage).toMatchObject({ status: "unavailable", examined: 0 });
@@ -325,7 +325,7 @@ describe("turn-anomaly: watchdog policy", () => {
 
   beforeEach(() => {
     db = new Database(":memory:");
-    migrate(db, [...ALL_MIGRATIONS, sessionDigestsSchema, digestStallPatternsSchema]);
+    migrate(db, ALL_MIGRATIONS);
     clock = T0;
     detector = new TurnAnomalyDetector({ db, now: () => new Date(clock) });
   });
