@@ -205,6 +205,22 @@ export const migrationsForFullTestDbExclusions: Record<string, string> = {
   "078_idle_gate_fired_condition.sql": "idle-gate watchdog extension migrated inline by the idle-gate policy suite.",
   "124_context_usage_watchdog_units.sql": "context watchdog token and percent units, extending 074 and 075 (excluded here); migrated inline by the context-usage watchdog units suite.",
   "079_workflow_lifecycle_parallel.sql": "workflow lifecycle identity, frontier, and failure tables — workflow suites migrate the canonical workflow schema inline; the shared core fixture does not read them.",
+  "090_node_runtime_fallback.sql": "runtime-fallback columns on nodes; the runtime-fallback visibility suite migrates them inline.",
+  "091_node_fallback_expires_at.sql": "fallback expiry column extending 090 (excluded above); migrated inline by the runtime-fallback visibility suite.",
+  "096_session_digests.sql": "fleet-store digest table; fleet and turn-anomaly suites migrate the canonical ALL_MIGRATIONS list.",
+  "097_review_runs.sql": "fleet-store review run table; fleet suites migrate the canonical list.",
+  "098_review_findings.sql": "fleet-store review findings table; fleet suites migrate the canonical list.",
+  "099_daily_token_snapshots.sql": "fleet-store token snapshot table; fleet suites migrate the canonical list.",
+  "100_digest_token_usage.sql": "additive column on session_digests (096, excluded); fleet suites migrate the canonical list.",
+  "101_digest_escalation_count.sql": "additive column on session_digests (096, excluded); fleet suites migrate the canonical list.",
+  "102_digest_session_timestamps.sql": "additive columns on session_digests (096, excluded); fleet suites migrate the canonical list.",
+  "103_digest_skill_invocations.sql": "additive column on session_digests (096, excluded); fleet suites migrate the canonical list.",
+  "104_ticket_admissions.sql": "ticket factory admission table; ticket-factory suites migrate the canonical list.",
+  "105_ticket_factory_control.sql": "ticket factory control table; ticket-factory suites migrate the canonical list.",
+  "106_ticket_factory_cutover.sql": "ticket factory cutover table; ticket-factory suites migrate the canonical list.",
+  "107_cron_jobs.sql": "cron job table; cron suites migrate the canonical list.",
+  "108_session_digest_stall_patterns.sql": "stall_patterns column on session_digests (096, excluded); fleet and turn-anomaly suites migrate the canonical list.",
+  "109_review_suppress_rules.sql": "fleet-store review suppress rules; fleet suites migrate the canonical list.",
 };
 
 export function createFullTestDb(): Database.Database {
