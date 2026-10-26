@@ -1,9 +1,9 @@
 import { Command } from "commander";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { serveStdio } from "@modelcontextprotocol/server/stdio";
 import { DaemonClient } from "../client.js";
 import { getDaemonStatus, getDaemonUrl, type LifecycleDeps , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { createMcpServer } from "../mcp-server.js";
-import { addGrant, McpHttpConfigError, mcpTokenFilePath, readGrants, revokeGrant, startMcpHttpServer } from "../mcp-http.js";
+import { addGrant, McpHttpConfigError, mcpTokenFilePath, readCloudGrantHeader, readGrants, revokeGrant, startMcpHttpServer } from "../mcp-http.js";
 import { readOpenRigEnv } from "../openrig-compat.js";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
@@ -23,14 +23,24 @@ export function mcpCommand(depsOverride?: StatusDeps): Command {
     .option("--port <port>", "Daemon port override")
     .option("--http", "Serve over Streamable HTTP at /mcp instead of stdio")
     .option("--bind <host:port>", "With --http: where to listen (default 127.0.0.1:7437). Beyond loopback needs a grant (rig mcp token add)")
+    .option("--cloud-grants <url>", "With --http: check each request's key with OpenRig Cloud's grant endpoint instead of the token file")
+    .option("--cloud-grant-header-file <path>", "With --cloud-grants: a file holding one 'Name: value' header to send with each grant request")
     .addHelpText("after", `
+Both MCP protocol revisions are served, over stdio and --http alike: clients on 2026-07-28 (which may start with
+server/discover) and clients that open with 2025's initialize handshake.
+
 With --http and no token file, the server stays on loopback and acts as OPENRIG_SESSION_NAME, declared and not
 authenticated, like stdio. Once a grant exists (rig mcp token add), every request needs its bearer credential, loopback
 included, and each caller acts as its grant's seat within its rigs and roots. Add a grant before reaching the port
 through a tunnel or proxy: they arrive on loopback too. If the token file then goes missing or can't be read, every
 request is refused; serving unauthenticated again takes a restart with no token file. TLS comes from the tunnel or
-proxy, not from this server.`)
-    .action(async (opts: { port?: string; http?: boolean; bind?: string }) => {
+proxy, not from this server.
+
+With --cloud-grants, every request needs an OpenRig Cloud customer key, checked with Cloud on each request for this
+daemon's instance (its self id); the token file isn't read. A customer acts as the seat its grant names, which must
+already exist here (created is enough; it needn't have been launched), and reaches only what the grant names. If Cloud
+can't answer, the request is refused.`)
+    .action(async (opts: { port?: string; http?: boolean; bind?: string; cloudGrants?: string; cloudGrantHeaderFile?: string }) => {
       const deps = getDepsF();
 
       let daemonUrl: string;
@@ -48,29 +58,37 @@ proxy, not from this server.`)
         daemonUrl = getDaemonUrl(status);
       }
 
+      if (!opts.http && (opts.cloudGrants || opts.cloudGrantHeaderFile)) {
+        console.error("--cloud-grants and --cloud-grant-header-file need --http");
+        process.exitCode = 1;
+        return;
+      }
+      if (opts.cloudGrantHeaderFile && !opts.cloudGrants) {
+        console.error("--cloud-grant-header-file needs --cloud-grants");
+        process.exitCode = 1;
+        return;
+      }
       if (opts.http) {
-        await serveHttp(daemonUrl, opts.bind ?? "127.0.0.1:7437");
+        await serveHttp(daemonUrl, opts.bind ?? "127.0.0.1:7437", opts.cloudGrants, opts.cloudGrantHeaderFile);
         return;
       }
       const client = deps.clientFactory(daemonUrl);
-      const server = createMcpServer(client);
-      const transport = new StdioServerTransport();
       let finish!: () => void;
       const closed = new Promise<void>((resolve) => { finish = resolve; });
-      server.server.onclose = finish;
       process.stdin.once("end", finish);
       process.once("SIGINT", finish);
       process.once("SIGTERM", finish);
+      // Serves the protocol revision the client opens with: 2026-07-28 per request, or 2025's initialize handshake.
+      const served = serveStdio(() => createMcpServer(client), { onerror: (err) => console.error(`rig mcp serve: ${err.message}`) });
       try {
         // EOF is a normal stdio disconnect, not an unresolved top-level await.
-        await server.connect(transport);
         if (process.stdin.readableEnded) finish();
         await closed;
       } finally {
         process.stdin.removeListener("end", finish);
         process.removeListener("SIGINT", finish);
         process.removeListener("SIGTERM", finish);
-        await server.close();
+        await served.close();
       }
     });
 
@@ -127,7 +145,7 @@ proxy, not from this server.`)
   return cmd;
 }
 
-async function serveHttp(daemonUrl: string, bind: string): Promise<void> {
+async function serveHttp(daemonUrl: string, bind: string, cloudGrants?: string, cloudHeaderFile?: string): Promise<void> {
   const match = /^(\[[^\]]+\]|[^:]+):(\d+)$/.exec(bind);
   if (!match) {
     console.error(`--bind takes host:port (for example 127.0.0.1:7437 or [::1]:7437), not ${bind}`);
@@ -138,14 +156,18 @@ async function serveHttp(daemonUrl: string, bind: string): Promise<void> {
   const tokenFile = mcpTokenFilePath();
   let served;
   try {
-    served = await startMcpHttpServer({ daemonUrl, host, port: Number(match[2]), tokenFile });
+    const header = cloudHeaderFile ? readCloudGrantHeader(cloudHeaderFile) : undefined;
+    served = await startMcpHttpServer({ daemonUrl, host, port: Number(match[2]), tokenFile,
+      ...(cloudGrants ? { cloudGrants: { url: cloudGrants, ...(header ? { header } : {}) } } : {}) });
   } catch (err) {
     console.error(err instanceof McpHttpConfigError ? err.message : `Can't serve on ${bind}: ${(err as Error).message}`);
     process.exitCode = 1;
     return;
   }
   const seat = readOpenRigEnv("OPENRIG_SESSION_NAME", "RIGGED_SESSION_NAME")?.trim();
-  console.error(served.authenticated
+  console.error(cloudGrants
+    ? `OpenRig MCP over HTTP at ${served.url}: each request needs an OpenRig Cloud customer key, checked with ${cloudGrants}.`
+    : served.authenticated
     ? `OpenRig MCP over HTTP at ${served.url}: each request needs a bearer credential from ${tokenFile}.`
     : `OpenRig MCP over HTTP at ${served.url}: no grants, so loopback only, acting as ${seat || "no seat"}, declared and not authenticated. Add a grant (rig mcp token add) before reaching it through a tunnel or proxy.`);
   await new Promise<void>((resolve) => {

@@ -18,8 +18,10 @@ import { migrate } from "../../daemon/src/db/migrate.js";
 import { ALL_MIGRATIONS } from "../../daemon/src/db/all-migrations.js";
 import { EventBus } from "../../daemon/src/domain/event-bus.js";
 import { QueueRepository } from "../../daemon/src/domain/queue-repository.js";
+import { OutboxHandler } from "../../daemon/src/domain/outbox-handler.js";
 import { mcpCommand } from "../src/commands/mcp.js";
 import { addGrant, McpHttpConfigError, revokeGrant, startMcpHttpServer, withGrantsLock } from "../src/mcp-http.js";
+import { setSelfHostId } from "../../daemon/src/domain/hosts/fanout-contract.js";
 
 const INITIALIZE = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "probe", version: "1" } } };
 
@@ -47,6 +49,8 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     process.env.OPENRIG_SESSION_NAME = "env-seat@elsewhere";
     tokenFile = path.join(home, "mcp-http-tokens.json");
     repo = new QueueRepository(db, new EventBus(db), { validateRig: () => true });
+    // The wake store attached, as the daemon attaches it at startup: a handoff makes its successor's wake durable there.
+    repo.attachOutbox(new OutboxHandler(db));
     const inert = async () => ({ ok: false, error: "inert fixture" });
     resolved = [];
     setup = createTestApp(db, {
@@ -147,6 +151,34 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     expect(who.text).toContain("\"principal\":\"bob\"");
   });
 
+  it("tells the daemon which grant's caller acted: concurrent callers' rows each carry their own principal, never one a caller sends", async () => {
+    // This host's own daemon, provably: the id it minted (read from its database) is the id its /healthz answers with.
+    const identity = path.join(home, "identity.sqlite");
+    const idDb = createDb(identity);
+    idDb.exec("CREATE TABLE self_host_identity (singleton INTEGER PRIMARY KEY, host_id TEXT)");
+    idDb.prepare("INSERT INTO self_host_identity VALUES (1, 'test-host')").run();
+    idDb.close();
+    vi.stubEnv("OPENRIG_DB", identity);
+    setSelfHostId("test-host");
+    closers.push(async () => { setSelfHostId(null); vi.unstubAllEnvs(); });
+    const alice = await grant("alice");
+    const bob = await grant("bob");
+    const served = await listen();
+    // A caller's own X-OpenRig-Principal goes no further than this server: the daemon hears the grant's principal.
+    const forged = { "X-OpenRig-Principal": JSON.stringify({ source: "cloud", id: "mallory", grant: "g", version: 1 }) };
+    const caller = async (token: string) => {
+      const client = new Client({ name: "principal-test", version: "1.0.0" });
+      await client.connect(new StreamableHTTPClientTransport(new URL(served.url), { requestInit: { headers: { Authorization: `Bearer ${token}`, ...forged } } }));
+      closers.push(() => client.close());
+      return async (body: string) => ((await client.callTool({ name: "rig_queue_create", arguments: { destination: "impl@team", body } })).structuredContent as { qitemId: string }).qitemId;
+    };
+    const [asAlice, asBob] = await Promise.all([caller(alice), caller(bob)]);
+    const ids = await Promise.all([asAlice("one"), asBob("two"), asAlice("three"), asBob("four")]);
+    const stamp = (id: string) => db.prepare("SELECT identity_provenance AS p, identity_principal AS who FROM queue_transitions WHERE qitem_id = ?").get(id);
+    const as = (id: string) => ({ p: "principal:v1", who: JSON.stringify({ source: "file", id }) });
+    expect(ids.map(stamp)).toEqual([as("alice"), as("bob"), as("alice"), as("bob")]);
+  });
+
   it("reaches only its scope: an out-of-scope write creates nothing, and items, successors, artifacts and owner tools stay out of reach", async () => {
     const carol = await grant("carol");
     const served = await listen();
@@ -159,7 +191,7 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       closers.push(() => client.close());
       return (await client.listTools()).tools.map((tool) => tool.name);
     })();
-    expect(names).toEqual(expect.arrayContaining(["rig_queue_create", "rig_queue_show", "rig_send", "rig_capture", "rig_team", "rig_artifact_read"]));
+    expect(names).toEqual(expect.arrayContaining(["rig_queue_create", "rig_queue_show", "rig_queue_handoff", "rig_queue_unclaim", "rig_send", "rig_capture", "rig_team", "rig_artifact_read"]));
     for (const ownerTool of ["rig_up", "rig_down", "rig_restore", "rig_discover", "rig_add", "rig_bundle_inspect", "rig_telemetry_events", "rig_context_get"]) {
       expect(names).not.toContain(ownerTool);
     }
@@ -195,6 +227,67 @@ describe("rig mcp serve --http on the daemon's routes", () => {
     expect(viaItem.text).not.toContain("ARTIFACT body");
   });
 
+  it("a hosted member works its own rows as its grant's seat, shows on the team with activity unknown, and keeps its record after revoke", async () => {
+    // The team has a lead with a node. The hosted member (a tool outside any terminal) has a roster entry and a grant, no node.
+    const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-http-workspace-"));
+    const savedWorkspace = process.env.OPENRIG_WORKSPACE_ROOT;
+    process.env.OPENRIG_WORKSPACE_ROOT = workspace;
+    setSelfHostId("host-a");
+    try {
+      seat("team", "lead");
+      fs.mkdirSync(path.join(workspace, "rosters"));
+      fs.writeFileSync(path.join(workspace, "rosters", "team.json"), JSON.stringify({
+        version: 1, id: "team", name: "Team", purpose: "Ship the release", curator: { seat: "lead@team", host: "host-a" }, updated_at: "2026-10-26",
+        members: [{ seat: "grok@team", host: "host-a", capabilities: ["web research"], engagement: ["delegate"],
+          use_when: "A question needs current web sources", why: "Searches the web and cites it", caveat: "No terminal or files: answers in text only", hosted: true }],
+      }));
+      const token = await addGrant(tokenFile, { name: "grok", seat: "grok@team", rigs: ["team"], roots: [], workspace: false, owner: false });
+      const served = await listen();
+      // Presence is recorded only for an authenticated call, beside the token file and never in it.
+      const presenceFile = path.join(path.dirname(tokenFile), "mcp-http-presence.json");
+      expect((await post(served.url, {})).status).toBe(401);
+      expect(fs.existsSync(presenceFile)).toBe(false);
+      const asGrok = await connect(served.url, token);
+
+      const task = await repo.create({ sourceSession: "lead@team", destinationSession: "grok@team", summary: "When did 0.7.2 ship?", body: "Find the publish date, with a source.", nudge: false } as never);
+      const listed = await asGrok("rig_queue_list", { owned: true });
+      expect(listed.isError).toBe(false);
+      expect(listed.structured.items.map((row: { qitemId: string }) => row.qitemId)).toEqual([task.qitemId]);
+      expect(repo.getById(task.qitemId)?.state, "listing it doesn't take it").toBe("pending");
+
+      expect((await asGrok("rig_queue_claim", { qitemId: task.qitemId })).isError).toBe(false);
+      const claim = repo.listTransitions(task.qitemId).find((t) => t.state === "in-progress");
+      expect(claim?.actorSession).toMatch(/^grok@team/);
+      const answered = await asGrok("rig_queue_update", { qitemId: task.qitemId, state: "done", closureReason: "no-follow-on", resolution: "It published on 2026-10-25 (npm)." });
+      expect(answered.isError).toBe(false);
+      expect(repo.getById(task.qitemId)).toMatchObject({ state: "done", resolution: "It published on 2026-10-25 (npm)." });
+
+      // Re-entry: a new connection with the same grant reaches the same work.
+      const again = await connect(served.url, token);
+      expect((await again("rig_queue_show", { qitemId: task.qitemId })).text).toContain("It published on 2026-10-25");
+
+      // The team shows it: a hosted member with its authored capabilities and limits, no pane, and activity unknown, never idle.
+      const team = await again("rig_team", { rigId: "team" });
+      expect(team.structured.seats.map((s: { session: string }) => s.session)).toEqual(["lead@team"]);
+      expect(team.structured.hostedMembers).toEqual([{ session: "grok@team", roster: "team", capabilities: ["web research"],
+        useWhen: "A question needs current web sources", caveat: "No terminal or files: answers in text only", pane: null, activity: "unknown",
+        // Its last call is recorded; no ring was rung (nudge: false), so its last wake is unknown, never idle.
+        presence: { lastCallAt: expect.stringMatching(/^\d{4}-\d\d-\d\dT/), lastWake: null, lastWakeScope: "the latest ring among its 50 most recent rows" } }]);
+      expect(JSON.parse(fs.readFileSync(presenceFile, "utf8")).seats["grok@team"]).toMatchObject({ grant: "grok" });
+      expect(fs.statSync(presenceFile).mode & 0o777).toBe(0o600);
+      expect(fs.readFileSync(tokenFile, "utf8")).not.toContain("lastCallAt");
+
+      // Revoked: its next request is refused, and the work and its answer stay.
+      expect(await revokeGrant(tokenFile, "grok")).toBe(true);
+      expect((await post(served.url, { Authorization: `Bearer ${token}` })).status).toBe(401);
+      expect(repo.getById(task.qitemId)).toMatchObject({ state: "done", resolution: "It published on 2026-10-25 (npm)." });
+    } finally {
+      setSelfHostId(null);
+      if (savedWorkspace === undefined) delete process.env.OPENRIG_WORKSPACE_ROOT; else process.env.OPENRIG_WORKSPACE_ROOT = savedWorkspace;
+      fs.rmSync(workspace, { recursive: true, force: true });
+    }
+  });
+
   it("stops a revoked grant at its next request and keeps its records", async () => {
     const alice = await grant("alice");
     const served = await listen();
@@ -218,10 +311,23 @@ describe("rig mcp serve --http on the daemon's routes", () => {
       expect((await asCarol("rig_queue_show", { qitemId: row.qitemId })).isError).toBe(false);
       const update = await asCarol("rig_queue_update", { qitemId: row.qitemId, state: "done", closureReason: "no-follow-on" });
       expect(update.structured).toMatchObject({ ok: false, code: "out_of_scope" });
+      expect((await asCarol("rig_queue_handoff", { qitemId: row.qitemId, to: "qa@team" })).structured).toMatchObject({ ok: false, code: "out_of_scope" });
+      expect((await asCarol("rig_queue_unclaim", { qitemId: row.qitemId })).structured).toMatchObject({ ok: false, code: "out_of_scope" });
       expect(repo.getById(row.qitemId)?.state).toBe("pending");
     }
     const owned = await repo.create({ sourceSession: "lead@other", destinationSession: "impl@team", body: "ours", nudge: false } as never);
     expect((await asCarol("rig_queue_update", { qitemId: owned.qitemId, note: "on it" })).isError).toBe(false);
+
+    // Passing its own row on: never to a seat outside its scope, or to a person; within it, as its own seat.
+    const before = rows();
+    for (const to of ["qa@other", "alex@external"]) {
+      expect((await asCarol("rig_queue_handoff", { qitemId: owned.qitemId, to })).structured).toMatchObject({ ok: false, code: "out_of_scope" });
+    }
+    expect(rows()).toBe(before);
+    expect(repo.getById(owned.qitemId)?.state).toBe("pending");
+    const handedOn = await asCarol("rig_queue_handoff", { qitemId: owned.qitemId, to: "qa@team" });
+    expect(handedOn.isError).toBe(false);
+    expect(repo.getById(handedOn.structured.created.qitemId)?.sourceSession).toMatch(/^carol@team/);
   });
 
   it("captures the rig its scope check authorized: a handle that is one rig's id and another rig's name reaches the first", async () => {

@@ -404,33 +404,12 @@ export class WorkflowProjector {
 
     validateAcceptance(currentStep, input, instance);
 
-    // RIG-90: a human gate packet is parked blocked on the human seat until
-    // `rig queue resolve` unparks it. Closing it with done|handoff while the
-    // park still holds would record an approval nobody gave. waiting is also
-    // rejected: it rewrites blockedOn (default external-gate), which would
-    // clear this check for a later done, and the packet is already parked.
-    // failed stays allowed (it claims no approval).
-    if (
-      currentStep.gate &&
-      isHumanSeatSession(currentStep.gate.target) &&
-      (input.exit === "done" || input.exit === "handoff" || input.exit === "waiting") &&
-      currentPacket.state === "blocked" &&
-      isHumanSeatSession(currentPacket.blockedOn)
-    ) {
-      throw new WorkflowProjectorError(
-        "gate_unresolved",
-        input.exit === "waiting"
-          ? `step "${currentStep.id}" is held at a human gate and packet ${input.currentPacketId} is already parked on ${currentPacket.blockedOn}; waiting would move the park off the human. Wait for the human to resolve (rig queue resolve), or close with "failed".`
-          : `step "${currentStep.id}" is held at a human gate and packet ${input.currentPacketId} is still blocked on ${currentPacket.blockedOn}; resolve the gate (rig queue resolve) before closing with "${input.exit}".`,
-        {
-          instanceId: instance.instanceId,
-          stepId: currentStep.id,
-          packetId: input.currentPacketId,
-          blockedOn: currentPacket.blockedOn,
-          attemptedExit: input.exit,
-        },
-      );
-    }
+    const unansweredHumanGate =
+      (input.exit === "done" || input.exit === "handoff") &&
+      currentStep.gate && isHumanSeatSession(currentStep.gate.target) &&
+      currentPacket.state === "blocked" && currentPacket.blockedOn === currentStep.gate.target
+        ? `Packet ${input.currentPacketId} is still blocked on ${currentStep.gate.target}; advancing past an unanswered human gate. This transition does not record their consent.`
+        : undefined;
 
     // A declared dependency graph opts into the S06 packet-addressed
     // executor. Legacy specs keep the mature serial scribe below exactly.
@@ -449,6 +428,7 @@ export class WorkflowProjector {
         currentStep,
         packetBinding,
         currentOwnerSession: currentPacket.destinationSession,
+        unansweredHumanGate,
       });
     }
 
@@ -641,7 +621,7 @@ export class WorkflowProjector {
         closureTarget: closure.closureTarget ?? undefined,
         handedOffTo: closure.handedOffTo,
         blockedOn: closure.blockedOn,
-        transitionNote: closure.transitionNote,
+        transitionNote: [closure.transitionNote, unansweredHumanGate].filter(Boolean).join("; "),
         wakeMaxSeconds: effectiveExit === "waiting" && !routes ? currentStep.re_present_max_seconds : undefined,
         wakeProgressEvidence: input.closureEvidence,
         wakeAfterSeconds:
@@ -1022,6 +1002,7 @@ export class WorkflowProjector {
       nextOwnerSession,
       nextStepId,
       emittedEventTypes: persistedEvents.map((e) => e.type),
+      ...(unansweredHumanGate ? { advisories: [unansweredHumanGate] } : {}),
     };
   }
 
@@ -1065,7 +1046,8 @@ export class WorkflowProjector {
       `reason: ${exception.reason}\n` +
       `evidence: ${evidenceRef}\n` +
       `resolve: diagnose via the trace above, then \`rig workflow resume ${instance.instanceId}${occurrenceId ? ` --occurrence ${occurrenceId}` : ""} [--decision <text>]\` re-drives from this step (completed steps never re-run).`;
-    const createExceptionItem = (destination: string, tier: string) =>
+    // Routed to the person, a failed workflow step is an approval whose wait costs now: alert them.
+    const createExceptionItem = (destination: string, tier: string, toPerson: boolean) =>
       this.queueRepo.createWithinTransaction({
         sourceSession: input.actorSession,
         identityProvenance: input.identityProvenance ?? null,
@@ -1077,10 +1059,11 @@ export class WorkflowProjector {
         summary: exception.reason,
         evidenceRef,
         chainOfRecord: [input.currentPacketId],
+        ...(toPerson ? { humanAlert: true } : {}),
       });
     let createdException;
     try {
-      createdException = createExceptionItem(route.destinationSession, route.tier);
+      createdException = createExceptionItem(route.destinationSession, route.tier, route.humanRouted === true);
     } catch (error) {
       if (!(error instanceof QueueRepositoryError) || error.code !== "unknown_destination_rig" || route.humanRouted) throw error;
       // Only an unavailable agent rig invokes human selection. Other
@@ -1089,6 +1072,7 @@ export class WorkflowProjector {
       createdException = createExceptionItem(
         workflowHumanDestination(this.exceptionDial?.humanFallbackSeat),
         "human-gate",
+        true,
       );
     }
     registerEvent(createdException.persistedEvent);
@@ -1104,8 +1088,9 @@ export class WorkflowProjector {
     currentStep: WorkflowStepSpec;
     packetBinding: import("./workflow-types.js").WorkflowFrontierBinding;
     currentOwnerSession: string;
+    unansweredHumanGate?: string;
   }): Promise<ProjectStepResult> {
-    const { input, instance, spec, currentStep, packetBinding, currentOwnerSession } = args;
+    const { input, instance, spec, currentStep, packetBinding, currentOwnerSession, unansweredHumanGate } = args;
     if (input.exit === "waiting" && instance.status === "waiting" && matchesStoredWaitingDecision(instance, input, currentStep.id, this.trailLog)) {
       return {
         instance,
@@ -1230,7 +1215,7 @@ export class WorkflowProjector {
         closureTarget: closure.closureTarget ?? undefined,
         handedOffTo: closure.handedOffTo,
         blockedOn: closure.blockedOn,
-        transitionNote: closure.transitionNote,
+        transitionNote: [closure.transitionNote, unansweredHumanGate].filter(Boolean).join("; "),
         wakeMaxSeconds: effectiveExit === "waiting" && ownerPlans.length === 0 ? currentStep.re_present_max_seconds : undefined,
         wakeProgressEvidence: input.closureEvidence,
         wakeAfterSeconds:
@@ -1407,6 +1392,7 @@ export class WorkflowProjector {
       nextQitemIds: createdPackets.map((packet) => packet.qitemId),
       nextStepIds: createdPackets.map((packet) => packet.step.id),
       emittedEventTypes: emitted.map((event) => event.type),
+      ...(unansweredHumanGate ? { advisories: [unansweredHumanGate] } : {}),
     };
   }
 }
@@ -1912,6 +1898,13 @@ export function compileGate(
   };
 }
 
+export function workflowHumanGateGuidance(person: string): string[] {
+  return [
+    "A response or resumed packet is not approval. Read the recorded decision: a denial, question, condition, changed decision or authorized override retains that meaning. Successful resolve records attribution, not consent or authority.",
+    `While the person has not answered, preserve this park: use the continuation with --exit waiting --blocked-on ${person}. Bare --exit waiting replaces the human blocker with an external gate.`,
+  ];
+}
+
 function workflowHandoffBody(input: {
   library?: GuidanceInput["library"];
   spec: WorkflowSpec;
@@ -1937,6 +1930,7 @@ function workflowHandoffBody(input: {
     lines.push(
       `Gate: ${input.gate.kind === "human" ? "human sign-off" : "handler-role check"} — the workflow is PARKED (waiting) until this item is resolved/closed; the flow then continues from this step.`,
     );
+    if (input.gate.kind === "human") lines.push(...workflowHumanGateGuidance(input.gate.parkOn!));
     if (input.gate.summary) lines.push(`Ask: ${input.gate.summary}`);
     if (input.gate.evidenceRef) lines.push(`Evidence: ${input.gate.evidenceRef}`);
   }

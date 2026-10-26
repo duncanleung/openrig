@@ -26,6 +26,7 @@ export function findBlockedDocsPaths(paths) {
   return [...new Set(paths)]
     .filter((file) => file.startsWith("docs/"))
     .filter((file) => !file.startsWith("docs/as-built/"))
+    .filter((file) => !file.startsWith("docs/decisions/"))
     .filter((file) => !file.startsWith("docs/reference/"))
     .filter((file) => !file.startsWith("docs/releases/"))
     .filter((file) => !ALLOWED_DOCS_FILES.has(file))

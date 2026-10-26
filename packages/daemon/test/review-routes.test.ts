@@ -24,6 +24,8 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { AgentActivityStore } from "../src/domain/agent-activity-store.js";
 import { SliceIndexer } from "../src/domain/slices/slice-indexer.js";
 import { ReviewGatherer } from "../src/domain/review/gather.js";
+import { QueueRepository } from "../src/domain/queue-repository.js";
+import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { reviewRoutes } from "../src/routes/review.js";
 import {
   makeFixtureWorkspace,
@@ -423,6 +425,51 @@ describe("GET /api/review/rig (OPR.0.4.4.22)", () => {
     expect(body.agents.rows.some((r: { sessionName: string }) => r.sessionName === "human-review@kernel")).toBe(false);
   });
 
+  it("keeps asks to and parks on a person in NEEDS YOU, and never a shared channel's row", async () => {
+    // The production wiring: the queue's own person and shared-channel facts.
+    const queueDb = createDb();
+    migrate(queueDb, ALL_MIGRATIONS);
+    const sarah = { entityId: "sarah", class: "human" as const, displayName: "Sarah", address: "sarah@external",
+      connectorBindings: [{ kind: "slack" as const, connectorRef: "primary", secretsRef: "env:SLACK_BOT_TOKEN", role: "primary" as const, handle: "USARAH" }],
+      prefs: { deliveryClass: "A" as const } };
+    const queue = new QueueRepository(queueDb, new EventBus(queueDb), { validateRig: () => true,
+      loadHumanRegistry: () => ({ ok: true, entities: [sarah] }), sharedChannels: () => [{ address: "support@external" }] });
+    const gatherer = new ReviewGatherer({ db, indexer: new SliceIndexer({ slicesRoot: ws.root, additionalSliceRoots: [], dogfoodEvidenceRoot: null, db }),
+      gitRepoPath: null, now: () => NOW,
+      participants: { isPerson: (a) => queue.isPersonAddress(a), isSharedChannel: (a) => queue.isSharedChannel(a) } });
+    const people = new Hono();
+    people.use("*", async (c, next) => { c.set("reviewGatherer" as never, gatherer); await next(); });
+    people.route("/api/review", reviewRoutes());
+
+    insert({ id: "q-ask", dest: "sarah@external", tags: ["slice:20-x"], summary: "approve the demo", state: "pending" });
+    insert({ id: "q-park", dest: "planner@r", state: "blocked", tags: ["slice:20-x"], summary: "waiting on sarah" });
+    db.prepare("UPDATE queue_items SET blocked_on = 'sarah@host' WHERE qitem_id = 'q-park'").run(); // a registered alias
+    insert({ id: "q-channel", dest: "support@external", tags: ["slice:20-x"], summary: "release notes posted", state: "pending" });
+    insert({ id: "q-channel-park", dest: "writer@r", state: "blocked", tags: ["slice:20-x"], summary: "waiting on the channel" });
+    db.prepare("UPDATE queue_items SET blocked_on = 'support@external' WHERE qitem_id = 'q-channel-park'").run();
+    // A human-gate tier doesn't make a channel's row a decision either.
+    insert({ id: "q-channel-gate", dest: "support@external", tags: ["slice:20-x"], summary: "post the cut", tier: "human-gate", state: "pending" });
+    insert({ id: "q-channel-gate-park", dest: "editor@r", state: "blocked", tags: ["slice:20-x"], summary: "waiting on the channel", tier: "human-gate" });
+    db.prepare("UPDATE queue_items SET blocked_on = 'support@external' WHERE qitem_id = 'q-channel-gate-park'").run();
+    insert({ id: "q-gate", dest: "qa@r", state: "blocked", tags: ["slice:20-x"], summary: "waiting on the external gate" });
+    db.prepare("UPDATE queue_items SET blocked_on = 'external:qa-pass' WHERE qitem_id = 'q-gate'").run();
+    insert({ id: "q-legacy", dest: "human-review@kernel", tags: ["slice:20-x"], summary: "approve the cut", state: "pending" });
+
+    const body = await (await people.request("/api/review/rig")).json();
+    const needs = body.needsYou.items.map((i: { qitemId: string | null; leg?: string }) => [i.qitemId, i.leg]);
+    expect(needs).toEqual(expect.arrayContaining([["q-ask", "human-routed"], ["q-park", "park-on-human"], ["q-legacy", "human-routed"]]));
+    // A shared channel takes correspondence; a typed external: gate is not a person.
+    for (const id of ["q-channel", "q-channel-park", "q-channel-gate", "q-channel-gate-park", "q-gate"]) expect(needs.some(([needed]: [string]) => needed === id)).toBe(false);
+    const sessions = body.agents.rows.map((r: { sessionName: string }) => r.sessionName);
+    for (const address of ["sarah@external", "support@external", "human-review@kernel"]) expect(sessions).not.toContain(address);
+    expect(sessions).toEqual(expect.arrayContaining(["planner@r", "writer@r", "qa@r"]));
+
+    writeFixtureSlice(ws, "release-t", "20-x", { intent: "i", prd: false });
+    const slice = await (await people.request("/api/review/slice/20-x")).json();
+    expect(slice.needsYou.items.map((i: { qitemId: string | null }) => i.qitemId).sort()).toEqual(["q-ask", "q-legacy", "q-park"]);
+    queueDb.close();
+  });
+
   it("recently-holding: an agent whose slice-tagged item closed TODAY appears with 'no tracked work item'", async () => {
     insert({ id: "q-closed", dest: "qa1@r", state: "done", tags: ["slice:20-x"], summary: "done work", tsUpdated: NOW });
     const res = await app.request("/api/review/rig");
@@ -501,6 +548,33 @@ describe("GET /api/review/rig (OPR.0.4.4.22)", () => {
     expect(body.agents.rows).toHaveLength(0);
     expect(body.agents.provenance).toContain("window: today");
     expect(body.settledProvenance).toContain("0 handoffs today");
+  });
+
+  it.each([
+    { runtime: "claude-code", newer: "running", older: "unknown", glyph: "active" },
+    { runtime: "claude-code", newer: "unknown", older: "idle", glyph: "unknown" },
+    { runtime: "codex", newer: "running", older: "idle", glyph: "idle" },
+  ] as const)("review telemetry keeps $runtime ordering when $older arrives after newer $newer", async ({ runtime, newer, older, glyph }) => {
+    insert({ id: "q-order", dest: "driver@r", tags: ["slice:20-x"], summary: "tracked work" });
+    db.prepare("INSERT INTO rigs (id, name) VALUES ('rig-order', 'rig-order')").run();
+    db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES ('node-order', 'rig-order', 'driver', ?)").run(runtime);
+    db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES ('sess-order', 'node-order', 'driver@r', 'running')").run();
+    const eventBus = new EventBus(db);
+    for (const [index, state] of [newer, older].entries()) {
+      eventBus.emit({ type: "agent.activity", rigId: "rig-order", nodeId: "node-order", sessionName: "driver@r", runtime,
+        activity: { state, reason: state === "unknown" ? "usage_limit" : state, evidenceSource: "runtime_hook", evidence: null,
+          rawEvent: state === "unknown" ? "StopFailure" : state === "running" ? "UserPromptSubmit" : "Stop",
+          sampledAt: NOW, eventAt: new Date(Date.parse(NOW) - (index + 1) * 1000).toISOString() } });
+    }
+    const indexer = new SliceIndexer({ slicesRoot: ws.root, additionalSliceRoots: [], dogfoodEvidenceRoot: null, db });
+    const activityStore = new AgentActivityStore({ db, eventBus, now: () => new Date(NOW) });
+    const gatherer = new ReviewGatherer({ db, indexer, gitRepoPath: null, activityStore, now: () => NOW });
+    const activityApp = new Hono();
+    activityApp.use("*", async (c, next) => { c.set("reviewGatherer" as never, gatherer); await next(); });
+    activityApp.route("/api/review", reviewRoutes());
+    const body = await (await activityApp.request("/api/review/rig")).json();
+    expect(body.agents.rows.find((row: { sessionName: string }) => row.sessionName === "driver@r"))
+      .toMatchObject({ runtime, stateGlyph: glyph });
   });
 
   it("idempotent: two requests over unchanged inputs return byte-identical bodies", async () => {
