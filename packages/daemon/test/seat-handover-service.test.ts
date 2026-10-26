@@ -120,7 +120,7 @@ describe("SeatHandoverService", () => {
       tmuxAdapter: adapter,
       now: () => new Date("2026-04-24T18:30:00.000Z"),
       newSuccessorId: () => "01SUCCID0",
-      runtimeAdapters: { codex: codexAdapter() },
+      runtimeAdapters: { codex: codexAdapter(), "claude-code": { runtime: "claude-code", launchHarness, checkReady } as unknown as RuntimeAdapter },
       contextUsageStore: { readSidecar } as never,
       resumeTokenCapturer: { captureCodexThreadId } as never,
       ...(claudeProcessStartedAt ? { claudeProcessStartedAt } : {}),
@@ -395,6 +395,43 @@ describe("SeatHandoverService", () => {
       source: "fresh", operator: "operator@kernel" });
     expect(result.ok).toBe(true);
     expect(launchHarness.mock.calls[0]![0]).toMatchObject({ kernelAuthority: true, launchPosture: "full_bypass" });
+  });
+
+  // RIG-138: a cross-runtime fallback launches on the TARGET runtime's permission defaults, never the source runtime's stored choice.
+  const fallbackToClaude = { runtime: "claude-code", poolKey: "pool-a", expiresAt: "2026-04-21T00:00:00Z", swapBack: "manual" as const };
+
+  it("codex kernel falling back to claude launches at the claude floor, not full_bypass, and keeps the stored selection", async () => {
+    const { node } = seedSeat({ runtime: "codex", rigName: "kernel" });
+    new NativePermissionStore(db).write(node.id, { runtime: "codex", mode: "full_bypass" }, "person", "kernel codex bypass");
+    const result = await service.handover({ seatRef: "dev-impl@kernel", reason: "usage-limit", source: "rebuild",
+      operator: "operator@kernel", fallback: fallbackToClaude });
+    expect(result).toMatchObject({ ok: true });
+    const binding = launchHarness.mock.calls[0]![0];
+    expect(binding).toMatchObject({ kernelAuthority: true, launchPosture: "floor" });
+    expect(binding.permissionMode).toBeUndefined();
+    expect(new NativePermissionStore(db).read(node.id)).toMatchObject({ runtime: "codex", mode: "full_bypass" });
+  });
+
+  it("team seat falling back to claude takes the team default and never the stored codex bypass", async () => {
+    const { node } = seedSeat({ runtime: "codex" });
+    new NativePermissionStore(db).write(node.id, { runtime: "codex", mode: "full_bypass" }, "person", "codex bypass");
+    const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "usage-limit", source: "rebuild", fallback: fallbackToClaude });
+    expect(result.ok).toBe(true);
+    const binding = launchHarness.mock.calls[0]![0];
+    expect(binding).toMatchObject({ kernelAuthority: false, teamPermissionDefault: true });
+    expect(binding.launchPosture).not.toBe("full_bypass");
+    expect(new NativePermissionStore(db).read(node.id)).toMatchObject({ runtime: "codex", mode: "full_bypass" });
+  });
+
+  it("reverse swap back to codex reuses the preserved codex selection", async () => {
+    const { node } = seedSeat({ runtime: "codex" });
+    new NativePermissionStore(db).write(node.id, { runtime: "codex", mode: "full_bypass" }, "person", "codex bypass");
+    const forward = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "usage-limit", source: "rebuild", fallback: fallbackToClaude });
+    expect(forward.ok).toBe(true);
+    launchHarness.mockClear();
+    const back = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "swap-back", source: "rebuild", reverseSwap: true });
+    expect(back.ok).toBe(true);
+    expect(launchHarness.mock.calls[0]![0]).toMatchObject({ launchPosture: "full_bypass" });
   });
 
   it("keeps dry-run side-effect free", async () => {
