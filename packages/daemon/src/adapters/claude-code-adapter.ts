@@ -1077,6 +1077,23 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     const collectorCmd = managedClaudeNodeCommand(this.nodeExecutable, collectorDest, contextDir, providerUsageDir);
     const current = statusLine["command"];
     if (typeof current === "string" && current.trim() !== "" && current !== collectorCmd && !isOwnedCollectorCommand(current)) return;
+    // A user statusLine in settings.json takes precedence: do not shadow it with the bare
+    // collector in settings.local.json. The user's script can run the collector internally —
+    // writing an override here would hide the user's display formatting. Check both the
+    // sibling settings.json (project-level) and the global ~/.claude/settings.json.
+    const userStatusLinePaths = [
+      nodePath.join(binding.cwd!, ".claude", "settings.json"),
+      nodePath.join(process.env["HOME"] ?? "", ".claude", "settings.json"),
+    ];
+    for (const candidate of [...new Set(userStatusLinePaths)]) {
+      if (!this.fs.exists(candidate)) continue;
+      try {
+        const text = this.fs.readFile(candidate);
+        const parsed = JSON.parse(text);
+        const cmd = parsed?.statusLine?.command;
+        if (typeof cmd === "string" && cmd.trim() !== "" && !isOwnedCollectorCommand(cmd)) return;
+      } catch { /* non-JSON or unreadable: skip */ }
+    }
     // Already installed as wanted: no write. Compared by value, so another writer's key order or spacing isn't a
     // change. This avoids rewriting on every poll; it doesn't make a needed write safe against a concurrent writer.
     if (statusLine["type"] === "command" && current === collectorCmd) return;
