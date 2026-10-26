@@ -114,6 +114,10 @@ interface NodeRow {
   // resolver (OPR.0.7.0.7: a saved seat choice first), not this column alone.
   effort: string | null;
   advisor: string | null;
+  // RIG-43: fallback columns needed for forward swap runtime selection and reverse swap restoration.
+  fallback_original_runtime?: string | null;
+  fallback_runtime?: string | null;
+  fallback_state?: string | null;
 }
 
 interface SessionRow {
@@ -287,6 +291,22 @@ export class SeatHandoverService {
     source?: string | null;
     operator?: string | null;
     dryRun?: boolean;
+    /** RIG-43: when present, executes a fallback-authorized cross-runtime swap.
+     *  Forces source=rebuild, bypasses runtime mismatch, atomically commits runtime change. */
+    fallback?: {
+      runtime: string;
+      model?: string;
+      poolKey: string;
+      expiresAt: string;
+      swapBack: import("./types.js").FallbackSwapBack;
+    };
+    /** RIG-43: when present, executes the reverse swap back to the original runtime.
+     *  Forces source=rebuild, uses node.fallback_original_runtime as effectiveRuntime,
+     *  clears fallback columns atomically, emits seat.runtime_fallback_exited. */
+    reverseSwap?: {
+      poolKey: string;
+      trigger: "at_expiry" | "manual_operator";
+    };
   }): Promise<SeatHandoverResult> {
     if (input.dryRun) {
       const planResult = this.planner.plan({ ...input, dryRun: true });
@@ -326,7 +346,9 @@ export class SeatHandoverService {
       };
     }
 
-    const parsed = parseHandoverSource(input.source);
+    // RIG-43: fallback and reverse-swap both force rebuild mode.
+    const effectiveSource = (input.fallback || input.reverseSwap) ? "rebuild" : input.source;
+    const parsed = parseHandoverSource(effectiveSource);
     if (!parsed.ok) {
       return parsed;
     }
@@ -514,26 +536,37 @@ export class SeatHandoverService {
         }
       } else permissionContinuity = { state: "unverified", detail: `${observed.reason} Existing launch behaviour was used; permissions were not verified or carried.` };
     }
+    // RIG-43: a fallback swap uses the declared fallback runtime; a reverse swap restores the original.
+    const effectiveRuntime = input.reverseSwap
+      ? (node.fallback_original_runtime ?? node.runtime)
+      : (input.fallback?.runtime ?? node.runtime);
+    // Runtime-specific launch config (codex profile, codex rebuild permissions) belongs to the source runtime; do not carry it across a runtime swap.
+    const crossRuntime = effectiveRuntime !== node.runtime;
+    // The forward swap leaves nodes.model and codex_config_profile untouched, so swap-back must relaunch with them.
+    const dropPinnedConfig = crossRuntime && !input.reverseSwap;
+    // The seat's pinned model may not exist on another runtime: let the target pick its own default.
+    const effectiveModel = input.fallback?.model ?? (dropPinnedConfig ? undefined : node.model);
+    const targetNode = { id: node.id, runtime: effectiveRuntime };
     const occupantGeneration = this.sessionRegistry.reserveOccupantGeneration();
-    const corePluginDir = seatCorePluginDir(node, this.db, undefined, this.pluginsDir);
+    const corePluginDir = seatCorePluginDir(targetNode, this.db, undefined, this.pluginsDir);
     // OPR.0.7.0.13 — the successor is the same seat, so it gets the same skill storage.
     const seatSkillDir = seatSkillPluginDirForNode(this.db, node.id);
     // OPR.0.7.0.9: the seat's own launch additions reach the successor as they do any launch; a missing or refused
     // copy is named on the result.
-    const seatAdditions = node.runtime === "claude-code" ? seatLaunchAdditionsForLaunch(this.db, node.id) : { missing: [] as string[], refused: [] as string[] };
+    const seatAdditions = effectiveRuntime === "claude-code" ? seatLaunchAdditionsForLaunch(this.db, node.id) : { missing: [] as string[], refused: [] as string[] };
     const additionPluginDirs = seatAdditions.additions?.pluginDirs ?? [];
     const launchAdditionNotes = [
       ...seatAdditions.missing.map((file) => `seat_launch_addition_missing: ${file} is not in this seat's storage; the successor launched without it`),
       ...seatAdditions.refused.map((reason) => `seat_launch_addition_refused: ${reason}; the successor launched without it`),
     ];
-    const codexCorePluginDir = seatCodexCorePluginDir(node, this.db, undefined, this.pluginsDir);
+    const codexCorePluginDir = seatCodexCorePluginDir(targetNode, this.db, undefined, this.pluginsDir);
     const launch = await this.successorLauncher.createSuccessor({
       // Seam B: the successor is the SAME seat continuing — persisted policy posture carries.
       // 0.5.2-07 model fidelity: carry the seat's SPEC-pinned model so the successor launch reads the
       // spec (else the running topology drifts from the founder-designed one at every handover).
       // A4-profile: likewise carry the codex config profile (adapter emits -p) — the restore path
       // already threads it; handover must too, or a profile-pinned codex seat reverts at handover.
-      node: { id: node.id, runtime: node.runtime, cwd: node.cwd, ...(codexRebuildPermissions ? { codexRebuildPermissions } : {}), ...(seatAdditions.additions ? { launchAdditions: seatAdditions.additions } : {}), kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: node.model, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, advisor: node.advisor ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined, seatEnv: withPluginDirs(this.rigRepo.getEffectiveSeatEnv(node.id), [corePluginDir, seatSkillDir, ...additionPluginDirs]), ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
+      node: { id: node.id, runtime: effectiveRuntime, cwd: node.cwd, ...(codexRebuildPermissions && !crossRuntime ? { codexRebuildPermissions } : {}), ...(seatAdditions.additions ? { launchAdditions: seatAdditions.additions } : {}), kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: effectiveModel, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, advisor: node.advisor ?? undefined, codexConfigProfile: dropPinnedConfig ? undefined : node.codex_config_profile ?? undefined, seatEnv: withPluginDirs(this.rigRepo.getEffectiveSeatEnv(node.id), [corePluginDir, seatSkillDir, ...additionPluginDirs]), ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
       departingSessionName: latestSession.session_name,
       occupantGeneration,
       // OPR.0.5.5.5: a fork-sourced successor launches as a NATIVE FORK of the
@@ -694,6 +727,34 @@ export class SeatHandoverService {
       sourceOutcome,
       launchAdditionNotes,
       cleanup: () => this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId),
+      // RIG-43: thread fallback bypass so the runtime mismatch gate is skipped and
+      // node.runtime + fallback_state are updated atomically with provenance at commit.
+      ...(input.fallback ? {
+        fallbackAuthorized: true,
+        targetRuntime: input.fallback.runtime,
+        fallbackStateOpts: {
+          fallbackState: "on_fallback" as const,
+          fallbackPoolKey: input.fallback.poolKey,
+          fallbackEnteredAt: this.now().toISOString(),
+          fallbackSwapBack: input.fallback.swapBack,
+          fallbackExpiresAt: input.fallback.expiresAt,
+        },
+      } : {}),
+      // RIG-43: reverse swap — restore original runtime + clear fallback columns atomically.
+      ...(input.reverseSwap ? {
+        fallbackAuthorized: true,
+        ...(( node.fallback_original_runtime ?? node.runtime) != null
+          ? { targetRuntime: (node.fallback_original_runtime ?? node.runtime) as string }
+          : {}),
+        reverseSwapEvent: {
+          poolKey: input.reverseSwap.poolKey,
+          trigger: input.reverseSwap.trigger,
+          logicalId: statusResult.status.logical_id,
+          rigId: statusResult.status.rig_id,
+          fromRuntime: node.runtime,
+          toRuntime: node.fallback_original_runtime ?? null,
+        },
+      } : {}),
     });
   }
 
@@ -724,6 +785,27 @@ export class SeatHandoverService {
     sourceOutcome?: SeatHandoverMutationResult["sourceOutcome"];
     launchAdditionNotes?: string[];
     cleanup: (() => Promise<void>) | null;
+    /** RIG-43: bypass runtime mismatch check for a fallback-authorized cross-runtime swap. */
+    fallbackAuthorized?: boolean;
+    /** RIG-43: if set, atomically update node.runtime to this value at commit. */
+    targetRuntime?: string;
+    /** RIG-43: fallback state columns written atomically with provenance at commit. */
+    fallbackStateOpts?: {
+      fallbackState: "on_fallback" | null;
+      fallbackPoolKey: string | null;
+      fallbackEnteredAt: string | null;
+      fallbackSwapBack: "at_expiry" | "manual" | null;
+      fallbackExpiresAt?: string | null;
+    };
+    /** RIG-43: when present, clears all fallback columns and emits seat.runtime_fallback_exited. */
+    reverseSwapEvent?: {
+      poolKey: string;
+      trigger: "at_expiry" | "manual_operator";
+      logicalId: string;
+      rigId: string;
+      fromRuntime: string | null;
+      toRuntime: string | null;
+    };
   }): Promise<SeatHandoverResult> {
     const fail = async (result: SeatHandoverResult): Promise<SeatHandoverResult> => {
       if (input.cleanup) await input.cleanup();
@@ -770,7 +852,7 @@ export class SeatHandoverService {
       });
     }
 
-    const runtimeMismatch = this.checkRuntimeMismatch(input.node.runtime, discovered.runtimeHint);
+    const runtimeMismatch = this.checkRuntimeMismatch(input.node.runtime, discovered.runtimeHint, input.fallbackAuthorized);
     if (runtimeMismatch) return fail(runtimeMismatch);
 
     // #141: a composer-launched successor reuses the seat's own session name, which an archived earlier
@@ -827,6 +909,9 @@ export class SeatHandoverService {
       appliedLaunch: input.appliedLaunch,
       sourceOutcome: input.sourceOutcome,
       launchAdditionNotes: input.launchAdditionNotes,
+      targetRuntime: input.targetRuntime,
+      fallbackState: input.fallbackStateOpts,
+      reverseSwapEvent: input.reverseSwapEvent,
     });
     if (!committed.ok) return fail(committed);
     this.tmuxAdapter.deliveryGuard?.rebindLifecycle(input.node.id);
@@ -843,7 +928,7 @@ export class SeatHandoverService {
         nodeId: input.node.id,
         sessionId: committed.result.newSessionId,
         sessionName: discovered.tmuxSession,
-        runtime: input.node.runtime,
+        runtime: input.targetRuntime ?? input.node.runtime,
       });
     }
     return committed;
@@ -995,10 +1080,16 @@ export class SeatHandoverService {
     return { ok: true };
   }
 
-  private checkRuntimeMismatch(nodeRuntime: string | null, discoveredRuntime: string): SeatHandoverResult | null {
+  private checkRuntimeMismatch(
+    nodeRuntime: string | null,
+    discoveredRuntime: string,
+    fallbackAuthorized?: boolean,
+  ): SeatHandoverResult | null {
     if (!nodeRuntime || discoveredRuntime === "unknown" || nodeRuntime === discoveredRuntime) {
       return null;
     }
+    // RIG-43: a fallback-authorized swap intentionally crosses runtimes — bypass the guard.
+    if (fallbackAuthorized) return null;
     return {
       ok: false,
       code: "runtime_mismatch",
@@ -1009,7 +1100,7 @@ export class SeatHandoverService {
 
   private lookupNode(status: SeatStatus): NodeRow {
     return this.db.prepare(
-      "SELECT id, runtime, cwd, model, codex_config_profile, effort, advisor FROM nodes WHERE rig_id = ? AND logical_id = ?"
+      "SELECT id, runtime, cwd, model, codex_config_profile, effort, advisor, fallback_original_runtime, fallback_runtime, fallback_state FROM nodes WHERE rig_id = ? AND logical_id = ?"
     ).get(status.rig_id, status.logical_id) as NodeRow;
   }
 
@@ -1038,6 +1129,25 @@ export class SeatHandoverService {
     appliedLaunch: AppliedLaunchObservation | null;
       sourceOutcome?: SeatHandoverMutationResult["sourceOutcome"];
       launchAdditionNotes?: string[];
+    /** RIG-43: if set, atomically write node.runtime in the same UPDATE as provenance. */
+    targetRuntime?: string;
+    /** RIG-43: fallback state columns written atomically with provenance. */
+    fallbackState?: {
+      fallbackState: "on_fallback" | null;
+      fallbackPoolKey: string | null;
+      fallbackEnteredAt: string | null;
+      fallbackSwapBack: "at_expiry" | "manual" | null;
+      fallbackExpiresAt?: string | null;
+    };
+    /** RIG-43: when present, clears all fallback columns and emits seat.runtime_fallback_exited. */
+    reverseSwapEvent?: {
+      poolKey: string;
+      trigger: "at_expiry" | "manual_operator";
+      logicalId: string;
+      rigId: string;
+      fromRuntime: string | null;
+      toRuntime: string | null;
+    };
   }): SeatHandoverResult {
     const handoverAt = this.now().toISOString();
     const tx = this.db.transaction(() => {
@@ -1085,7 +1195,7 @@ export class SeatHandoverService {
       // launch-token capture). Validity-guarded; a malformed token is dropped,
       // never a bad write. The token is never logged.
       if (input.launchToken) {
-        const validated = validateResumeToken(input.node.runtime, input.launchToken.token);
+        const validated = validateResumeToken(input.targetRuntime ?? input.node.runtime, input.launchToken.token);
         if (validated.ok) {
           this.sessionRegistry.updateResumeToken(newSession.id, validated.resumeType, validated.token, "scrape");
         }
@@ -1103,15 +1213,60 @@ export class SeatHandoverService {
         : input.reportedSource.mode === "fork" ? "forked"
         : input.reportedSource.mode === "rebuild" ? "rebuilt"
         : null;
-      this.db.prepare(`
-        UPDATE nodes SET
-          occupant_lifecycle = 'active',
-          continuity_outcome = ?,
-          handover_result = 'complete',
-          previous_occupant = ?,
-          handover_at = ?
-        WHERE id = ?
-      `).run(continuityOutcome, input.latestSession.session_name, handoverAt, input.node.id);
+      if (input.targetRuntime) {
+        // RIG-43: atomic runtime change — runtime mutation commits in the SAME transaction
+        // as provenance, defeating the "Seat runtime changed since permission selection" guards.
+        // When fallbackState is also provided, write all fallback columns in the same UPDATE.
+        const fb = input.fallbackState;
+        if (fb) {
+          // fallback_original_runtime captures the pre-swap runtime so swap-back knows what to restore.
+          const originalRuntime = input.node.runtime ?? null;
+          const fallbackUpdate = this.db.prepare(`
+            UPDATE nodes SET
+              runtime = ?,
+              occupant_lifecycle = 'active',
+              continuity_outcome = ?,
+              handover_result = 'complete',
+              previous_occupant = ?,
+              handover_at = ?,
+              fallback_state = ?,
+              fallback_pool_key = ?,
+              fallback_entered_at = ?,
+              fallback_swap_back = ?,
+              fallback_original_runtime = ?,
+              fallback_expires_at = ?
+            WHERE id = ? AND fallback_state IS NULL
+          `).run(input.targetRuntime, continuityOutcome, input.latestSession.session_name, handoverAt,
+            fb.fallbackState, fb.fallbackPoolKey, fb.fallbackEnteredAt, fb.fallbackSwapBack,
+            originalRuntime, fb.fallbackExpiresAt ?? null, input.node.id);
+          // A concurrent fallback entry already set fallback_state: roll the commit back rather than
+          // record a handover whose runtime swap never happened.
+          if (fallbackUpdate.changes === 0) {
+            throw new Error(`[seat-handover] fallback entry lost the race for node ${input.node.id}: fallback_state already set`);
+          }
+        } else {
+          this.db.prepare(`
+            UPDATE nodes SET
+              runtime = ?,
+              occupant_lifecycle = 'active',
+              continuity_outcome = ?,
+              handover_result = 'complete',
+              previous_occupant = ?,
+              handover_at = ?
+            WHERE id = ?
+          `).run(input.targetRuntime, continuityOutcome, input.latestSession.session_name, handoverAt, input.node.id);
+        }
+      } else {
+        this.db.prepare(`
+          UPDATE nodes SET
+            occupant_lifecycle = 'active',
+            continuity_outcome = ?,
+            handover_result = 'complete',
+            previous_occupant = ?,
+            handover_at = ?
+          WHERE id = ?
+        `).run(continuityOutcome, input.latestSession.session_name, handoverAt, input.node.id);
+      }
 
       // Ghost-stage (e) re-key seam — the rebind is done; now invalidate the RETIRING occupant's
       // seat-name-keyed stores so the successor never inherits a ghost (drained compaction stage, frozen
@@ -1139,10 +1294,47 @@ export class SeatHandoverService {
         ...(input.sourceOutcome ? { sourceOutcome: input.sourceOutcome } : {}),
         ...(input.launchAdditionNotes?.length ? { launchAdditionNotes: input.launchAdditionNotes } : {}),
       });
-      return { newSessionId: newSession.id, previousSessionIdsSuperseded, event };
+      // RIG-43: audit event for runtime fallback entry OR exit (same transaction = atomic with the commit).
+      let fallbackEvent: PersistedEvent | undefined;
+      if (input.reverseSwapEvent) {
+        // Reverse swap: clear ALL fallback columns now that the original runtime is restored.
+        this.db.prepare(`
+          UPDATE nodes SET
+            fallback_state = NULL,
+            fallback_pool_key = NULL,
+            fallback_entered_at = NULL,
+            fallback_swap_back = NULL,
+            fallback_original_runtime = NULL,
+            fallback_expires_at = NULL
+          WHERE id = ?
+        `).run(input.node.id);
+        fallbackEvent = this.eventBus.persistWithinTransaction({
+          type: "seat.runtime_fallback_exited",
+          rigId: input.reverseSwapEvent.rigId,
+          nodeId: input.node.id,
+          logicalId: input.reverseSwapEvent.logicalId,
+          fromRuntime: input.reverseSwapEvent.fromRuntime,
+          toRuntime: input.reverseSwapEvent.toRuntime,
+          poolKey: input.reverseSwapEvent.poolKey,
+          trigger: input.reverseSwapEvent.trigger,
+        });
+      } else if (input.fallbackState?.fallbackState === "on_fallback") {
+        fallbackEvent = this.eventBus.persistWithinTransaction({
+          type: "seat.runtime_fallback_entered",
+          rigId: input.status.rig_id,
+          nodeId: input.node.id,
+          logicalId: input.status.logical_id,
+          fromRuntime: input.node.runtime,
+          toRuntime: input.targetRuntime!,
+          poolKey: input.fallbackState.fallbackPoolKey,
+          expiresAt: input.fallbackState.fallbackExpiresAt ?? null,
+          swapBack: input.fallbackState.fallbackSwapBack,
+        });
+      }
+      return { newSessionId: newSession.id, previousSessionIdsSuperseded, event, fallbackEvent };
     });
 
-    let committed: { newSessionId: string; previousSessionIdsSuperseded: string[]; event: PersistedEvent };
+    let committed: { newSessionId: string; previousSessionIdsSuperseded: string[]; event: PersistedEvent; fallbackEvent?: PersistedEvent };
     try {
       committed = tx();
       // S19 ruling 01530 — the SOLE narrow call: after the commit lands, the activity
@@ -1159,6 +1351,7 @@ export class SeatHandoverService {
     }
 
     this.eventBus.notifySubscribers(committed.event);
+    if (committed.fallbackEvent) this.eventBus.notifySubscribers(committed.fallbackEvent);
     const postStatus = this.statusService.getStatus(`${input.status.logical_id}@${input.status.rig_name}`);
     const currentStatus = postStatus.ok
       ? {

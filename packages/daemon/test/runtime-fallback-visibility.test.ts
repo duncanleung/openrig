@@ -1,7 +1,9 @@
 // RIG-101 — read-only fallback visibility in node inventory and seat status.
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type Database from "better-sqlite3";
-import { createFullTestDb } from "./helpers/test-app.js";
+import { createFullTestDb, migrationsForFullTestDb } from "./helpers/test-app.js";
+import { createDb } from "../src/db/connection.js";
+import { migrate } from "../src/db/migrate.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { SessionRegistry } from "../src/domain/session-registry.js";
 import { SeatStatusService } from "../src/domain/seat-status-service.js";
@@ -16,9 +18,6 @@ describe("runtime fallback visibility", () => {
 
   beforeEach(() => {
     db = createFullTestDb();
-    // createFullTestDb omits 090/091 today; a daemon database has them.
-    db.exec(nodeRuntimeFallbackSchema.sql);
-    db.exec(nodeFallbackExpiresAtSchema.sql);
     rigRepo = new RigRepository(db);
     registry = new SessionRegistry(db);
   });
@@ -87,7 +86,9 @@ describe("runtime fallback visibility", () => {
   });
 
   it("still lists seats on a database without the fallback columns", () => {
-    const old = createFullTestDb();
+    // A database that predates 090/091: the full fixture list minus the two fallback migrations.
+    const old = createDb();
+    migrate(old, migrationsForFullTestDb.filter((m) => m !== nodeRuntimeFallbackSchema && m !== nodeFallbackExpiresAtSchema));
     try {
       const cols = old.prepare("PRAGMA table_info(nodes)").all().map((c) => (c as { name: string }).name);
       expect(cols).not.toContain("fallback_state");

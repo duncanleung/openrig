@@ -63,7 +63,7 @@ const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
   "model", "effort", "advisor", "role", "permission_policy", "cwd", "restore_policy",
   "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env",
-  "agent_file", "append_system_prompt_file", "plugin_dirs",
+  "agent_file", "append_system_prompt_file", "plugin_dirs", "fallback",
 ]);
 const EDGE_KEYS = new Set(["kind", "from", "to"]);
 
@@ -652,6 +652,11 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
     ));
   }
 
+  // RIG-43: fallback block validation
+  if (member["fallback"] !== undefined) {
+    errors.push(...validateFallbackSpec(member["fallback"], `${prefix}.fallback`));
+  }
+
   return errors;
 }
 
@@ -693,6 +698,44 @@ function validateStarterRef(
       errors.push(`${prefix}: starter_ref + session_source.mode="fork" composition is rejected in v0 (the v1+ "Real native-fork-from-registered-thread-id starter proof" trigger covers that combination); use either starter_ref alone or session_source.mode="rebuild" for artifact-additive composition`);
     }
   }
+  return errors;
+}
+
+// RIG-43: validate the fallback: block on a member.
+function validateFallbackSpec(raw: unknown, prefix: string): string[] {
+  const errors: string[] = [];
+  if (raw === null || typeof raw !== "object") {
+    errors.push(`${prefix}: must be an object`);
+    return errors;
+  }
+  const fb = raw as Record<string, unknown>;
+
+  const runtime = fb["runtime"];
+  if (typeof runtime !== "string" || runtime.trim() === "") {
+    errors.push(`${prefix}.runtime: required non-empty string`);
+  }
+
+  const model = fb["model"];
+  if (model !== undefined && (typeof model !== "string" || model.trim() === "")) {
+    errors.push(`${prefix}.model: must be a non-empty string when present`);
+  }
+
+  const on = fb["on"];
+  if (!Array.isArray(on) || on.length === 0) {
+    errors.push(`${prefix}.on: required non-empty array; v1 supports ["usage_limit"]`);
+  } else {
+    for (const trigger of on) {
+      if (trigger !== "usage_limit") {
+        errors.push(`${prefix}.on: unsupported trigger "${String(trigger)}"; v1 supports "usage_limit" only`);
+      }
+    }
+  }
+
+  const swapBack = fb["swap_back"];
+  if (swapBack !== "at_expiry" && swapBack !== "manual") {
+    errors.push(`${prefix}.swap_back: required; must be "at_expiry" or "manual" (got ${JSON.stringify(swapBack)})`);
+  }
+
   return errors;
 }
 
@@ -1149,6 +1192,17 @@ function validateContinuityPolicy(raw: unknown, prefix: string): string[] {
 
 // -- Normalization helpers --
 
+function normalizeFallbackSpec(raw: unknown): import("./types.js").FallbackSpec | undefined {
+  if (raw === null || typeof raw !== "object") return undefined;
+  const fb = raw as Record<string, unknown>;
+  const runtime = typeof fb["runtime"] === "string" ? fb["runtime"] : undefined;
+  if (!runtime) return undefined;
+  const model = typeof fb["model"] === "string" ? fb["model"] : undefined;
+  const on = Array.isArray(fb["on"]) ? (fb["on"] as unknown[]).filter((t): t is "usage_limit" => t === "usage_limit") : [];
+  const swapBack = fb["swap_back"] === "manual" ? "manual" as const : "at_expiry" as const;
+  return { runtime, ...(model ? { model } : {}), on, swapBack };
+}
+
 function normalizeStarterRef(raw: unknown): import("./types.js").StarterRefSpec | undefined {
   if (raw === null || typeof raw !== "object") return undefined;
   const sr = raw as Record<string, unknown>;
@@ -1268,6 +1322,7 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     ...(typeof m["agent_file"] === "string" ? { agentFile: m["agent_file"] } : {}),
     ...(typeof m["append_system_prompt_file"] === "string" ? { appendSystemPromptFile: m["append_system_prompt_file"] } : {}),
     ...(Array.isArray(m["plugin_dirs"]) ? { pluginDirs: m["plugin_dirs"] as string[] } : {}),
+    fallback: normalizeFallbackSpec(m["fallback"]),
   }));
 
   const edges = Array.isArray(raw["edges"])
