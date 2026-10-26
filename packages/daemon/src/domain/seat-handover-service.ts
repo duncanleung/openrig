@@ -536,26 +536,28 @@ export class SeatHandoverService {
         }
       } else permissionContinuity = { state: "unverified", detail: `${observed.reason} Existing launch behaviour was used; permissions were not verified or carried.` };
     }
+    // RIG-43: a fallback swap uses the declared fallback runtime; a reverse swap restores the original.
+    const effectiveRuntime = input.reverseSwap
+      ? (node.fallback_original_runtime ?? node.runtime)
+      : (input.fallback?.runtime ?? node.runtime);
+    // Runtime-specific launch config (codex profile, codex rebuild permissions) belongs to the source runtime; do not carry it across a runtime swap.
+    const crossRuntime = effectiveRuntime !== node.runtime;
+    // The seat's pinned model may not exist on another runtime: let the target pick its own default.
+    const effectiveModel = input.fallback?.model ?? (crossRuntime ? undefined : node.model);
+    const targetNode = { id: node.id, runtime: effectiveRuntime };
     const occupantGeneration = this.sessionRegistry.reserveOccupantGeneration();
-    const corePluginDir = seatCorePluginDir(node, this.db, undefined, this.pluginsDir);
+    const corePluginDir = seatCorePluginDir(targetNode, this.db, undefined, this.pluginsDir);
     // OPR.0.7.0.13 — the successor is the same seat, so it gets the same skill storage.
     const seatSkillDir = seatSkillPluginDirForNode(this.db, node.id);
     // OPR.0.7.0.9: the seat's own launch additions reach the successor as they do any launch; a missing or refused
     // copy is named on the result.
-    const seatAdditions = node.runtime === "claude-code" ? seatLaunchAdditionsForLaunch(this.db, node.id) : { missing: [] as string[], refused: [] as string[] };
+    const seatAdditions = effectiveRuntime === "claude-code" ? seatLaunchAdditionsForLaunch(this.db, node.id) : { missing: [] as string[], refused: [] as string[] };
     const additionPluginDirs = seatAdditions.additions?.pluginDirs ?? [];
     const launchAdditionNotes = [
       ...seatAdditions.missing.map((file) => `seat_launch_addition_missing: ${file} is not in this seat's storage; the successor launched without it`),
       ...seatAdditions.refused.map((reason) => `seat_launch_addition_refused: ${reason}; the successor launched without it`),
     ];
-    const codexCorePluginDir = seatCodexCorePluginDir(node, this.db, undefined, this.pluginsDir);
-    // RIG-43: a fallback swap uses the declared fallback runtime; a reverse swap restores the original.
-    const effectiveRuntime = input.reverseSwap
-      ? (node.fallback_original_runtime ?? node.runtime)
-      : (input.fallback?.runtime ?? node.runtime);
-    const effectiveModel = input.fallback?.model ?? node.model;
-    // Runtime-specific launch config (codex profile, codex rebuild permissions) belongs to the source runtime; do not carry it across a runtime swap.
-    const crossRuntime = effectiveRuntime !== node.runtime;
+    const codexCorePluginDir = seatCodexCorePluginDir(targetNode, this.db, undefined, this.pluginsDir);
     const launch = await this.successorLauncher.createSuccessor({
       // Seam B: the successor is the SAME seat continuing — persisted policy posture carries.
       // 0.5.2-07 model fidelity: carry the seat's SPEC-pinned model so the successor launch reads the
@@ -924,7 +926,7 @@ export class SeatHandoverService {
         nodeId: input.node.id,
         sessionId: committed.result.newSessionId,
         sessionName: discovered.tmuxSession,
-        runtime: input.node.runtime,
+        runtime: input.targetRuntime ?? input.node.runtime,
       });
     }
     return committed;
@@ -1191,7 +1193,7 @@ export class SeatHandoverService {
       // launch-token capture). Validity-guarded; a malformed token is dropped,
       // never a bad write. The token is never logged.
       if (input.launchToken) {
-        const validated = validateResumeToken(input.node.runtime, input.launchToken.token);
+        const validated = validateResumeToken(input.targetRuntime ?? input.node.runtime, input.launchToken.token);
         if (validated.ok) {
           this.sessionRegistry.updateResumeToken(newSession.id, validated.resumeType, validated.token, "scrape");
         }
