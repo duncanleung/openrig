@@ -607,7 +607,6 @@ export class RigRepository {
   /** RIG-43: write node.runtime. MUST be called inside an open transaction so the runtime
    *  change is atomic with the provenance UPDATE in seat-handover-service commit(). */
   setNodeRuntime(nodeId: string, runtime: string): boolean {
-    if (!this.hasNodeColumn("fallback_runtime")) return false;
     const result = this.db
       .prepare("UPDATE nodes SET runtime = ? WHERE id = ?")
       .run(runtime, nodeId);
@@ -921,6 +920,7 @@ export class RigRepository {
       fallbackEnteredAt: row.fallback_entered_at ?? null,
       fallbackSwapBack: (row.fallback_swap_back as Node["fallbackSwapBack"]) ?? null,
       fallbackOriginalRuntime: row.fallback_original_runtime ?? null,
+      fallbackExpiresAt: row.fallback_expires_at ?? null,
       createdAt: row.created_at,
     };
   }
@@ -1019,6 +1019,7 @@ interface NodeRow {
   fallback_entered_at?: string | null;
   fallback_swap_back?: string | null;
   fallback_original_runtime?: string | null;
+  fallback_expires_at?: string | null;
   created_at: string;
 }
 

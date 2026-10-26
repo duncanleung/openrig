@@ -554,13 +554,15 @@ export class SeatHandoverService {
       ? (node.fallback_original_runtime ?? node.runtime)
       : (input.fallback?.runtime ?? node.runtime);
     const effectiveModel = input.fallback?.model ?? node.model;
+    // Runtime-specific launch config (codex profile, codex rebuild permissions) belongs to the source runtime; do not carry it across a runtime swap.
+    const crossRuntime = effectiveRuntime !== node.runtime;
     const launch = await this.successorLauncher.createSuccessor({
       // Seam B: the successor is the SAME seat continuing — persisted policy posture carries.
       // 0.5.2-07 model fidelity: carry the seat's SPEC-pinned model so the successor launch reads the
       // spec (else the running topology drifts from the founder-designed one at every handover).
       // A4-profile: likewise carry the codex config profile (adapter emits -p) — the restore path
       // already threads it; handover must too, or a profile-pinned codex seat reverts at handover.
-      node: { id: node.id, runtime: effectiveRuntime, cwd: node.cwd, ...(codexRebuildPermissions ? { codexRebuildPermissions } : {}), ...(seatAdditions.additions ? { launchAdditions: seatAdditions.additions } : {}), kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: effectiveModel, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, advisor: node.advisor ?? undefined, codexConfigProfile: node.codex_config_profile ?? undefined, seatEnv: withPluginDirs(this.rigRepo.getEffectiveSeatEnv(node.id), [corePluginDir, seatSkillDir, ...additionPluginDirs]), ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
+      node: { id: node.id, runtime: effectiveRuntime, cwd: node.cwd, ...(codexRebuildPermissions && !crossRuntime ? { codexRebuildPermissions } : {}), ...(seatAdditions.additions ? { launchAdditions: seatAdditions.additions } : {}), kernelAuthority: permissionOverride.kernelAuthority, teamPermissionDefault: permissionOverride.teamPermissionDefault, nonInterruptive: this.rigRepo.getRigNonInterruptive(statusResult.status.rig_id), launchPosture: effectivePosture, ...(effectivePermissionMode ? { permissionMode: effectivePermissionMode } : {}), model: effectiveModel, effort: readSeatEffort(this.db, node.id)?.effective ?? undefined, advisor: node.advisor ?? undefined, codexConfigProfile: crossRuntime ? undefined : node.codex_config_profile ?? undefined, seatEnv: withPluginDirs(this.rigRepo.getEffectiveSeatEnv(node.id), [corePluginDir, seatSkillDir, ...additionPluginDirs]), ...((corePluginDir || codexCorePluginDir) && node.cwd ? { seatProjectDir: node.cwd } : {}) },
       departingSessionName: latestSession.session_name,
       occupantGeneration,
       // OPR.0.5.5.5: a fork-sourced successor launches as a NATIVE FORK of the
@@ -1215,7 +1217,7 @@ export class SeatHandoverService {
         if (fb) {
           // fallback_original_runtime captures the pre-swap runtime so swap-back knows what to restore.
           const originalRuntime = input.node.runtime ?? null;
-          this.db.prepare(`
+          const fallbackUpdate = this.db.prepare(`
             UPDATE nodes SET
               runtime = ?,
               occupant_lifecycle = 'active',
@@ -1233,6 +1235,11 @@ export class SeatHandoverService {
           `).run(input.targetRuntime, continuityOutcome, input.latestSession.session_name, handoverAt,
             fb.fallbackState, fb.fallbackPoolKey, fb.fallbackEnteredAt, fb.fallbackSwapBack,
             originalRuntime, fb.fallbackExpiresAt ?? null, input.node.id);
+          // A concurrent fallback entry already set fallback_state: roll the commit back rather than
+          // record a handover whose runtime swap never happened.
+          if (fallbackUpdate.changes === 0) {
+            throw new Error(`[seat-handover] fallback entry lost the race for node ${input.node.id}: fallback_state already set`);
+          }
         } else {
           this.db.prepare(`
             UPDATE nodes SET

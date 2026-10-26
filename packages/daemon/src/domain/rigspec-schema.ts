@@ -63,7 +63,7 @@ const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
   "model", "effort", "advisor", "role", "permission_policy", "cwd", "restore_policy",
   "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env",
-  "agent_file", "append_system_prompt_file", "plugin_dirs",
+  "agent_file", "append_system_prompt_file", "plugin_dirs", "fallback",
 ]);
 const EDGE_KEYS = new Set(["kind", "from", "to"]);
 
