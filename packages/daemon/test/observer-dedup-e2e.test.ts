@@ -112,7 +112,7 @@ describe("Observer dedup E2E — real filesystem", () => {
         join(projectDir, ".claude", "settings.local.json"),
         JSON.stringify({
           customKey: true,
-          statusLine: { type: "command", command: "node /old/context-collector.cjs /a /b" },
+          statusLine: { type: "command", command: "node /old/.openrig/context-collector.cjs /a /b" },
         }),
       );
       writeFileSync(
