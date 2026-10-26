@@ -752,7 +752,7 @@ export class RigRepository {
         LIMIT 1
       )
       ${where}
-      ORDER BY r.created_at
+      ORDER BY r.name
     `).all() as Array<{ id: string; name: string; archived_at: string | null; node_count: number; has_services: number; latest_snapshot_id: string | null; latest_snapshot_at: string | null }>;
 
     return rows.map((r) => ({

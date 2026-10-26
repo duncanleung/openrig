@@ -640,6 +640,7 @@ export async function hydrateSnapshot(
     }
   }
   const aggHosts = agg?.hosts ?? [];
+  rigs.sort((a, b) => a.name.localeCompare(b.name));
   const localHost: HostNode = {
     id: "local",
     name: instanceHealth?.selfHostId?.trim() || "local",
