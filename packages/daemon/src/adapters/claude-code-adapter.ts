@@ -1081,9 +1081,10 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // collector in settings.local.json. The user's script can run the collector internally —
     // writing an override here would hide the user's display formatting. Check both the
     // sibling settings.json (project-level) and the global ~/.claude/settings.json.
+    const home = this.fs.homedir ?? process.env["HOME"] ?? "";
     const userStatusLinePaths = [
       nodePath.join(binding.cwd!, ".claude", "settings.json"),
-      nodePath.join(process.env["HOME"] ?? "", ".claude", "settings.json"),
+      ...(home ? [nodePath.join(home, ".claude", "settings.json")] : []),
     ];
     for (const candidate of [...new Set(userStatusLinePaths)]) {
       if (!this.fs.exists(candidate)) continue;
@@ -1091,7 +1092,14 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
         const text = this.fs.readFile(candidate);
         const parsed = JSON.parse(text);
         const cmd = parsed?.statusLine?.command;
-        if (typeof cmd === "string" && cmd.trim() !== "" && !isOwnedCollectorCommand(cmd)) return;
+        if (typeof cmd === "string" && cmd.trim() !== "" && !isOwnedCollectorCommand(cmd)) {
+          // Remove a collector override we installed earlier so the user's statusLine shows through.
+          if (typeof current === "string" && (current === collectorCmd || isOwnedCollectorCommand(current))) {
+            delete existing["statusLine"];
+            this.fs.writeFile(settingsPath, JSON.stringify(existing, null, 2));
+          }
+          return;
+        }
       } catch { /* non-JSON or unreadable: skip */ }
     }
     // Already installed as wanted: no write. Compared by value, so another writer's key order or spacing isn't a
