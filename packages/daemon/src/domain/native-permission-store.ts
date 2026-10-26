@@ -44,10 +44,19 @@ export class NativePermissionStore {
   }
 
   /** One decision shared by fresh/continue, legacy restore and same-seat handover. */
-  launchOverride(nodeId: string, runtime: string): Pick<NodeBinding, "launchPosture" | "permissionMode" | "kernelAuthority" | "teamPermissionDefault"> {
-    const selection = this.read(nodeId);
+  launchOverride(
+    nodeId: string,
+    runtime: string,
+    // RIG-138: a cross-runtime fallback swap launches on a runtime the stored selection was not made for.
+    // The selection stays stored (swap-back reads it); this launch derives the target runtime's defaults.
+    options: { ignoreForeignRuntimeSelection?: boolean } = {},
+  ): Pick<NodeBinding, "launchPosture" | "permissionMode" | "kernelAuthority" | "teamPermissionDefault"> {
+    let selection = this.read(nodeId);
     if (selection && selection.runtime !== runtime) {
-      throw new Error("Seat runtime changed since permission selection; explicitly select again or inherit.");
+      if (!options.ignoreForeignRuntimeSelection) {
+        throw new Error("Seat runtime changed since permission selection; explicitly select again or inherit.");
+      }
+      selection = null;
     }
     const launchDefault = selection ? undefined : this.launchDefault(nodeId, runtime);
     if (launchDefault === "kernel") {

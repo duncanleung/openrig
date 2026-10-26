@@ -498,16 +498,22 @@ export class SeatHandoverService {
         ?? { state: "unverified", reason: "No native predecessor permission reader is available." }; }
       catch { observedCodexPermissions = { state: "unverified", reason: "The native predecessor permission read failed." }; }
     }
+    // RIG-43: a fallback swap uses the declared fallback runtime; a reverse swap restores the original.
+    const effectiveRuntime = input.reverseSwap
+      ? (node.fallback_original_runtime ?? node.runtime)
+      : (input.fallback?.runtime ?? node.runtime);
+    // Runtime-specific launch config (codex profile, codex rebuild permissions) belongs to the source runtime; do not carry it across a runtime swap.
+    const crossRuntime = effectiveRuntime !== node.runtime;
     const successorPosture = this.rigRepo.getNodePolicyProvenance(node.id)?.launchPosture
       ?? this.rigRepo.getRigPolicyProvenance(statusResult.status.rig_id)?.launchPosture
       ?? "floor"; // R2 terminal: absence = the locked floor on the continuity edge too
     let permissionOverride: ReturnType<NativePermissionStore["launchOverride"]>;
     try {
-      permissionOverride = new NativePermissionStore(this.db).launchOverride(node.id, node.runtime ?? "");
+      permissionOverride = new NativePermissionStore(this.db).launchOverride(node.id, effectiveRuntime ?? "", { ignoreForeignRuntimeSelection: crossRuntime });
     } catch (error) { return { ok: false, code: "successor_create_failed", message: `Permission selection: ${(error as Error).message}`,
       guidance: "No successor was created. Inspect the seat permission selection before a separately authorized retry." }; }
     const effectivePosture = permissionOverride.launchPosture ?? successorPosture;
-    const effectivePermissionMode = permissionOverride.permissionMode ?? (effectivePosture === "auto" && node.runtime === "claude-code" ? "auto" : undefined);
+    const effectivePermissionMode = permissionOverride.permissionMode ?? (effectivePosture === "auto" && effectiveRuntime === "claude-code" ? "auto" : undefined);
     // The successor must carry its own generation from its first byte. This reservation writes no
     // ledger row; commit consumes it, while every failed pre-commit branch remains unregistered.
     let codexRebuildPermissions: CodexPermissionEnvelope | undefined;
@@ -536,12 +542,6 @@ export class SeatHandoverService {
         }
       } else permissionContinuity = { state: "unverified", detail: `${observed.reason} Existing launch behaviour was used; permissions were not verified or carried.` };
     }
-    // RIG-43: a fallback swap uses the declared fallback runtime; a reverse swap restores the original.
-    const effectiveRuntime = input.reverseSwap
-      ? (node.fallback_original_runtime ?? node.runtime)
-      : (input.fallback?.runtime ?? node.runtime);
-    // Runtime-specific launch config (codex profile, codex rebuild permissions) belongs to the source runtime; do not carry it across a runtime swap.
-    const crossRuntime = effectiveRuntime !== node.runtime;
     // The forward swap leaves nodes.model and codex_config_profile untouched, so swap-back must relaunch with them.
     const dropPinnedConfig = crossRuntime && !input.reverseSwap;
     // The seat's pinned model may not exist on another runtime: let the target pick its own default.
