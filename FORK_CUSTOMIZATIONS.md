@@ -9,7 +9,7 @@ rewrites a region the fork only added to. Two merges did this and passed build a
 | RIG-136 | `c4302704d` | RIG-43 runtime fallback code in `seat-handover-service.ts` and `native-permission-store.ts` |
 | RIG-130 | `91fb7c0bf` | 16 fleet-store migrations from the `ALL_MIGRATIONS` array |
 
-A third drop was found while building this manifest and is still open: see [Known gaps](#known-gaps).
+Later drops found while building this manifest are listed under [Known gaps](#known-gaps).
 
 ## How to use this file
 
@@ -136,19 +136,22 @@ Line ranges are approximate and drift; the checks do not depend on them.
 
 ## Known gaps
 
-Found on 2026-10-27 while building this manifest. These constructions exist in `startup.ts` on the commit
-before merge `e02d09c64` ("Merge tag 'v0.6.12'", 2026-10-23) and are absent from it and everything after.
-The domain files are intact, so builds and tests pass; the features are not started at runtime.
+A `!` ID in the checks block marks a customization that is known to be missing. It reports `GAP` and does
+not fail the run. When it is restored the check passes, which fails the run until the `!` is removed.
+
+Restored by RIG-142 (merge `e02d09c64`, "Merge tag v0.6.12", 2026-10-23, had dropped them): `new RuntimeFallbackService`
+and the `runtimeFallbackTrigger` wiring (RIG-43), `new CronJobScheduler` with `cronJobScheduler?.start()` and the
+`cron` shutdown phase (RIG-84), and `new TicketFactoryController` with the admission service and poll policy
+(RIG-87/88/89).
+
+Open, found by RIG-142 in the same merge:
 
 | Missing | Ticket | Check ID |
 |---|---|---|
-| `new RuntimeFallbackService(...)` and the `runtimeFallbackTrigger` wiring | RIG-43 | `!CF-01-wired` |
-| `new CronJobScheduler(...)`, `seedDefaultCronJobs`, and `cronJobScheduler?.start()` in `index.ts` | RIG-84 | `!CF-05-wired`, `!CF-05-start` |
-| `TicketFactoryController`, `TicketAdmissionService`, ticket-factory poll policy construction | RIG-87/88/89 | `!CF-14-wired` |
+| `new FleetIngestionService`, its lifecycle subscription, boot rollup and `startFleetIngestionScheduler` timer in `index.ts` | RIG-80 | `!CF-08-ingestion` |
+| `writeShutdownManifest` call in the `shutdown-manifest` shutdown phase in `index.ts` | RIG-83 | `!CF-17-shutdown-manifest` |
 
-Verify each against the pre-merge commit before restoring: `git show e02d09c64^1:packages/daemon/src/startup.ts`.
-Whether each was moved elsewhere on purpose (RIG-113 split `createDaemon` into init groups) was not checked;
-the checks search `startup.ts` and `index.ts` only.
+Pre-merge source: `git show e02d09c64^1:packages/daemon/src/index.ts`.
 
 ## Checks
 
@@ -162,7 +165,7 @@ CF-01-reverse    | has       | packages/daemon/src/domain/seat-handover-service.
 CF-01-authorized | has       | packages/daemon/src/domain/seat-handover-service.ts | fallbackAuthorized: true
 CF-01-orig       | has       | packages/daemon/src/domain/seat-handover-service.ts | fallback_original_runtime
 CF-01-passes     | has       | packages/daemon/src/domain/runtime-fallback-service.ts | fallback: \{
-!CF-01-wired     | has       | packages/daemon/src/startup.ts | new RuntimeFallbackService
+CF-01-wired     | has       | packages/daemon/src/startup.ts | new RuntimeFallbackService
 
 # RIG-138 cross-runtime permission derivation
 CF-02-option     | has       | packages/daemon/src/domain/native-permission-store.ts | ignoreForeignRuntimeSelection\?: boolean
@@ -198,8 +201,8 @@ CF-04-home       | has       | packages/daemon/src/adapters/claude-code-adapter.
 CF-05-scheduler  | file      | packages/daemon/src/domain/cron-job-scheduler.ts
 CF-05-repo       | file      | packages/daemon/src/domain/cron-jobs-repository.ts
 CF-05-route      | has       | packages/daemon/src/server.ts | app\.route\("/api/cron", cronRoutes\(\)\)
-!CF-05-wired     | has       | packages/daemon/src/startup.ts | new CronJobScheduler
-!CF-05-start     | has       | packages/daemon/src/index.ts | cronJobScheduler\?\.start\(\)
+CF-05-wired     | has       | packages/daemon/src/startup.ts | new CronJobScheduler
+CF-05-start     | has       | packages/daemon/src/index.ts | cronJobScheduler\?\.start\(\)
 
 # RIG-79 turn anomaly, RIG-123 stuck-seat observer
 CF-06-detector   | has       | packages/daemon/src/startup.ts | new TurnAnomalyDetector\(
@@ -209,6 +212,8 @@ CF-07-observer   | has       | packages/daemon/src/startup.ts | new StuckSeatObs
 CF-07-ledger     | file      | packages/daemon/src/domain/delivery-attempt-ledger.ts
 
 # RIG-80 fleet, RIG-60 redaction, RIG-9 suppress rules
+!CF-08-ingestion | has | packages/daemon/src/index.ts | new FleetIngestionService
+!CF-17-shutdown-manifest | has | packages/daemon/src/index.ts | writeShutdownManifest
 CF-08-route      | has       | packages/daemon/src/server.ts | app\.route\("/api/fleet", fleetStoreRoutes\(
 CF-08-cli        | has       | packages/cli/src/index.ts | fleetCommand
 CF-08-redact     | callsite  | packages/daemon/src/domain/digest-redaction.ts | redactDigestValue | packages/daemon/src/domain/fleet-ingestion-service.ts
@@ -240,7 +245,7 @@ CF-13-gate-file  | file      | packages/daemon/assets/plugins/openrig-core/hooks
 CF-14-yaml       | file      | packages/daemon/src/builtins/workflow-specs/ticket-factory.yaml
 CF-14-cli        | has       | packages/cli/src/index.ts | program\.addCommand\(ticketFactoryCommand\(\)\)
 CF-14-poll       | file      | packages/daemon/src/domain/policies/ticket-factory-poll.ts
-!CF-14-wired     | has       | packages/daemon/src/startup.ts | new TicketFactoryController
+CF-14-wired     | has       | packages/daemon/src/startup.ts | new TicketFactoryController
 
 # RIG-97/99 Jev classifier
 CF-15-surface    | file      | packages/daemon/src/jev-classifier-surface.ts

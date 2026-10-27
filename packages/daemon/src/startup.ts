@@ -2141,6 +2141,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // gateway subsystem is constructed after the watchdog engine; the ref fills
   // at activation below, which is OUTSIDE the sessionTransport block — hence
   // function scope). Registry loads through the shipped loader.
+  // RIG-88: the ticket-factory controller is built after the workflow runtime; the poll policy
+  // reaches it through this holder.
+  const lateTicketFactory: { controller?: import("./domain/ticket-factory-controller.js").TicketFactoryController } = {};
   const lateGatewayDispatch: { fn?: (op: string, ref: string, payload: unknown, opts?: { decisionId?: string }) => { ok: boolean; error?: string } } = {};
   const { loadHumanRegistry: loadHumanRegistryForDelivery } = await import("./domain/gateway/human-registry.js");
   void loadHumanRegistryForDelivery; // consumed inside the sessionTransport block below
@@ -2278,6 +2281,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
             const res = dispatch(OUTBOUND_OP, String(payload["destinationSession"] ?? ""), payload, { decisionId: `deferral:${notificationKey}` });
             return { ok: res.ok };
           },
+        }),
+        (await import("./domain/policies/ticket-factory-poll.js")).makeTicketFactoryPollPolicy({
+          trigger: () => lateTicketFactory.controller?.triggerPoll(),
         }),
         (await import("./domain/policies/delivery-digest-flush.js")).makeDeliveryDigestFlushPolicy({
           queueRepo: queueRepoInstance,
@@ -2464,6 +2470,63 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       }
     }
 
+
+    // RIG-87: finish ticket admissions a crash left half-done and close admissions whose
+    // workflow already ended. Recovery needs no tracker access; admit() needs the real check
+    // adapters (a later slice), so runChecks refuses until they are wired.
+    if (workflowRuntime) {
+      try {
+        const { TicketAdmissionService } = await import("./domain/ticket-admission-service.js");
+        const { TicketFactoryController } = await import("./domain/ticket-factory-controller.js");
+        const { loadFactorySettings } = await import("./domain/ticket-factory-config.js");
+        const { TICKET_FACTORY_POLL_POLICY, TICKET_FACTORY_POLL_TARGET } = await import("./domain/policies/ticket-factory-poll.js");
+        const factorySettings = loadFactorySettings(process.env["OPENRIG_FACTORY_CONFIG"] ?? nodePath.join(process.cwd(), ".factory.yml"));
+        // Capacity and cooldown read the control row on every admit, so a settings reload applies at once.
+        const readControl = (): { capacity: number; cooldown_s: number } =>
+          (db.prepare("SELECT capacity, cooldown_s FROM ticket_factory_control WHERE id = 1").get() as { capacity: number; cooldown_s: number } | undefined)
+          ?? { capacity: factorySettings.capacity, cooldown_s: factorySettings.cooldownSeconds };
+        // RIG-89: the cutover service owns the legacy fence; the controller is attached below.
+        const { TicketFactoryCutoverService, createLegacyQueueProbe } = await import("./domain/ticket-factory-cutover.js");
+        const cutoverRef: { svc?: InstanceType<typeof TicketFactoryCutoverService> } = {};
+        const admissions = new TicketAdmissionService({
+          db,
+          runtime: workflowRuntime,
+          isLegacyHeld: (id: string) => cutoverRef.svc?.isLegacyHeld(id) ?? false,
+          isResolved: (id: string) => cutoverRef.svc?.isResolved(id) ?? false,
+          runChecks: async () => { throw new Error("ticket admission checks are not configured"); },
+          createdBySession: "orch-lead@openrig",
+          capacity: () => readControl().capacity,
+          cooldownSeconds: () => readControl().cooldown_s,
+        });
+        const factoryController = new TicketFactoryController({
+          db,
+          admissions,
+          listBacklog: async () => { throw new Error("ticket backlog adapter is not configured"); },
+          tokenCapPerTicket: factorySettings.tokenCapPerTicket,
+        });
+        factoryController.seed(factorySettings);
+        lateTicketFactory.controller = factoryController;
+        deps.ticketFactory = factoryController;
+        cutoverRef.svc = new TicketFactoryCutoverService({ db, controller: factoryController, probeLegacyQueue: createLegacyQueueProbe(queueRepoInstance) });
+        deps.ticketFactoryCutover = cutoverRef.svc;
+        // The job only wakes the controller; cadence, pause and backoff live in the control row.
+        watchdogJobsRepoInstance.ensureAutoRegistration({
+          policy: TICKET_FACTORY_POLL_POLICY,
+          targetSession: TICKET_FACTORY_POLL_TARGET,
+          registeredBySession: "daemon@kernel",
+          intervalSeconds: 30,
+          activeWakeIntervalSeconds: null,
+          scanIntervalSeconds: null,
+          specYaml: `policy: ${TICKET_FACTORY_POLL_POLICY}\ntarget:\n  session: ${TICKET_FACTORY_POLL_TARGET}\n`,
+        });
+        const recovered = await admissions.recoverPending();
+        const settled = admissions.settleFinished();
+        console.log(`ticket admission recovery: ${recovered.resumed} resumed, ${recovered.adopted} adopted, ${settled} settled`);
+      } catch (err) {
+        console.warn(`ticket admission recovery: failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+
     // W1 (transactional closure) FR — the wake-intent RECOVERY SWEEP. Deliver
     // any wake intents a crash left committed-but-undelivered (the terminal txn
     // committed, so the intent is durable, but the process died before the
@@ -2570,6 +2633,21 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   });
   deps.periodicSnapshotScheduler = periodicSnapshotScheduler;
 
+  // RIG-84: daemon cron for orchestration-layer shell jobs. Constructed here, started post-bind
+  // by index.ts (watchdog pattern), stopped in the "cron" shutdown phase. Seeding is opt-in.
+  {
+    const { CronJobScheduler } = await import("./domain/cron-job-scheduler.js");
+    const { seedDefaultCronJobs } = await import("./domain/cron-default-jobs.js");
+    const cronJobScheduler = new CronJobScheduler({
+      db,
+      openrigHome: OPENRIG_HOME,
+      extraAllowedDirs: (process.env["OPENRIG_CRON_ALLOWED_DIRS"] ?? "").split(nodePath.delimiter).filter((dir) => nodePath.isAbsolute(dir)),
+    });
+    seedDefaultCronJobs(cronJobScheduler, OPENRIG_HOME);
+    deps.cronJobScheduler = cronJobScheduler;
+  }
+
+
   // OPR.0.4.3.21 — daemon event-loop health instrumentation. Constructed once
   // per daemon and wired into deps so `/healthz` can surface wedge evidence
   // (loop lag / last-tick age) and the expensive topology routes are timed.
@@ -2616,6 +2694,47 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   deps.gatewaySubsystem = gatewaySubsystem;
   // OPR.0.5.6.1 — bind the delivery policies' late gateway ref.
   lateGatewayDispatch.fn = (op, ref, payload, opts) => gatewaySubsystem.dispatch(op, ref, payload, opts);
+
+  // RIG-43: construct RuntimeFallbackService and wire into wake-ladder + queue-repo.
+  // Uses a dedicated SeatHandoverService instance (rebuild path only; optional deps absent gracefully).
+  {
+    const { SeatHandoverService } = await import("./domain/seat-handover-service.js");
+    const { RuntimeFallbackService } = await import("./domain/runtime-fallback-service.js");
+    const fallbackHandoverService = new SeatHandoverService({
+      db,
+      rigRepo,
+      sessionRegistry,
+      discoveryRepo,
+      eventBus,
+      tmuxAdapter,
+      runtimeAdapters: deps.runtimeAdapters,
+      sessionEnv: launchSessionEnv,
+      tmuxOptionDefaults,
+      occupantInvalidator: deps.occupantInvalidator,
+      // seatActivityService has declareOccupantSwap; agentActivityStore does not.
+      activityOracle: seatActivityService ?? undefined,
+    });
+    const runtimeFallbackService = new RuntimeFallbackService({
+      db,
+      eventBus,
+      seatHandoverService: fallbackHandoverService,
+      log: (msg) => console.log(`[runtime-fallback] ${msg}`),
+    });
+    deps.runtimeFallbackService = runtimeFallbackService;
+    queueRepoInstance.attachRuntimeFallbackSwapBackTrigger(
+      (opts) => void runtimeFallbackService.triggerReverseSwap(opts)
+    );
+    // H6-1: swap_back_pending is not a dead end — drive the reverse swap when the event fires.
+    // queueMicrotask defers until the outer triggerReverseSwap releases the inFlight lock.
+    const unsub = eventBus.subscribe((event) => {
+      if (event.type === "seat.runtime_fallback_swap_back_pending") {
+        queueMicrotask(() => void runtimeFallbackService.executeManualSwapBack());
+      }
+    });
+    runtimeFallbackService.bindEventSubscription(unsub);
+    // Startup sweep: recover nodes stuck in swap_back_pending from a previous daemon crash.
+    void runtimeFallbackService.executeManualSwapBack();
+  }
 
   // `ui.enabled` (default off): the web UI pages and its terminal WebSocket. Read once at start.
   deps.webUiEnabled = opts?.webUiEnabled ?? new ContextPackSettingsStore().resolveOne("ui.enabled").value === true;
