@@ -191,6 +191,7 @@ export function startWakeLadderScheduler(deps: {
   usageLimitJitterSeconds?: number;
   seatActivityService?: Pick<import("./domain/seat-activity-service.js").SeatActivityService, "getSeatState">;
   agentActivityStore?: Pick<import("./domain/agent-activity-store.js").AgentActivityStore, "getLatestForNode">;
+  runtimeFallbackService?: { triggerForwardSwap(opts: { nodeId: string; poolKey: string; expiresAt: string }): void };
   gatewaySubsystem?: { dispatch: (op: string, entityBindingRef: string, payload: unknown, opts?: { decisionId?: string }) => import("./domain/gateway/dispatcher.js").DispatchResult };
 }): WakeLadderScheduler | null {
   const queueRepo = deps.queueRepo;
@@ -225,6 +226,11 @@ export function startWakeLadderScheduler(deps: {
         : {}),
       ...(deps.usageLimitJitterSeconds !== undefined
         ? { usageLimitJitterSeconds: deps.usageLimitJitterSeconds }
+        : {}),
+      // RIG-43: wire forward-swap trigger when RuntimeFallbackService is available.
+      ...(deps.runtimeFallbackService
+        ? { runtimeFallbackTrigger: (opts: { nodeId: string; poolKey: string; expiresAt: string }) =>
+            void deps.runtimeFallbackService!.triggerForwardSwap(opts) }
         : {}),
     }),
     tickIntervalMs: resolveWakeRetryIntervalSeconds() * 1000,
@@ -337,6 +343,9 @@ export async function startServer(port?: number) {
         // tree post-bind so the HTTP surface is ready before the first
         // tick (matches contextMonitor pattern).
         deps.watchdogScheduler?.start();
+        // RIG-84: cron joins post-bind too. Its first (catch-up) tick runs from a timer,
+        // so it never delays startup, and a throwing job is contained in the scheduler.
+        deps.cronJobScheduler?.start();
         deps.sessionTransport?.guardedDelivery?.recover();
         // S10 — start the gateway subsystem's NETWORK services (replay, outbound poll,
         // Socket Mode inbound) post-bind, contextMonitor pattern: the composed wire is
@@ -400,6 +409,7 @@ export async function startServer(port?: number) {
       ["proof-source-watch", () => deps.proofSourceWatch?.close()],
       ["health-diagnosis", () => deps.healthDiagnosis?.stop()],
       ["watchdog", () => deps.watchdogScheduler?.stop()],
+      ["cron", () => deps.cronJobScheduler?.stop()],
       ["draft-delivery", () => deps.sessionTransport?.guardedDelivery?.stop()],
       ["seat-activity", () => deps.seatActivityService?.stop()],
       // Drains an in-flight scan, so tmux is not closed under a pending capture.
