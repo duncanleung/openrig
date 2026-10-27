@@ -44,6 +44,11 @@ Ticket IDs use the `RIG-N` format (e.g., `RIG-12`, `RIG-99`). Do not hand-edit t
 - **Never push to branches you did not create.** Reviewer seats review and report. They do not commit, push, or modify branches owned by other contributors.
 - **Review loops must filter.** Any `/loop` that watches for PRs or commits must scope to `--author @me` and the `origin` remote only.
 
+## Fork maintenance
+
+- **Never patch `dist/` files directly.** Apply fixes to TypeScript source in `packages/*/src/`, then run `npm run build`. The `dist/` directory is gitignored — patches there are invisible to git and wiped by any rebuild or upstream merge.
+- **Always commit source-level fixes.** A committed fix surfaces as a merge conflict on the next `git merge upstream/main`, giving you the chance to keep it. An uncommitted fix disappears silently.
+- **Upstream issue filed for alphabetical sort:** mvschwarz/openrig#2130. Once merged upstream, the local fix in `rig-repository.ts` and `hydrate.ts` can be dropped.
 
 <!-- BEGIN OpenRig MANAGED BLOCK: CULTURE-default.md -->
 # OpenRig default culture
