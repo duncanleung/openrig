@@ -296,11 +296,17 @@
 -When ALL tasks are complete and the checkpoint passes, create a PR and report back:
 -rig send ${ORCHESTRATOR_SESSION} \"PLAN_LOOP_RESULT: plan=${SLUG} slice=${SLICE_N} outcome=<pr-created|failed|blocked> pr=<N|null> branch=<name|null> sha=<HEAD_SHA|null> tests_added=<N> tests_passed=<pass|fail> error=<reason|null>\"
 +# Verify the seat exists. If it does not, block (block_phase: implementing). Do not run inline.
-+rig whoami --json 2>/dev/null | jq -e --arg s "${IMPLEMENT_SEAT}" '.peers[] | select(.sessionName == $s)'
++if ! rig whoami --json --all-peers 2>/dev/null | jq -e --arg s "${IMPLEMENT_SEAT}" '.peers[] | select(.sessionName == $s)' >/dev/null 2>&1; then
++  # Seat not found — transition to blocked with block_phase: implementing.
++  exit 1
++fi
 +
 +rig send ${IMPLEMENT_SEAT} "/ticket-loop ${TICKET_ID}
 +
 +Tracker: Obsidian ticket CLI (${VAULT_PATH}), ticket ${TICKET_ID}. Do not run a Linear lookup for this ID.
++
++Ticket content (inline -- /ticket-loop's adapter does not support Obsidian):
++\$(${TICKET_BIN:-${VAULT_PATH}/_system/bin/ticket} show ${TICKET_ID} --json)
 +
 +Ticket: ${TICKET_ID} -- Slice ${SLICE_N}: ${SLICE_NAME} (plan ${PLAN_PATH})
 +Repo: ${REPO_PATH} (GH: ${GH_REPO})
@@ -316,8 +322,9 @@
  ```
  
 -**Single-seat fallback:**
-+The slice context, tasks, checkpoint and baseline failures live in the ticket body (Step 2a), not in
-+this message. `/ticket-loop` reads them from the tracker.
++The slice context, tasks, checkpoint and baseline failures live in the ticket body (Step 2a) and are
++inlined above. `/ticket-loop`'s tracker adapter supports only Linear and Jira; Obsidian ticket
++content must be passed inline in the dispatch message.
  
 -Run `/spec-worktree` inline, then implement the slice tasks in the same session. This consumes
 -significant context -- single-seat mode is limited to 1-2 slices per run.
