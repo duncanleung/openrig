@@ -50,6 +50,18 @@ Ticket IDs use the `RIG-N` format (e.g., `RIG-12`, `RIG-99`). Do not hand-edit t
 - **Always commit source-level fixes.** A committed fix surfaces as a merge conflict on the next `git merge upstream/main`, giving you the chance to keep it. An uncommitted fix disappears silently.
 - **Upstream issue filed for alphabetical sort:** mvschwarz/openrig#2130. Once merged upstream, the local fix in `rig-repository.ts` and `hydrate.ts` can be dropped.
 
+## Post-update verification checklist
+
+Run these checks after every `git merge upstream/main`, daemon restart, or OpenRig version bump:
+
+1. **Build from source:** `npm run build` — ensures `dist/` matches the merged TypeScript.
+2. **Verify compaction config:**
+   - `rig config get workspace.operator_seat_name` — must return a valid seat (e.g., `operator-agent@kernel`). Without it, stuck compactions cannot escalate.
+   - Check `~/.openrig/config.json` for `policies.claudeCompaction.enabled: true` and `thresholdPercent: 60`.
+3. **Cancel stuck compaction attempts:** grep `~/.openrig/daemon.log` for repeating `"compaction lifecycle"` entries. Cancel dead-session attempts with `rig compact --cancel <seat>`.
+4. **Sync fleet specs:** run `~/Documents/Develop/openrig-fleet/sync.sh`, commit, push — the fleet repo must match the live daemon after any structural change.
+5. **Verify fork customizations survived:** check the files listed in `FORK_CUSTOMIZATIONS.md` (when it exists) or review `git log --oneline HEAD~5` for our post-merge commits.
+
 <!-- BEGIN OpenRig MANAGED BLOCK: CULTURE-default.md -->
 # OpenRig default culture
 
