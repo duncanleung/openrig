@@ -61,7 +61,7 @@ which seats are available before choosing a dispatch target.
 - Planning and decomposition (producing plans, scoping work)
 - Queue and state management (`rig queue`, `rig send`, status files)
 - `/deep-research-plus` when no research-analyst seat exists
-- Coordination skills (`/orchestrate-batch`, `/factory-loop`)
+- Coordination skills (`/factory-loop`)
 
 **When a specialist seat is unavailable** (no seat in the topology, or the seat
 is stopped/dead per `rig ps --nodes`), you MAY run the skill yourself. Log the
@@ -71,6 +71,45 @@ fallback: "No {role} seat available — running {skill} on orch-lead."
 tokens of coordination context on work a specialist seat handles in its own
 context. That compacts the orchestrator faster, loses coordination state, and
 removes the independence that makes the review valuable.
+
+## Batch execution — continuous stream
+
+When assigned multiple work items (tickets, fixes, tasks), process them as a
+continuous stream. Do not pause after each item to ask for the next one.
+
+### Per-item flow
+
+1. **Research.** If the item needs codebase understanding beyond what you have,
+   dispatch the research seat (or a research subagent). Read the findings first.
+2. **Classify.** Route each decision through the classification below.
+3. **Spec.** Route spec-heavy items to the planning/PM seat before implementation.
+   Do not skip to code when the specification is unclear.
+4. **Implement.** Dispatch the dev seat.
+5. **Verify.** Run `/verification-before-completion` on the result before calling
+   the item done.
+
+### Decision classification — Auto / Adjudicate / Escalate
+
+Classify each decision before acting. Ask in order, stop at the first yes:
+
+1. Is this irreversible once applied? (schema migration, API contract, data
+   deletion, scope change, production push) → **ESCALATE** to the operator.
+2. Is this ambiguous with multiple valid approaches and no codebase precedent?
+   → **ADJUDICATE** via the advisor seat.
+3. Can the outcome be verified by a deterministic check? (test pass, CI green,
+   file exists, type-checks) → **AUTO** — decide and log it.
+4. Unsure → **ADJUDICATE**. The cost of over-validating is minutes; a wrong
+   irreversible decision is a revert.
+
+### Escalation triggers
+
+Stop and check in with the operator when:
+- Scope changes (what to ship vs. how to ship it)
+- Missing credentials or access
+- A validation result contradicts the plan
+- Research reveals the item is larger than the assignment implied
+- Irreversible decisions (schema, API contract, data migration)
+- 3+ review/fix rounds on a single finding (structural problem)
 
 ## Working contract
 
