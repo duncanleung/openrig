@@ -1,4 +1,5 @@
 import { serve, type ServerType } from "@hono/node-server";
+import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { endProbeGroupsOnStartupSignal, stopRuntimeProbes } from "./adapters/bounded-probe-exec.js";
@@ -10,6 +11,9 @@ import { createDaemon } from "./startup.js";
 import { removeParentSessionEnv } from "./domain/parent-session-env.js";
 import { resolveBindPlan } from "./domain/bind-plan.js";
 import { runQueueRetentionSweep, RETENTION_DEFAULTS } from "./domain/queue-retention.js";
+import { writeShutdownManifest, SHUTDOWN_MANIFEST_FILE } from "./domain/shutdown-manifest.js";
+import { FleetIngestionService, startFleetIngestionScheduler, resolveFleetReconcileIntervalMs } from "./domain/fleet-ingestion-service.js";
+import { FleetStore } from "./domain/fleet-store.js";
 import {
   createStuckSweepStatus,
   resolveStuckSweepIntervalSeconds,
@@ -122,6 +126,7 @@ export function startPeriodicSnapshotScheduler(deps: {
 export function startQueueRetentionScheduler(deps: {
   rigRepo: { db: import("better-sqlite3").Database };
   settingsStore?: { resolveOne(key: string): { value: unknown } };
+  fleetIngestion?: { rollUpSnapshots(opts?: { days?: number }): Promise<unknown> };
 }): ReturnType<typeof setInterval> | null {
   const store = deps.settingsStore;
   const enabled = store ? store.resolveOne("retention.enabled").value === true : true;
@@ -132,14 +137,15 @@ export function startQueueRetentionScheduler(deps: {
     return typeof v === "number" ? v : fallback;
   };
   const runOnce = (): void => {
+    const usageSamplesRetentionDays = num("retention.usage_samples_days", RETENTION_DEFAULTS.usageSamplesRetentionDays);
     void runQueueRetentionSweep(db, {
       nowIso: new Date().toISOString(),
       transitionsRetentionDays: num("retention.transitions_days", RETENTION_DEFAULTS.transitionsRetentionDays),
       watchdogRetentionDays: num("retention.watchdog_days", RETENTION_DEFAULTS.watchdogRetentionDays),
       watchdogKeepPerJob: num("retention.watchdog_keep_per_job", RETENTION_DEFAULTS.watchdogKeepPerJob),
-      usageSamplesRetentionDays: num("retention.usage_samples_days", RETENTION_DEFAULTS.usageSamplesRetentionDays),
+      usageSamplesRetentionDays,
       batchSize: num("retention.batch_size", RETENTION_DEFAULTS.batchSize),
-    }).catch((err: unknown) => {
+    }, { fleetIngestion: deps.fleetIngestion, usageSamplesRetentionDays }).catch((err: unknown) => {
       console.error(`[queue-retention] sweep error: ${err instanceof Error ? err.message : String(err)}`);
     });
   };
@@ -329,6 +335,7 @@ export async function startServer(port?: number) {
   let monitorsStarted = false;
   let retentionTimer: ReturnType<typeof setInterval> | null = null;
   let stuckSweepTimer: ReturnType<typeof setInterval> | null = null;
+  let fleetIngestionTimer: ReturnType<typeof setInterval> | null = null;
   let wakeLadderScheduler: WakeLadderScheduler | null = null;
   // P7 — lifecycle heartbeat: advance last-seen every tick while running.
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -365,7 +372,25 @@ export async function startServer(port?: number) {
         startPeriodicSnapshotScheduler(deps);
         // OPR.0.4.6.FS-1 W2 — boot sweep + daily retention tick (bounded,
         // yields between batches; a sweep failure is logged, never fatal).
-        retentionTimer = startQueueRetentionScheduler(deps);
+        // Fleet ingestion: roll up snapshots before retention prunes usage_samples,
+        // then start the periodic reconciliation timer (5 min default).
+        // deps.fleetIngestion is assigned here; the route reads it via a getter closure.
+        deps.fleetIngestion = new FleetIngestionService({
+          db: deps.rigRepo.db,
+          fleetStore: new FleetStore(deps.rigRepo.db),
+          homedir: process.env.HOME ?? os.homedir(),
+          reducerPath: path.join(path.dirname(new URL(import.meta.url).pathname), "../assets/plugins/openrig-core/skills/retro/scripts/reduce-transcript.mjs"),
+          eventBus: deps.eventBus,
+        });
+        deps.fleetIngestion.subscribeLifecycleEvents();
+        deps.fleetIngestion.rollUpSnapshots({ days: 15 }).catch((err: unknown) => {
+          console.error(`[fleet-ingestion] boot rollup error: ${err instanceof Error ? err.message : String(err)}`);
+        });
+        retentionTimer = startQueueRetentionScheduler({ ...deps, fleetIngestion: deps.fleetIngestion });
+        fleetIngestionTimer = startFleetIngestionScheduler(
+          deps.fleetIngestion,
+          resolveFleetReconcileIntervalMs(process.env.OPENRIG_FLEET_RECONCILE_INTERVAL_MS),
+        );
         // S02 — the standing stuck sweep: nobody has to remember to run the verbs.
         stuckSweepTimer = startStuckSweepScheduler(deps);
         // RIG-123 — the stuck-seat observer acquires on its own cadence; summaries read its cache.
@@ -399,11 +424,16 @@ export async function startServer(port?: number) {
   const shutdown = createDaemonShutdown({
     receiptPath: path.join(OPENRIG_HOME, DAEMON_SHUTDOWN_RECEIPT),
     phases: [
+      // First: record which rigs are running before any phase can change rig state,
+      // so `rig start --last` restores only those (RIG-83).
+      ["shutdown-manifest", () => { writeShutdownManifest(path.join(OPENRIG_HOME, SHUTDOWN_MANIFEST_FILE), deps.rigRepo.db); }],
       ["timers", () => {
         deps.resumeMetadataRefresher?.stop();
         if (heartbeatTimer) clearInterval(heartbeatTimer);
         if (retentionTimer) clearInterval(retentionTimer);
         if (stuckSweepTimer) clearInterval(stuckSweepTimer);
+        if (fleetIngestionTimer) clearInterval(fleetIngestionTimer);
+        deps.fleetIngestion?.unsubscribeLifecycleEvents();
       }],
       ["runtime-probes", () => stopRuntimeProbes()],
       ["proof-source-watch", () => deps.proofSourceWatch?.close()],

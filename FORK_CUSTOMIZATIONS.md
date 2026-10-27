@@ -144,14 +144,12 @@ and the `runtimeFallbackTrigger` wiring (RIG-43), `new CronJobScheduler` with `c
 `cron` shutdown phase (RIG-84), and `new TicketFactoryController` with the admission service and poll policy
 (RIG-87/88/89).
 
-Open, found by RIG-142 in the same merge:
+Restored by RIG-143 (same merge): `new FleetIngestionService` with its lifecycle subscription, boot rollup and
+reconcile timer (RIG-80), and the `shutdown-manifest` shutdown phase that calls `writeShutdownManifest` (RIG-83).
 
-| Missing | Ticket | Check ID |
-|---|---|---|
-| `new FleetIngestionService`, its lifecycle subscription, boot rollup and `startFleetIngestionScheduler` timer in `index.ts` | RIG-80 | `!CF-08-ingestion` |
-| `writeShutdownManifest` call in the `shutdown-manifest` shutdown phase in `index.ts` | RIG-83 | `!CF-17-shutdown-manifest` |
+No gaps are open. Add a `!` check here when a drop is found and cannot be fixed in the same change.
 
-Pre-merge source: `git show e02d09c64^1:packages/daemon/src/index.ts`.
+Pre-merge source for all of the above: `git show e02d09c64^1:packages/daemon/src/{startup,index}.ts`.
 
 ## Checks
 
@@ -212,8 +210,8 @@ CF-07-observer   | has       | packages/daemon/src/startup.ts | new StuckSeatObs
 CF-07-ledger     | file      | packages/daemon/src/domain/delivery-attempt-ledger.ts
 
 # RIG-80 fleet, RIG-60 redaction, RIG-9 suppress rules
-!CF-08-ingestion | has | packages/daemon/src/index.ts | new FleetIngestionService
-!CF-17-shutdown-manifest | has | packages/daemon/src/index.ts | writeShutdownManifest
+CF-08-ingestion | has | packages/daemon/src/index.ts | new FleetIngestionService
+CF-17-shutdown-manifest | has | packages/daemon/src/index.ts | writeShutdownManifest
 CF-08-route      | has       | packages/daemon/src/server.ts | app\.route\("/api/fleet", fleetStoreRoutes\(
 CF-08-cli        | has       | packages/cli/src/index.ts | fleetCommand
 CF-08-redact     | callsite  | packages/daemon/src/domain/digest-redaction.ts | redactDigestValue | packages/daemon/src/domain/fleet-ingestion-service.ts
