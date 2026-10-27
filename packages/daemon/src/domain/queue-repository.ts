@@ -3473,7 +3473,9 @@ export class QueueRepository {
     for (const event of events) this.eventBus.notifySubscribers(event);
 
     // RIG-43: fire reverse-swap trigger for nodes currently on fallback for any resolved pool.
-    if (this.runtimeFallbackSwapBackTrigger) {
+    // A retained delivery returns above with the blocker unresolved and the expiry job still active:
+    // the usage limit is still in force, so swapping back now would land the node on the exhausted provider.
+    if (this.runtimeFallbackSwapBackTrigger && deliveryStatus !== "retained") {
       const firedNodes = new Set<string>();
       for (const { qitemId } of usageLimitBlockers) {
         const item = this.getById(qitemId);
