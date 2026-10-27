@@ -2709,6 +2709,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       tmuxAdapter,
       runtimeAdapters: deps.runtimeAdapters,
       sessionEnv: launchSessionEnv,
+      runtimeSessionEnv,
       tmuxOptionDefaults,
       occupantInvalidator: deps.occupantInvalidator,
       // seatActivityService has declareOccupantSwap; agentActivityStore does not.
