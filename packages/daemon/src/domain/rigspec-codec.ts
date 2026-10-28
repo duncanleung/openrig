@@ -174,6 +174,7 @@ export class RigSpecCodec {
         // OPR.0.5.6.20 field, OPR.0.5.6.23 fix: parse carries it (schema
         // normalize), so serialize must too — same silent-erasure class.
         if (m.compactionStrategy) member["compaction_strategy"] = m.compactionStrategy;
+        if (m.compactionThresholdTokens != null) member["compaction_threshold_tokens"] = m.compactionThresholdTokens;
         // Normalize carries the per-member continuity mechanic too; emit it beside its strategy.
         if (m.mechanic) member["mechanic"] = m.mechanic;
         if (m.sessionSource) {
