@@ -1,5 +1,5 @@
 import { nonInterruptiveNotice } from "../adapters/non-interruptive.js";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
@@ -172,6 +172,15 @@ export function isSeatSkillsBootstrapLine(file: Pick<ResolvedStartupFile, "path"
 // The non-"auto" members of ResolvedStartupFile["deliveryHint"] — what routing
 // and the delivery decay filter key off of once "auto" has been resolved.
 type ConcreteDeliveryHint = ReturnType<typeof resolveConcreteHint>;
+
+/** One delivered file in the node.startup_delivery_manifest event. */
+interface DeliveredFileEntry {
+  path: string;
+  deliveryHint: string;
+  surface: string;
+  phase: "pre_launch" | "post_launch";
+  contentHash: string;
+}
 
 export interface StartupInput {
   rigId: string;
@@ -469,17 +478,40 @@ export class StartupOrchestrator {
       && !isSeatSkillsBootstrapLine(f));
     const preLaunchFiles: ResolvedStartupFile[] = [];
     let postLaunchFiles: ResolvedStartupFile[] = [];
+    // Concrete hint per file, keyed by identity. "auto" is resolved exactly once here (routing
+    // decision); every later manifest/classification read goes through this map instead of re-reading
+    // f.deliveryHint, which stays "auto" for pre-NS-T05 persisted files and would silently defeat
+    // classifyDeliveredSurface's skill_install/guidance_merge fast paths.
+    const resolvedHints = new Map<ResolvedStartupFile, ConcreteDeliveryHint>();
     for (const f of applicableFiles) {
       const hint = f.deliveryHint === "auto"
         ? resolveConcreteHint(f.path, this.safeReadFile(f.absolutePath), f.orientation)
         : f.deliveryHint;
       if (this.decayFilter && !this.shouldDeliverAfterDecay(f, hint, warnings)) continue;
+      resolvedHints.set(f, hint);
       if (hint === "send_text") {
         postLaunchFiles.push(f);
       } else {
         preLaunchFiles.push(f);
       }
     }
+    // Defensive only: every file reaching a manifest site was routed through the partition loop above,
+    // so this always hits the map. The fallback just keeps us from ever hard-failing startup over an
+    // observability read.
+    const deliveryHintOf = (f: ResolvedStartupFile): ConcreteDeliveryHint =>
+      resolvedHints.get(f) ?? (f.deliveryHint === "auto" ? "send_text" : f.deliveryHint);
+
+    // Delivery manifest accumulator — tracks what was delivered for observability.
+    const deliveredFiles: DeliveredFileEntry[] = [];
+    const recordDelivered = (f: ResolvedStartupFile, phase: "pre_launch" | "post_launch"): void => {
+      deliveredFiles.push({
+        path: f.path,
+        deliveryHint: deliveryHintOf(f),
+        surface: classifyDeliveredSurface(f.path, deliveryHintOf(f)),
+        phase,
+        contentHash: quickHash(this.safeReadFile(f.absolutePath)),
+      });
+    };
 
     // 4. Deliver pre-launch files (filesystem: guidance_merge, skill_install)
     // Always call even with empty list so adapters can provision runtime-specific config (e.g. context collectors)
@@ -492,6 +524,10 @@ export class StartupOrchestrator {
         }
         return this.fail(input, "failed", errors, undefined, false, undefined, false, "pre_launch_files", true);
       }
+      // NOTE: iterates the input list, not the delivered set — the adapter returns only a count, so
+      // silently-skipped files are over-reported here. Acceptable; a later iteration can plumb a
+      // delivered-files list from the adapter.
+      for (const f of preLaunchFiles) recordDelivered(f, "pre_launch");
     } catch (err) {
       errors.push(`Pre-launch delivery error: ${(err as Error).message}`);
       return this.fail(input, "failed", errors, undefined, false, undefined, false, "pre_launch_files", true);
@@ -789,12 +825,13 @@ export class StartupOrchestrator {
     const consumedActions = new Set<StartupAction>();
     let challengeOnlyPrompt: string | null = null;
     if (continuityOutcome === "fresh" && identityAction) {
-      const initialPrompt = await this.deliverInitialSessionPrompt(deliveryInput, identityAction, postLaunchFiles, challenge?.promptBlock ?? null, input.includeDurableObligations);
+      const initialPrompt = await this.deliverInitialSessionPrompt(deliveryInput, identityAction, postLaunchFiles, deliveryHintOf, challenge?.promptBlock ?? null, input.includeDurableObligations);
       if (!initialPrompt.ok) {
         errors.push(initialPrompt.error);
         return this.fail(input, "failed", errors, undefined, false, undefined, false, "initial_prompt", true);
       }
       postLaunchFiles = initialPrompt.remainingFiles;
+      if (initialPrompt.bundledFile) recordDelivered(initialPrompt.bundledFile, "post_launch");
       if (challenge) await this.sendProofInstruction(deliveryInput);
     } else if (challenge) {
       challengeOnlyPrompt = challenge.promptBlock;
@@ -822,12 +859,13 @@ export class StartupOrchestrator {
           !(input.isRestore && !a.idempotent),
       );
       if (preloadActions.length > 0) {
-        const preload = await this.deliverRestorePreloadPrompt(deliveryInput, preloadActions, postLaunchFiles);
+        const preload = await this.deliverRestorePreloadPrompt(deliveryInput, preloadActions, postLaunchFiles, deliveryHintOf);
         if (!preload.ok) {
           errors.push(preload.error);
           return this.fail(input, "failed", errors, undefined, false, undefined, false, "restore_preload", true);
         }
         postLaunchFiles = preload.remainingFiles;
+        if (preload.bundledFile) recordDelivered(preload.bundledFile, "post_launch");
         for (const a of preloadActions) consumedActions.add(a);
       }
     }
@@ -849,6 +887,7 @@ export class StartupOrchestrator {
           }
           return this.fail(deliveryInput, "failed", errors, undefined, false, undefined, false, "post_launch_files", true);
         }
+        for (const f of postLaunchFiles) recordDelivered(f, "post_launch");
       } catch (err) {
         errors.push(`Post-launch delivery error: ${(err as Error).message}`);
         return this.fail(deliveryInput, "failed", errors, undefined, false, undefined, false, "post_launch_files", true);
@@ -898,6 +937,28 @@ export class StartupOrchestrator {
         this.recordSubmissionWarning(deliveryInput, `Post-delivery runtime state is unverified: ${(error as Error).message}`,
           `Post-delivery runtime state is unverified in ${input.binding.tmuxSession}: ${(error as Error).message}`);
       }
+    }
+
+    // Best-effort delivery manifest — does NOT fail an otherwise-good startup.
+    if (deliveredFiles.length > 0) {
+      try {
+        const surfaceCounts: Record<string, number> = {};
+        for (const f of deliveredFiles) {
+          surfaceCounts[f.surface] = (surfaceCounts[f.surface] ?? 0) + 1;
+        }
+        this.eventBus.emit({
+          type: "node.startup_delivery_manifest",
+          rigId: input.rigId,
+          nodeId: input.nodeId,
+          sessionName: input.sessionName ?? input.binding.tmuxSession ?? "",
+          deliveredFiles,
+          summary: {
+            preLaunchCount: deliveredFiles.filter((f) => f.phase === "pre_launch").length,
+            postLaunchCount: deliveredFiles.filter((f) => f.phase === "post_launch").length,
+            surfaceCounts,
+          },
+        });
+      } catch { /* observability write — swallow to avoid blocking startup */ }
     }
 
     // Managed Claude resume needs agreement on the launched row, not a successful
@@ -1070,18 +1131,20 @@ export class StartupOrchestrator {
     input: StartupDeliveryInput,
     identityAction: StartupAction,
     postLaunchFiles: ResolvedStartupFile[],
+    hintOf: (file: ResolvedStartupFile) => ConcreteDeliveryHint,
     challengeBlock: string | null,
     includeDurableObligations = false,
-  ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
+  ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[]; bundledFile: ResolvedStartupFile | null } | { ok: false; error: string }> {
     const { binding } = input;
     if (!binding.tmuxSession) {
       return { ok: false, error: "No tmux session for the initial session identity prompt" };
     }
 
-    const firstSendTextIndex = postLaunchFiles.findIndex((file) => file.deliveryHint === "send_text");
+    const firstSendTextIndex = postLaunchFiles.findIndex((file) => hintOf(file) === "send_text");
     const identityContext = `OpenRig-generated identity context (not a project task):\n${identityAction.value}\nEnd of generated identity context.`;
     let prompt = identityContext;
     let remainingFiles = postLaunchFiles;
+    let bundledFile: ResolvedStartupFile | null = null;
 
     if (firstSendTextIndex !== -1) {
       const firstSendText = postLaunchFiles[firstSendTextIndex]!;
@@ -1090,6 +1153,7 @@ export class StartupOrchestrator {
         if (content.length > 0) {
           prompt = `${identityContext}\n\n${content}`;
           remainingFiles = postLaunchFiles.filter((_, index) => index !== firstSendTextIndex);
+          bundledFile = firstSendText;
         }
       } catch {
         // Fall back to a standalone identity prompt and let the adapter handle
@@ -1114,7 +1178,7 @@ export class StartupOrchestrator {
       return { ok: false, error: `Initial session identity prompt failed: ${sendError.error}` };
     }
 
-    return { ok: true, remainingFiles };
+    return { ok: true, remainingFiles, bundledFile };
   }
 
   /**
@@ -1129,7 +1193,8 @@ export class StartupOrchestrator {
     input: StartupDeliveryInput,
     preloadActions: StartupAction[],
     postLaunchFiles: ResolvedStartupFile[],
-  ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[] } | { ok: false; error: string }> {
+    hintOf: (file: ResolvedStartupFile) => ConcreteDeliveryHint,
+  ): Promise<{ ok: true; remainingFiles: ResolvedStartupFile[]; bundledFile: ResolvedStartupFile | null } | { ok: false; error: string }> {
     const { binding } = input;
     if (!binding.tmuxSession) {
       return { ok: false, error: "No tmux session for the restore preload prompt" };
@@ -1137,8 +1202,9 @@ export class StartupOrchestrator {
 
     const parts = preloadActions.map((a) => a.value);
     let remainingFiles = postLaunchFiles;
+    let bundledFile: ResolvedStartupFile | null = null;
 
-    const firstSendTextIndex = postLaunchFiles.findIndex((file) => file.deliveryHint === "send_text");
+    const firstSendTextIndex = postLaunchFiles.findIndex((file) => hintOf(file) === "send_text");
     if (firstSendTextIndex !== -1) {
       const firstSendText = postLaunchFiles[firstSendTextIndex]!;
       try {
@@ -1146,6 +1212,7 @@ export class StartupOrchestrator {
         if (content.length > 0) {
           parts.push(content);
           remainingFiles = postLaunchFiles.filter((_, index) => index !== firstSendTextIndex);
+          bundledFile = firstSendText;
         }
       } catch {
         // Leave role.md in postLaunchFiles for normal delivery; the preload
@@ -1158,7 +1225,7 @@ export class StartupOrchestrator {
       return { ok: false, error: `Restore preload prompt failed: ${sendError.error}` };
     }
 
-    return { ok: true, remainingFiles };
+    return { ok: true, remainingFiles, bundledFile };
   }
 
   /**
@@ -1321,6 +1388,11 @@ export class StartupOrchestrator {
     }
     return { pane, state, looks };
   }
+}
+
+function quickHash(content: string): string {
+  if (!content) return "";
+  return createHash("sha256").update(content).digest("hex").slice(0, 16);
 }
 
 function isSessionIdentityAction(action: StartupAction): boolean {
