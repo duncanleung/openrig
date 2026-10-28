@@ -1,0 +1,407 @@
+--- a/plan-loop/SKILL.md
++++ b/plan-loop/SKILL.md
+@@ -1,6 +1,6 @@
+ ---
+ name: plan-loop
+-description: "Plan slice scheduler: reads an approved QRSPI plan, dispatches each slice through worktree setup + implementation + review. State lives in OpenRig queue. Composes /spec-worktree and /pr-review-lifecycle — does not rewrite them."
++description: "Plan slice scheduler: reads an approved QRSPI plan, turns each slice into a ticket, dispatches /ticket-loop for implement-to-PR, then review. State lives in OpenRig queue. Composes /ticket-loop and /pr-review-lifecycle — does not rewrite them."
+ argument-hint: "<path-to-plan> [--slice N] [--limit N] [--dry-run] [--merge-policy human|auto-low-risk]"
+ ---
+ 
+@@ -8,8 +8,10 @@
+ 
+ A thin scheduler that processes an approved QRSPI plan's vertical slices through the full
+ implement-to-merge pipeline. This is the plan-based counterpart to `/factory-loop` (which processes
+-Linear tickets). The two coexist: tickets go through `/factory-loop`, plan slices go through
+-`/plan-loop`.
++backlog tickets). The two coexist: tickets go through `/factory-loop`, plan slices go through
++`/plan-loop`. Both use the same implementation path: `/ticket-loop`. Each slice becomes a ticket, so
++every improvement to `/ticket-loop` (worktree seeding, research gate, D+C+A classifier,
++plan-review-dual) reaches plan slices with no change to this skill.
+ 
+ ## Composition model
+ 
+@@ -18,6 +20,7 @@
+                               |   /plan-loop     |
+                               |   (this skill)   |
+                               |   parse plan     |
++                              |   slice -> ticket|
+                               |   dispatch+track |
+                               |   budget controls|
+                               |   queue state    |
+@@ -28,24 +31,32 @@
+               v                        |                         v
+ +-------------------------+            |          +--------------------------+
+ |  implement_seat         |            |          |  review_seat             |
+-|  (worktree setup +     |--result--->|<-result--|  /pr-review-lifecycle    |
+-|   slice impl + PR)     |            |          |  review + fix loop +     |
+-+-------------------------+            |          |  merge readiness         |
+-                                       |          +--------------------------+
++|  /ticket-loop <ID>      |--result--->|<-result--|  /pr-review-lifecycle    |
++|  (worktree + seeding,   |            |          |  review + fix loop +     |
++|   classifier, research  |            |          |  merge readiness         |
++|   gate, implement, PR)  |            |          +--------------------------+
+++-------------------------+            |
++                                       |
+                               concise result only
+-                         (PR#, SHA, pass/fail, slice#)
++                         (PR#, SHA, pass/fail, ticket)
+ ```
+ 
+ **Seat dispatch model.** Same as `/factory-loop`: the orchestrator routes work via `rig send`. Each
+ seat runs in its own context. The orchestrator receives a one-line result and updates state.
+ 
++**Implementation delegation.** `/ticket-loop` owns the implement-to-PR lifecycle inside one slice:
++worktree creation and seeding, classification, research gate, implementation, tests and PR.
++`/plan-loop` owns slice order, dependencies, tracker writes, the phase gate, review dispatch and the
++merge gate. `/plan-loop` does not copy any worktree or implementation instruction. Do not call the
++`Skill` tool for `/ticket-loop`; dispatch it to the implement seat with `rig send`.
++
+ **Review delegation.** The review seat owns the entire review-fix loop via `/pr-review-lifecycle` --
+ the orchestrator dispatches once and receives a final result. The orchestrator does NOT manage fix
+ rounds itself (that would double dispatch cost and risk context exhaustion). This matches
+ `/factory-loop`'s architecture.
+ 
+-When no topology is configured, skills run inline (single-seat mode). Single-seat mode limits the
+-run to ~1-2 slices before context pressure.
++When no implement seat exists, the slice moves to `blocked` (`block_phase: implementing`). Do not run
++`/ticket-loop` inline in the orchestrator: the skill body would enter the orchestrator context.
+ 
+ ## Usage patterns
+ 
+@@ -65,7 +76,7 @@
+ ### States
+ 
+ ```
+-claimed --> worktree-setup --> implementing --> pr-open --> reviewing --> merge-ready --> merged
++claimed --> implementing --> pr-open --> reviewing --> merge-ready --> merged
+                                                               |
+                                                               v
+                                                           blocked
+@@ -78,10 +89,9 @@
+ 
+ | State | Meaning | Entry condition |
+ |-------|---------|-----------------|
+-| `claimed` | Slice entered the pipeline | Queue item created |
+-| `worktree-setup` | `/spec-worktree` running or worktree ready | Worktree creation dispatched |
+-| `implementing` | Agent is building the slice tasks | Worktree ready, implementation dispatched |
+-| `pr-open` | PR created from worktree branch | Implementation complete, PR pushed |
++| `claimed` | Slice entered the pipeline | Queue item created, ticket materialized |
++| `implementing` | `/ticket-loop` is running for the slice ticket (worktree, implementation, PR) | `/ticket-loop` dispatched |
++| `pr-open` | PR created from worktree branch | `TICKET_LOOP_RESULT outcome=pr-created` |
+ | `reviewing` | `/pr-review-lifecycle` running (review + fix rounds) | Review dispatched |
+ | `merge-ready` | All review conditions met | Review passed |
+ | `merged` | PR merged, slice checkpoint passed | Merge succeeded |
+@@ -92,11 +102,9 @@
+ 
+ | From | To | Trigger |
+ |------|----|---------|
+-| `claimed` | `worktree-setup` | Worktree creation dispatched |
+-| `worktree-setup` | `implementing` | Worktree ready |
+-| `worktree-setup` | `blocked` | Worktree creation failed |
++| `claimed` | `implementing` | `/ticket-loop` dispatched |
+ | `implementing` | `pr-open` | PR created |
+-| `implementing` | `blocked` | Implementation failed or seat dead |
++| `implementing` | `blocked` | `TICKET_LOOP_RESULT` outcome `escalate` or `failed`, or seat dead |
+ | `pr-open` | `reviewing` | Review dispatched |
+ | `reviewing` | `merge-ready` | Review passed (0 findings or all fixed) |
+ | `reviewing` | `blocked` | 3+ fix cycles, persistent failure, or same-error recurrence |
+@@ -113,12 +121,25 @@
+ 
+ | block_phase | Recovery target | Meaning |
+ |-------------|----------------|---------|
+-| `worktree-setup` | `worktree-setup` | Worktree creation failed; retry setup |
+-| `implementing` | `implementing` | Implementation failed; resume from worktree |
++| `implementing` | `implementing` | `/ticket-loop` escalated or failed; re-dispatch the same ticket after the blocker clears |
+ | `reviewing` | `reviewing` | Review/fix loop failed; re-dispatch `/pr-review-lifecycle` |
+ 
+ A blocked slice re-enters its `block_phase` target on resolution -- NOT always `implementing`.
+ 
++Status files written before this change can carry `state: worktree-setup` or
++`block_phase: worktree-setup`. Read both as `implementing`.
++
++### ticket-loop result mapping
++
++| `TICKET_LOOP_RESULT` | Plan-loop transition | Tracker write |
++|---|---|---|
++| `outcome=pr-created` | `implementing` -> `pr-open` | `ticket update --status in-review` |
++| `outcome=escalate` | `implementing` -> `blocked` (`block_phase: implementing`, `block_reason` = `error`) | none |
++| `outcome=failed` | `implementing` -> `blocked` (`block_phase: implementing`, `block_reason` = `error`) | none |
++| no result, seat idle | `implementing` -> `blocked` (`block_phase: implementing`) | none |
++
++`classification=ESCALATE` means `/ticket-loop` stopped for human approval. Treat it as `escalate`.
++
+ ---
+ 
+ ## Idempotency keys
+@@ -130,6 +151,7 @@
+ | `plan_path` | Argument | Plan document path |
+ | `slice_number` | Parsed from plan | Which slice (1-based) |
+ | `slice_name` | Parsed from plan | Slice title for display |
++| `ticket_id` | `ticket create` output | The slice ticket. Never create a second ticket for the same slice. |
+ | `branch` | `feat/<slug>-slice-<N>` | Detect existing branches |
+ | `worktree_path` | `git worktree list` | Detect active worktrees |
+ | `pr_number` | `gh pr create` output | Detect existing PRs |
+@@ -148,7 +170,8 @@
+ slug: <plan-slug>
+ slice: <N>
+ slice_name: <title>
+-state: claimed | worktree-setup | implementing | pr-open | reviewing | merge-ready | merged | blocked | abandoned
++ticket_id: <ID or null>
++state: claimed | implementing | pr-open | reviewing | merge-ready | merged | blocked | abandoned
+ branch: <branch-name or null>
+ worktree_path: <path or null>
+ pr: <number or null>
+@@ -158,7 +181,7 @@
+ last_finding_hash: <SHA-256 or null>
+ lease_expires_at: <ISO timestamp or null>
+ block_reason: <string or null>
+-block_phase: <worktree-setup | implementing | reviewing | null>
++block_phase: <implementing | reviewing | null>
+ started_at: <ISO timestamp>
+ updated_at: <ISO timestamp>
+ ---
+@@ -221,7 +244,7 @@
+ - `implement_seat`: peer with `dev` or `impl` in logicalId
+ - `review_seat`: peer with `review` or `quality` in logicalId
+ 
+-If no topology, log: "No peers detected -- running in single-seat mode."
++If no implement seat is detected, log: "No implement seat detected -- slices cannot be dispatched." Slices then block (`block_phase: implementing`).
+ 
+ ### 7. Baseline test snapshot
+ 
+@@ -234,6 +257,20 @@
+ Record failing test names and counts. During review, pre-existing failures are excluded from
+ findings -- a flaky test does not block an unrelated slice.
+ 
++### 8. Ticket CLI and project
++
++Slices become vault tickets, so the Obsidian ticket CLI and a project must exist.
++
++```bash
++TICKET_CLI=${TICKET_CLI:-<vault>/_system/bin/ticket}
++test -x "$TICKET_CLI" || echo "BLOCKED: ticket CLI not found"
++```
++
++Resolve `TICKET_PROJECT` from `projects-index.yaml` (the project whose `repos` contain the git root of
++the plan's repository). If no project matches, stop and ask the human. Do not guess a project.
++Resolve `GH_REPO` from `git remote get-url origin`. On a fork, always pass `--repo <origin owner>/<repo>`
++to `gh`, never the upstream.
++
+ ---
+ 
+ ## Step 0 -- Restart reconciliation
+@@ -253,7 +290,7 @@
+ 
+ **GitHub:**
+ ```bash
+-gh pr list --author @me --search "<slug>-slice-<N>" --json number,state,headRefOid --limit 5
++gh pr list --repo ${GH_REPO} --author @me --search "<slug>-slice-<N>" --json number,state,headRefOid --limit 5
+ ```
+ 
+ **Git worktrees:**
+@@ -273,12 +310,11 @@
+ |----------------|---------------|--------|
+ | Any | PR merged on GitHub | Update to `merged`. Close queue item. |
+ | Any | PR closed (not merged) | Update to `blocked`, block_phase from recorded state. Report. |
+-| `claimed` | No branch, no worktree, lease expired | Stale claim. Close queue item (canceled). Slice re-enters candidates. |
++| `claimed` | No `ticket_id`, no branch, lease expired | Stale claim. Close queue item (canceled). Slice re-enters candidates. |
++| `claimed` | `ticket_id` set, no dispatch recorded | Ticket exists. Dispatch `/ticket-loop` for that ticket (Step 2b). Do not create another ticket. |
+ | `claimed` | No branch, no worktree, lease active | Agent may be starting. Wait. |
+-| `worktree-setup` | Worktree exists, no PR | Resume from `worktree-setup` (re-dispatch implementation). |
+-| `worktree-setup` | No worktree, no PR, lease expired | Stale setup. Close queue item. Slice re-enters candidates. |
+-| `implementing` | Worktree exists, no PR | Resume `implementing`. Check seat via `rig capture`. |
+-| `implementing` | No worktree, no PR | `blocked` with block_phase=implementing. Report lost worktree. |
++| `implementing` | Worktree exists, no PR | Resume `implementing`. Check seat via `rig capture`. Do not re-dispatch while the seat works. |
++| `implementing` | No worktree, no PR, seat idle | `blocked` with block_phase=implementing. Report that `/ticket-loop` left no result for ${TICKET_ID}. |
+ | `pr-open` / `reviewing` | PR open, HEAD matches `review_sha` | Resume from recorded state. No duplicate review. |
+ | `pr-open` / `reviewing` | PR open, HEAD differs from `review_sha` | Resume from `reviewing` (HEAD moved, re-review needed). |
+ | `merge-ready` | PR open, HEAD matches | Present merge gate. |
+@@ -341,7 +377,7 @@
+ 
+ Process slices sequentially. One slice completes the full pipeline before the next starts.
+ 
+-### 2a -- Create queue item (state: `claimed`)
++### 2a -- Create queue item and slice ticket (state: `claimed`)
+ 
+ ```bash
+ SESSION=$(rig whoami --json 2>/dev/null | jq -r '.identity.sessionName // empty')
+@@ -355,48 +391,80 @@
+ 
+ Write the initial status file with `state: claimed` and `lease_expires_at` set to now + 90 minutes.
+ 
+-### 2b -- Worktree setup + implementation dispatch (state: `worktree-setup`)
++**Materialize the slice ticket.** `/ticket-loop` takes a ticket ID, and plan slices have none. Create
++one ticket per slice. Create it once: if the status file already has `ticket_id`, reuse it.
+ 
+-Transition to `worktree-setup`. The worktree branch is `feat/<slug>-slice-<N>`.
++```bash
++# Search first, so a restart does not create a second ticket. `ticket search` matches a
++# case-insensitive substring of title or body; the closing backtick keeps slice-1 from matching slice-10.
++$TICKET_CLI search "plan_ref: \`${PLAN_PATH}#slice-${SLICE_N}\`" --project ${TICKET_PROJECT} --json
+ 
+-**Seat dispatch (when implement_seat configured):**
++$TICKET_CLI create --project ${TICKET_PROJECT} --kind feature --priority medium --json \
++  "Slice ${SLICE_N}: ${SLICE_NAME}"
++```
+ 
+-```bash
+-IMPLEMENT_SEAT="${TOPOLOGY_IMPLEMENT_SEAT}@${RIG_NAME}"
++`ticket create` accepts no body. It writes an empty `## Problem / ## Goal / ## Notes` template to
++the file named in its JSON `path`. Fill those three sections by editing that file once, right after
++the create. Replace the empty template only when it matches exactly; if it does not, leave the file
++as is and report it.
+ 
+-rig send ${IMPLEMENT_SEAT} "/spec-worktree ${PLAN_PATH}
++| Section | Content |
++|---|---|
++| Problem | The slice context from the plan (`${PLAN_CONTEXT_SECTION}`) |
++| Goal | The slice tasks (`${SLICE_TASKS}`) and the checkpoint (`${SLICE_CHECKPOINT}`) as the acceptance criteria |
++| Notes | the line ``plan_ref: `${PLAN_PATH}#slice-${SLICE_N}` `` (path in backticks), branch `feat/${SLUG}-slice-${SLICE_N}`, code repo, base branch, baseline test failures |
+ 
+-Use branch name: feat/${SLUG}-slice-${SLICE_N}
+-After worktree is ready, implement Slice ${SLICE_N} tasks.
++Record `ticket_id` in the status file and the queue note at once, before any dispatch. Then write the
++tracker state:
+ 
+-## Slice ${SLICE_N} Context
+-${PLAN_CONTEXT_SECTION}
++| Plan-loop transition | Tracker write |
++|---|---|
++| `claimed` | `$TICKET_CLI update ${TICKET_ID} --status in-progress` |
++| `pr-open` | `$TICKET_CLI update ${TICKET_ID} --status in-review` |
++| `merged` | `$TICKET_CLI update ${TICKET_ID} --status done` |
++| `abandoned` | `$TICKET_CLI update ${TICKET_ID} --status cancelled` |
++| `blocked` | none (the ticket stays `in-progress`) |
+ 
+-## Slice ${SLICE_N} Tasks
+-${SLICE_TASKS}
++A failed tracker write is logged and retried once. Do not stop the slice for it; record the missed
++write in the queue note so reconciliation can repair it. `/ticket-loop` never changes ticket status.
+ 
+-## Slice ${SLICE_N} Checkpoint
+-${SLICE_CHECKPOINT}
++### 2b -- Dispatch `/ticket-loop` (state: `implementing`)
+ 
+-## Baseline test failures (exclude from your work)
+-${BASELINE_FAILURES}
++Transition to `implementing`. `/ticket-loop` creates the worktree, so `/plan-loop` gives no worktree
++or implementation instruction. Dispatch to the implement seat:
+ 
+-IMPORTANT: All existing tests must pass before creating the PR. Pre-existing failures listed
+-above are excluded -- do not attempt to fix them, but do not introduce new ones.
++```bash
++IMPLEMENT_SEAT="${TOPOLOGY_IMPLEMENT_SEAT}@${RIG_NAME}"
+ 
+-When ALL tasks are complete and the checkpoint passes, create a PR and report back:
+-rig send ${ORCHESTRATOR_SESSION} \"PLAN_LOOP_RESULT: plan=${SLUG} slice=${SLICE_N} outcome=<pr-created|failed|blocked> pr=<N|null> branch=<name|null> sha=<HEAD_SHA|null> tests_added=<N> tests_passed=<pass|fail> error=<reason|null>\"
++# Verify the seat exists. If it does not, block (block_phase: implementing). Do not run inline.
++if ! rig whoami --json --all-peers 2>/dev/null | jq -e --arg s "${IMPLEMENT_SEAT}" '.peers[] | select(.sessionName == $s)' >/dev/null 2>&1; then
++  # Seat not found — transition to blocked with block_phase: implementing.
++  exit 1
++fi
++
++rig send ${IMPLEMENT_SEAT} "/ticket-loop ${TICKET_ID}
++
++Tracker: Obsidian ticket CLI (${VAULT_PATH}), ticket ${TICKET_ID}. Do not run a Linear lookup for this ID.
++
++Ticket content (inline -- /ticket-loop's adapter does not support Obsidian):
++\$(${TICKET_BIN:-${VAULT_PATH}/_system/bin/ticket} show ${TICKET_ID} --json)
++
++Ticket: ${TICKET_ID} -- Slice ${SLICE_N}: ${SLICE_NAME} (plan ${PLAN_PATH})
++Repo: ${REPO_PATH} (GH: ${GH_REPO})
++Base: ${BASE_BRANCH}
++Use branch name: feat/${SLUG}-slice-${SLICE_N}
++
++Do not run git push --force. Push to feature branches only. Never push to main.
++Do not commit the .ai/ directory.
++
++When complete, report back to the orchestrator with EXACTLY this format:
++rig send ${ORCHESTRATOR_SESSION} \"TICKET_LOOP_RESULT: ticket=${TICKET_ID} outcome=<pr-created|escalate|failed> pr=<N|null> branch=<name|null> sha=<HEAD_SHA|null> tests_added=<N> tests_total=<N> tests_passed=<pass|fail> classification=<AUTO|ADJUDICATE_LIGHT|ADJUDICATE_HEAVY|ESCALATE> error=<reason|null>\"
+ "
+ ```
+ 
+-**Single-seat fallback:**
++The slice context, tasks, checkpoint and baseline failures live in the ticket body (Step 2a) and are
++inlined above. `/ticket-loop`'s tracker adapter supports only Linear and Jira; Obsidian ticket
++content must be passed inline in the dispatch message.
+ 
+-Run `/spec-worktree` inline, then implement the slice tasks in the same session. This consumes
+-significant context -- single-seat mode is limited to 1-2 slices per run.
++Park the queue item while the seat works, as in `/factory-loop` Step 2c, so an idle orchestrator
++prompt does not read as `stalled-after-claim`.
+ 
+ ### 2c -- Wait for implementation result
+ 
+-**Monitor for completion.** The orchestrator waits for the `PLAN_LOOP_RESULT` message from the
++**Monitor for completion.** The orchestrator waits for the `TICKET_LOOP_RESULT` message from the
+ implement seat. While waiting:
+ 
+ 1. Run lease check at each heartbeat interval (every 60 seconds at phase boundaries).
+@@ -408,18 +476,16 @@
+    - Seat shows active work (thinking, tool calls) -- extend lease 30 min, log warning.
+    - Seat shows idle prompt -- seat crashed or finished without reporting. Transition to `blocked`
+      with `block_phase: implementing`. Preserve the worktree. Report:
+-     "Implementation seat went idle without reporting a result. Worktree at ${PATH}."
++     "Implementation seat went idle without reporting a result for ${TICKET_ID}."
+ 
+-**Processing the result:**
++**Processing the result.** Use the mapping in "ticket-loop result mapping":
+ 
+-- **`outcome=pr-created`** -- record two transitions: `worktree-setup -> implementing` then
+-  `implementing -> pr-open`. Record `pr_number`, `branch`. Do NOT record the SHA as `pr_head_sha`
+-  -- re-query from GitHub before review dispatch (the implement seat may have pushed additional
+-  commits).
+-- **`outcome=failed`** -- transition to `blocked` with error and `block_phase: implementing`.
+-  Report to human.
+-- **`outcome=blocked`** -- transition to `blocked` with `block_phase: implementing`. The implement
+-  seat hit a blocker that needs human input.
++- **`outcome=pr-created`** -- transition `implementing -> pr-open`. Record `pr_number`, `branch`.
++  Do NOT record the SHA as `pr_head_sha` -- re-query from GitHub before review dispatch (the implement
++  seat may have pushed additional commits). Write `in-review` to the tracker.
++- **`outcome=escalate`** -- transition to `blocked` with `block_phase: implementing`. `error` holds
++  the reason (for example a false ticket premise, or `classification=ESCALATE`). Report to human.
++- **`outcome=failed`** -- transition to `blocked` with `block_phase: implementing`. Report to human.
+ 
+ ### 2d -- Phase gate: post-implement validation (state: `validating`)
+ 
+@@ -609,19 +675,20 @@
+ 
+ ## Error handling
+ 
+-### Worktree creation failure
++### Ticket materialization failure
+ 
+-If `/spec-worktree` fails (branch conflict, disk space, dirty state):
+-1. Transition to `blocked` with `block_phase: worktree-setup`.
+-2. Do NOT attempt to clean up -- the worktree may contain partial work.
+-3. Report to human with the error and suggested recovery steps.
++If `ticket create` fails, the project is missing, or the body cannot be written:
++1. Transition to `blocked` with `block_phase: implementing`. Do not dispatch `/ticket-loop`.
++2. If the ticket was created but its body is still empty, keep `ticket_id` and report it. Do not
++   create a second ticket.
++3. Report to human with the error.
+ 
+ ### Implementation failure
+ 
+-If the implement seat reports `outcome=failed`:
++If `/ticket-loop` reports `outcome=failed` or `outcome=escalate`:
+ 1. Transition to `blocked` with `block_phase: implementing`.
+-2. Record the error and the worktree path.
+-3. Report to human: "Slice ${N} implementation failed: ${ERROR}. Worktree at ${PATH}."
++2. Record `error` from the result and the branch if one exists.
++3. Report to human: "Slice ${N} (${TICKET_ID}) implementation ${OUTCOME}: ${ERROR}."
+ 
+ ### Same-error detection
+ 
+@@ -635,8 +702,8 @@
+ 
+ ### Baseline-aware verification
+ 
+-The baseline test snapshot from pre-flight (Step 7) is injected into both implementation and review
+-dispatches. Pre-existing test failures are excluded from review findings. A test that failed before
++The baseline test snapshot from pre-flight (Step 7) is written into the slice ticket (Step 2a) and
++injected into the review dispatch. Pre-existing test failures are excluded from review findings. A test that failed before
+ this slice started is not a blocker for this slice.
+ 
+ ### Review cycle escalation
