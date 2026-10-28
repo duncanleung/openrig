@@ -2304,8 +2304,10 @@ export class SessionTransport {
         const memberOpts = members ? { ...sendOpts, committedOutboxIds: members.outboxIds } : sendOpts;
         if (this.guardedDelivery && !memberOpts?.submitOnly && guard.needsInputCheck(sessionName)) {
           if (callerSignal(memberOpts)?.aborted) return callerCancelled(sessionName);
-          return this.guardedDelivery.send(sessionName, memberText, memberOpts ?? {},
+          const draftResult = await this.guardedDelivery.send(sessionName, memberText, memberOpts ?? {},
             memberOpts?.committedOutboxIds ?? [`guard-send-${randomUUID()}`]);
+          if (this.deliveryGapMs > 0 && enterWasPressed(draftResult) && guard.hasWaiters(sessionName)) await this.sleep(this.deliveryGapMs);
+          return draftResult;
         }
         const sent = await this.sendUnguarded(sessionName, memberText, memberOpts);
         // RIG-98: keep the lease through the TUI's submit processing when a send is queued behind.
