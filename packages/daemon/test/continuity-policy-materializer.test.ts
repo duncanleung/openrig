@@ -405,6 +405,20 @@ describe("continuity policy materializer (S20 P4)", () => {
     expect(cutoverJob.thresholdBytes).toBeGreaterThan(prepareJob.thresholdBytes);
   });
 
+  it("cutoverTargetTokens is auto-derived at 1.5x prepareTargetTokens when only prepare is overridden", () => {
+    const plan = materializeContinuityPolicy({
+      ...CLAUDE_SEAT,
+      prepareTargetTokens: 120_000,
+      // cutoverTargetTokens intentionally omitted — should auto-derive to 180_000
+    });
+    expect(plan.jobs).toHaveLength(2);
+    const prepareJob = plan.jobs.find((j) => j.key === "prepare")!;
+    const cutoverJob = plan.jobs.find((j) => j.key === "cutover")!;
+    expect(prepareJob.thresholdBytes).toBe(Math.floor(120_000 / 153_000 * 1_000_000));
+    expect(cutoverJob.thresholdBytes).toBe(Math.floor(180_000 / 153_000 * 1_000_000));
+    expect(cutoverJob.thresholdBytes).toBeGreaterThan(prepareJob.thresholdBytes);
+  });
+
   it("adds registration glue only, never a second timer, scheduler, or engine", () => {
     const source = readFileSync(
       resolve(import.meta.dirname, "../src/domain/continuity-policy-materializer.ts"),

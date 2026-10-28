@@ -213,7 +213,11 @@ export function materializeContinuityPolicy(
       }],
     };
   }
-  const cutoverThreshold = thresholdBytes(input.cutoverTargetTokens ?? CUTOVER_TARGET_TOKENS, density);
+  const cutoverThreshold = thresholdBytes(
+    input.cutoverTargetTokens ??
+    (input.prepareTargetTokens != null ? Math.round(input.prepareTargetTokens * 1.5) : CUTOVER_TARGET_TOKENS),
+    density,
+  );
   const identity = seatIdentity(input);
   const prepareMessage = `${renderRung1IncumbentNotice(identity)}\n\nIf wiki/ exists in the project root, invoke /wiki-update to preserve session knowledge before handover.\n\n${CONTINUITY_POLICY_DOC}`;
   const cutoverBaton = renderRung2Baton(identity);
