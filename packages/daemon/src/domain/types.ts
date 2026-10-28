@@ -1241,6 +1241,9 @@ export interface RigSpecPodMember {
   compactionStrategy?: string;
   /** Per-member continuity mechanic override; resolves beside compactionStrategy. */
   mechanic?: string;
+  /** Smart-zone-aware compaction prepare threshold in tokens. Overrides the daemon default.
+   *  Used as prepareTargetTokens when arming the continuity watchdog for this seat. */
+  compactionThresholdTokens?: number;
   startup?: StartupBlock;
   /**
    * Optional fork source declaration. v1 MVP: mode="fork" with

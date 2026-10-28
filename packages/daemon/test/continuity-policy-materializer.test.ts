@@ -116,7 +116,7 @@ describe("continuity policy materializer (S20 P4)", () => {
       const changedRows = changed.map((job) => jobs.getByIdOrThrow(job.jobId));
       expect(changedRows).toHaveLength(2);
       expect(changedRows.map((job) => job.specYaml).join("\n")).toContain("new-mechanic@kernel");
-      expect(changedRows.map((job) => job.thresholdBytes)).toEqual([5_309_734, 7_964_601]);
+      expect(changedRows.map((job) => job.thresholdBytes)).toEqual([1_415_929, 2_123_893]);
       expect(jobs.listActive()).toHaveLength(2);
       expect(jobs.listActive().map((job) => job.specYaml).join("\n")).not.toContain("operator-agent@kernel");
       expect(original.map((job) => jobs.getByIdOrThrow(job.jobId))).toEqual([
@@ -388,6 +388,35 @@ describe("continuity policy materializer (S20 P4)", () => {
     const prepareJob = plan.jobs.find((j) => j.key === "prepare");
     expect(prepareJob).toBeDefined();
     expect(prepareJob!.specYaml).toContain("wiki-update");
+  });
+
+  it("prepareTargetTokens and cutoverTargetTokens override the defaults", () => {
+    const plan = materializeContinuityPolicy({
+      ...CLAUDE_SEAT,
+      prepareTargetTokens: 120_000,
+      cutoverTargetTokens: 180_000,
+    });
+    expect(plan.jobs).toHaveLength(2);
+    const prepareJob = plan.jobs.find((j) => j.key === "prepare")!;
+    const cutoverJob = plan.jobs.find((j) => j.key === "cutover")!;
+    // With default 153K tokens/MB density: floor(120_000/153_000*1_000_000)=784_313, floor(180_000/153_000*1_000_000)=1_176_470
+    expect(prepareJob.thresholdBytes).toBe(Math.floor(120_000 / 153_000 * 1_000_000));
+    expect(cutoverJob.thresholdBytes).toBe(Math.floor(180_000 / 153_000 * 1_000_000));
+    expect(cutoverJob.thresholdBytes).toBeGreaterThan(prepareJob.thresholdBytes);
+  });
+
+  it("cutoverTargetTokens is auto-derived at 1.5x prepareTargetTokens when only prepare is overridden", () => {
+    const plan = materializeContinuityPolicy({
+      ...CLAUDE_SEAT,
+      prepareTargetTokens: 120_000,
+      // cutoverTargetTokens intentionally omitted — should auto-derive to 180_000
+    });
+    expect(plan.jobs).toHaveLength(2);
+    const prepareJob = plan.jobs.find((j) => j.key === "prepare")!;
+    const cutoverJob = plan.jobs.find((j) => j.key === "cutover")!;
+    expect(prepareJob.thresholdBytes).toBe(Math.floor(120_000 / 153_000 * 1_000_000));
+    expect(cutoverJob.thresholdBytes).toBe(Math.floor(180_000 / 153_000 * 1_000_000));
+    expect(cutoverJob.thresholdBytes).toBeGreaterThan(prepareJob.thresholdBytes);
   });
 
   it("adds registration glue only, never a second timer, scheduler, or engine", () => {
