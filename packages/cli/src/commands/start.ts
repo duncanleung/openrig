@@ -14,6 +14,7 @@ import {
 import { shouldAutoStartDaemon } from "../daemon-reachability.js";
 import { freshSeatCommand, launchFreshSeat } from "../fresh-seat-command.js";
 import { realDeps } from "./daemon.js";
+import { readShutdownManifest, selectLastRunning } from "../shutdown-manifest.js";
 import type { StatusDeps } from "./status.js";
 
 const LONG_RUNNING_UP_TIMEOUT_MS = 120_000;
@@ -423,8 +424,13 @@ status); a restore that returned without a ready kernel exits 1.
       if (opts.all) {
         selectedCandidates = [...candidates];
       } else if (opts.last) {
-        selectedCandidates = candidates.filter((c) => c.lastStop !== "down");
-        for (const c of candidates.filter((x) => x.lastStop === "unknown")) {
+        // RIG-83: only rigs running when the daemon last stopped (the shutdown manifest), after the
+        // stopped-on-purpose rigs above are removed. Without a usable manifest every remaining rig is
+        // restored and the reason is printed.
+        const picked = selectLastRunning(candidates.filter((c) => c.lastStop !== "down"), readShutdownManifest());
+        if (picked.warning && !opts.json) console.error(picked.warning);
+        selectedCandidates = picked.selected;
+        for (const c of selectedCandidates.filter((x) => x.lastStop === "unknown")) {
           const message = "selected for restore because its seat statuses could not be read";
           warnings.push({ rigId: c.rigId, rigName: c.rigName, code: "seat_status_unreadable", message });
           if (!opts.json) console.error(`  ${c.rigName}: ${message}`);
