@@ -130,6 +130,15 @@ Line ranges are approximate and drift; the checks do not depend on them.
 
 - `packages/daemon/src/domain/jev-classifier.ts`, `src/jev-classifier-surface.ts`, `packages/cli/src/commands/ticket-factory-jev.ts`; `ticket-factory.ts` calls `runJevClassify`.
 
+### RIG-77 validation gate (restored by RIG-145)
+
+- `packages/daemon/src/domain/rigspec-schema.ts`: `"validation_gate"` in `RIG_KEYS`; the parse call in `validate`; `validateValidationGateBlock` and `normalizeValidationGate` at the end of the file; `validationGate` in `normalize`.
+- `packages/daemon/src/domain/types.ts`: `ValidationGateConfigSpec` and `RigSpec.validationGate`.
+- `packages/daemon/src/domain/queue-repository.ts`: `validationGatePredicate` option; the gate call in `createInTransactionalContext`, `handoff` and `handoffAndComplete`; `viaWorkflowProjection` on `QueueCreateInput`; `flushGateRequests` (advisor wake); stripping `work:mechanical` from inherited tags on handoff.
+- `packages/daemon/src/startup.ts`: `validationGatePredicate: createValidationGatePredicate(db)` passed to `QueueRepository`; RIG-91 `workspaceRoot` passed to `WorkflowRuntime` so gate evidence files resolve.
+- `packages/daemon/src/domain/validation-gate-enforcer.ts`: the predicate and checker. Its own tests passed while every seam above was missing, so the checks below pin the seams, not the enforcer.
+- Marker: the schema accepts the key (15 of 22 live specs carry a block), the queue calls the gate at all three sites, and startup injects it.
+
 ### RIG-125 post-tool truncation hook
 
 - `scripts/hooks/post-tool-truncate.sh`.
@@ -147,7 +156,24 @@ and the `runtimeFallbackTrigger` wiring (RIG-43), `new CronJobScheduler` with `c
 Restored by RIG-143 (same merge): `new FleetIngestionService` with its lifecycle subscription, boot rollup and
 reconcile timer (RIG-80), and the `shutdown-manifest` shutdown phase that calls `writeShutdownManifest` (RIG-83).
 
-No gaps are open. Add a `!` check here when a drop is found and cannot be fixed in the same change.
+Restored by RIG-145 (same merge): the RIG-77 validation gate (schema, queue wiring, startup injection) and the
+RIG-91 `workspaceRoot` pass-through.
+
+Open, found by RIG-145 from RIG-tag counts in `e02d09c64^1` against `origin/main` (the symbol existed before the
+merge and no longer exists anywhere in the file):
+
+| Missing | Ticket | Check ID |
+|---|---|---|
+| `formatRuntimeFallback` and the fallback marker in `rig ps` (`packages/cli/src/commands/ps.ts`) | RIG-101 | `!CF-19-ps-fallback` |
+| `decayFilter` in the startup orchestrator (`startup-orchestrator.ts`) | RIG-111 | `!CF-20-decay-filter` |
+| `DEFAULT_DELIVERY_GAP_MS` and the per-target send FIFO (`session-transport.ts`) | RIG-98 | `!CF-21-delivery-gap` |
+| `stampRestoreRequestSent` (`claude-compaction-enforcer.ts`) | RIG-118 | `!CF-22-restore-stamp` |
+| `selectLastRunning` for `rig start --last` (`packages/cli/src/commands/start.ts`) | RIG-83 | `!CF-23-start-last` |
+| compaction restore bridge registration in `claude-code-adapter.ts` | RIG-116 | `!CF-24-bridge-register` |
+
+Each has a pre-merge definition (`git show e02d09c64^1:<file>`). The checks assert only that the one symbol is back;
+restoring the feature needs the old code read in full. `runtime-fallback-visibility.test.ts` (6 tests, failing on
+`origin/main` before this change) is consistent with the RIG-101 drop.
 
 Pre-merge source for all of the above: `git show e02d09c64^1:packages/daemon/src/{startup,index}.ts`.
 
@@ -248,6 +274,27 @@ CF-14-wired     | has       | packages/daemon/src/startup.ts | new TicketFactory
 # RIG-97/99 Jev classifier
 CF-15-surface    | file      | packages/daemon/src/jev-classifier-surface.ts
 CF-15-callsite   | callsite  | packages/cli/src/commands/ticket-factory-jev.ts | runJevClassify | packages/cli/src/commands/ticket-factory.ts
+
+# RIG-77 validation gate (and RIG-91 workspaceRoot)
+CF-18-key        | has       | packages/daemon/src/domain/rigspec-schema.ts | "non_interruptive", "env", "validation_gate"
+CF-18-parse      | callsite  | packages/daemon/src/domain/rigspec-schema.ts | validateValidationGateBlock | packages/daemon/src/domain/rigspec-schema.ts
+CF-18-normalize  | callsite  | packages/daemon/src/domain/rigspec-schema.ts | normalizeValidationGate | packages/daemon/src/domain/rigspec-schema.ts
+CF-18-type       | has       | packages/daemon/src/domain/types.ts | validationGate\?: ValidationGateConfigSpec
+CF-18-inject     | has       | packages/daemon/src/startup.ts | validationGatePredicate: createValidationGatePredicate\(db\)
+CF-18-predicate  | callsite  | packages/daemon/src/domain/validation-gate-enforcer.ts | createValidationGatePredicate | packages/daemon/src/startup.ts
+CF-18-create     | has       | packages/daemon/src/domain/queue-repository.ts | viaWorkflowProjection: input\.viaWorkflowProjection
+CF-18-handoff    | has       | packages/daemon/src/domain/queue-repository.ts | tags: rawTags,
+CF-18-handoffac  | has       | packages/daemon/src/domain/queue-repository.ts | tags: rawTagsHAC,
+CF-18-flush      | callsite  | packages/daemon/src/domain/queue-repository.ts | flushGateRequests | packages/daemon/src/domain/queue-repository.ts
+CF-18-workspace  | has       | packages/daemon/src/startup.ts | workspaceRoot: \(\) => healthSettingsStore
+
+# Open gaps found by RIG-145 (symbol existed in e02d09c64^1, absent now)
+!CF-19-ps-fallback    | has | packages/cli/src/commands/ps.ts | formatRuntimeFallback
+!CF-20-decay-filter   | has | packages/daemon/src/domain/startup-orchestrator.ts | decayFilter
+!CF-21-delivery-gap   | has | packages/daemon/src/domain/session-transport.ts | DEFAULT_DELIVERY_GAP_MS
+!CF-22-restore-stamp  | has | packages/daemon/src/domain/claude-compaction-enforcer.ts | stampRestoreRequestSent
+!CF-23-start-last     | has | packages/cli/src/commands/start.ts | selectLastRunning
+!CF-24-bridge-register| has | packages/daemon/src/adapters/claude-code-adapter.ts | compaction-restore-bridge
 
 # RIG-125 truncation hook
 CF-16-hook       | file      | scripts/hooks/post-tool-truncate.sh

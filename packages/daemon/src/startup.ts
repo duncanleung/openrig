@@ -105,6 +105,7 @@ import { TranscriptStore } from "./domain/transcript-store.js";
 import { resumeRunningTranscriptCaptures, wireTranscriptCaptureStops } from "./domain/transcript-capture.js";
 import { probeSessionActivity, readComposerOccupancy, SessionTransport } from "./domain/session-transport.js";
 import { DeliveryAttemptLedger, teeObserverSinks } from "./domain/delivery-attempt-ledger.js";
+import { createValidationGatePredicate } from "./domain/validation-gate-enforcer.js";
 import { StuckSeatObserver, type ComposerReading, type SeatTarget } from "./domain/stuck-seat-observer.js";
 import { getNodeInventoryForRigs } from "./domain/node-inventory.js";
 import { AgentActivityStore } from "./domain/agent-activity-store.js";
@@ -445,6 +446,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // INJECTED here (arch layering pin: the queue never imports the
     // workflow domain; startup wires them — the validateRig precedent).
     workflowFrontierPredicate: createWorkflowFrontierPredicate(db),
+    // RIG-77 — validation-gate admission guard (injected; same layering pin
+    // as workflowFrontierPredicate — queue never imports gate domain).
+    validationGatePredicate: createValidationGatePredicate(db),
     // GHOST-STAGE (h): resolve the source seat's atom-B generation for the handoff-nudge Sent: line
     // (same injected-predicate layering — the queue never imports the session domain).
     resolveOccupantGeneration: (sessionName) => sessionRegistry.currentOccupantGenerationForSession(sessionName),
@@ -1665,6 +1669,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       // OPR.0.4.6.WF1 FR-3: instantiate/handoff auto-arm the
       // per-instance workflow-keepalive job in-txn; terminal disarms.
       watchdogJobsRepo: watchdogJobsRepoInstance,
+      // RIG-91: gate evidence files resolve against the workspace root.
+      workspaceRoot: () => healthSettingsStore.resolveOne("workspace.root").value as string,
       // OPR.0.4.6.WF5 FR-2: the maturity dial — host default read LIVE
       // per exception from the settings twin (dial flips affect future
       // items only, never retroactive re-routing).

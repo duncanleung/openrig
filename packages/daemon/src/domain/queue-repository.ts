@@ -31,6 +31,7 @@ import {
   USAGE_LIMIT_POOL_TAG_PREFIX,
   type ParkWakeStatus,
 } from "./queue-wake-repository.js";
+import type { AdvisorRequest, ValidationGateResult } from "./validation-gate-enforcer.js";
 import { WatchdogJobsRepository } from "./watchdog-jobs-repository.js";
 import { armQueueWait, backOffQueueWait, refreshQueueWaits, evaluateQueueWait, retargetQueueWait, isQueueWait } from "./queue-wait-backoff.js";
 import { parseHumanQuestions, unansweredQuestions, describeTypedReplyPlacement, type HumanQuestion, type HumanAnswers, type TypedHumanReply, type RecordHumanAnswerResult } from "./human-questions.js";
@@ -98,6 +99,8 @@ const AUTO_UNPARK_BLOCKER_TAG_PREFIX = "queue:auto-unpark:blocker-ref:";
 
 /** The actor on the transition routeToFallback writes; the row's own history is how a later reroute finds the line it wrote. */
 const FALLBACK_ACTOR = "system:queue-fallback";
+/** RIG-77 — source of the advisor wake requests the validation gate creates. */
+const GATE_REQUEST_ACTOR = "validation-gate@system";
 
 /** 0.5.1-53 Atom 1a — typed non-qitem gate blocker prefixes. A park may be gated on a fold / auth /
  *  external condition that is NOT a qitem and NOT a human seat; these prefixes make such a gate a
@@ -376,6 +379,12 @@ export interface QueueCreateInput {
   /** P21 §4 era-stamp: the route passes `transport:v1` (sourceSession derived from the transport
    *  header chokepoint). Threaded onto the 'created' transition; absence = claimed-era. */
   identityProvenance?: string | null;
+  /**
+   * RIG-77 — set ONLY by the workflow domain's projection writes (same pattern
+   * as viaWorkflowVerb on QueueUpdateInput). Exempts the item from the
+   * validation-gate check (M3 workflow exemption).
+   */
+  viaWorkflowProjection?: boolean;
 }
 
 export interface QueueUpdateInput {
@@ -897,6 +906,14 @@ export class QueueRepository {
   private readonly workflowFrontierPredicate:
     | ((qitemId: string) => { instanceId: string; workflowName: string } | null)
     | undefined;
+  /** RIG-77 — injected by startup (never imported): the validation-gate
+   *  admission predicate. Absent = gate disabled (tests, bootstrap). */
+  private readonly validationGatePredicate:
+    | ((input: { destinationSession: string; tags: string[] | null; viaWorkflowProjection?: boolean; dedupSeed?: string }) => ValidationGateResult)
+    | undefined;
+  /** RIG-77 — advisor wake requests recorded by the gate, written after the gate decision (a
+   *  rejected create rolls its transaction back) by flushGateRequests(). */
+  private pendingGateRequests: AdvisorRequest[] = [];
 
   constructor(
     db: Database.Database,
@@ -923,6 +940,12 @@ export class QueueRepository {
        */
       workflowFrontierPredicate?: (qitemId: string) => { instanceId: string; workflowName: string } | null;
       /**
+       * RIG-77 — the validation-gate admission predicate. Injected by startup
+       * (queue is the lower primitive; startup wires the domain modules). When
+       * absent the gate never fires.
+       */
+      validationGatePredicate?: (input: { destinationSession: string; tags: string[] | null; viaWorkflowProjection?: boolean; dedupSeed?: string }) => ValidationGateResult;
+      /**
        * GHOST-STAGE (h): resolve the SOURCE seat's atom-B occupant generation-uuid so a handoff
        * nudge carries the composing generation on its Sent: line (the injected-predicate precedent —
        * the queue is the lower primitive and never imports the session domain; startup wires
@@ -942,6 +965,7 @@ export class QueueRepository {
     this.destinationAdvisory = opts?.destinationAdvisory ?? (() => null);
     if (opts?.transport) this.attachTransport(opts.transport);
     this.workflowFrontierPredicate = opts?.workflowFrontierPredicate;
+    this.validationGatePredicate = opts?.validationGatePredicate;
     this.resolveOccupantGeneration = opts?.resolveOccupantGeneration;
     this.resolveSessionAddresses = opts?.resolveSessionAddresses ?? ((name) => [name]);
     this.loadHumanRegistryFn = opts?.loadHumanRegistry ?? (() => loadHumanRegistry());
@@ -1652,6 +1676,17 @@ export class QueueRepository {
     /** Response-only: the retry's changed body was not written. Never stored on the row. */
     createWarning?: { code: "qitem_body_not_saved"; message: string };
   }> {
+    try {
+      return await this.createCore(input);
+    } finally {
+      await this.flushGateRequests();
+    }
+  }
+
+  private async createCore(input: QueueCreateInput): Promise<QueueItem & {
+    /** Response-only: the retry's changed body was not written. Never stored on the row. */
+    createWarning?: { code: "qitem_body_not_saved"; message: string };
+  }> {
     // FOUNDER ROOT INVARIANT (2026-08-27, supersedes 51-09 incr 4 / ruling cb19867f Q2):
     // a LOCAL write stores the bare transport identity — no self-host suffix inside one
     // instance. Host identity is added only at the cross-host forwarding boundary
@@ -1768,13 +1803,48 @@ export class QueueRepository {
     if (!this.validateRig(input.destinationSession)) {
       throw destinationValidationError("destination_session", input.destinationSession, this.loadHumanRegistryFn);
     }
-    const result = this.createInTransactionalContext(input);
-    return {
-      qitemId: result.qitemId,
-      persistedEvent: result.persistedEvent,
-      destinationSession: input.destinationSession,
-      nudge: input.nudge,
-    };
+    try {
+      const result = this.createInTransactionalContext(input);
+      return {
+        qitemId: result.qitemId,
+        persistedEvent: result.persistedEvent,
+        destinationSession: input.destinationSession,
+        nudge: input.nudge,
+      };
+    } finally {
+      // RIG-77 — the gate may have recorded an advisor request (also when it rejects). The caller's
+      // outer transaction is synchronous, so a microtask runs after it commits or rolls back. The
+      // flush is best effort and idempotent (gate-for dedup tag).
+      if (this.pendingGateRequests.length > 0) queueMicrotask(() => { void this.flushGateRequests(); });
+    }
+  }
+
+  /**
+   * RIG-77 — wake the advisor on demand. For each blocked dispatch the gate recorded, create ONE
+   * pending qitem for the advisor (existing create path: durable row + nudge/wake ladder). The
+   * dedup key rides on the row as a `gate-for:<key>` tag, so a retried dispatch never makes a
+   * second row. Best effort: a failure here must never mask the gate's own verdict.
+   */
+  private async flushGateRequests(): Promise<void> {
+    const requests = this.pendingGateRequests.splice(0);
+    for (const req of requests) {
+      try {
+        const tag = `gate-for:${req.dedupKey}`;
+        const existing = this.db
+          .prepare("SELECT 1 AS hit FROM queue_items WHERE tags LIKE ? LIMIT 1")
+          .get(`%${JSON.stringify(tag)}%`);
+        if (existing) continue;
+        await this.createCore({
+          sourceSession: GATE_REQUEST_ACTOR,
+          destinationSession: req.advisorSession,
+          body: `Validation requested (${req.mode}): ${req.what}. Run /codex-second-opinion, /symmetric-debate or /solution-design on the plan, then close a qitem tagged gate:validation as done from this seat so the dispatch can proceed.`,
+          tags: ["gate:validation-request", tag],
+          nudge: true,
+        });
+      } catch (err) {
+        console.warn(`[validation-gate] advisor request failed (${req.dedupKey}): ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   }
 
   /**
@@ -1800,6 +1870,18 @@ export class QueueRepository {
       throw new QueueRepositoryError(humanRoute.code, humanRoute.message, {
         missingFields: humanRoute.missingFields,
       });
+    }
+    if (this.validationGatePredicate) {
+      const gateResult = this.validationGatePredicate({
+        destinationSession: input.destinationSession,
+        tags: input.tags ?? null,
+        viaWorkflowProjection: input.viaWorkflowProjection,
+        dedupSeed: `create:${createHash("sha256").update(JSON.stringify([input.sourceSession, input.destinationSession, input.body])).digest("hex").slice(0, 24)}`,
+      });
+      if (gateResult.advisorRequest) this.pendingGateRequests.push(gateResult.advisorRequest);
+      if (!gateResult.ok) {
+        throw new QueueRepositoryError(gateResult.code, gateResult.message, gateResult.meta);
+      }
     }
     if (input.humanIntent != null && input.humanIntent !== "decision" && input.humanIntent !== "update") {
       throw new QueueRepositoryError("invalid_human_notification", "humanIntent must be decision or update; omission retains legacy decision behavior.");
@@ -1916,6 +1998,14 @@ export class QueueRepository {
    * with `handed_off_from` recording the chain. One atomic transaction.
    */
   async handoff(input: QueueHandoffInput): Promise<{ closed: QueueItem; created: QueueItem }> {
+    try {
+      return await this.handoffCore(input);
+    } finally {
+      await this.flushGateRequests();
+    }
+  }
+
+  private async handoffCore(input: QueueHandoffInput): Promise<{ closed: QueueItem; created: QueueItem }> {
     const source = this.getById(input.qitemId);
     if (!source) {
       throw new QueueRepositoryError(
@@ -1938,7 +2028,14 @@ export class QueueRepository {
     const body = input.body ?? source.body;
     const priority = input.priority ?? source.priority;
     const tier = input.tier ?? source.tier;
-    const tags = input.tags ? JSON.stringify(input.tags) : (source.tags ? JSON.stringify(source.tags) : null);
+    // M2 (RIG-77): strip work:mechanical from inherited tags — bypass is explicit,
+    // not silently propagated through handoff chains.
+    const rawTags: string[] | null = input.tags
+      ? input.tags
+      : source.tags
+        ? source.tags.filter((t) => t !== "work:mechanical")
+        : null;
+    const tags = rawTags ? JSON.stringify(rawTags) : null;
     const chain = JSON.stringify([...(source.chainOfRecord ?? []), source.qitemId]);
     const targetRepo = input.targetRepo === undefined ? source.targetRepo : input.targetRepo;
 
@@ -1955,6 +2052,17 @@ export class QueueRepository {
       throw new QueueRepositoryError(humanRoute.code, humanRoute.message, {
         missingFields: humanRoute.missingFields,
       });
+    }
+    if (this.validationGatePredicate) {
+      const gateResult = this.validationGatePredicate({
+        destinationSession: input.toSession,
+        tags: rawTags,
+        dedupSeed: `handoff:${input.qitemId}`,
+      });
+      if (gateResult.advisorRequest) this.pendingGateRequests.push(gateResult.advisorRequest);
+      if (!gateResult.ok) {
+        throw new QueueRepositoryError(gateResult.code, gateResult.message, gateResult.meta);
+      }
     }
 
     const events: Array<{ name: string; payload: import("./types.js").RigEvent }> = [];
@@ -2093,6 +2201,14 @@ export class QueueRepository {
    * tracking needed against the source qitem.
    */
   async handoffAndComplete(input: QueueHandoffAndCompleteInput): Promise<{ closed: QueueItem; created: QueueItem }> {
+    try {
+      return await this.handoffAndCompleteCore(input);
+    } finally {
+      await this.flushGateRequests();
+    }
+  }
+
+  private async handoffAndCompleteCore(input: QueueHandoffAndCompleteInput): Promise<{ closed: QueueItem; created: QueueItem }> {
     const source = this.getById(input.qitemId);
     if (!source) {
       throw new QueueRepositoryError(
@@ -2115,7 +2231,13 @@ export class QueueRepository {
     const body = input.body ?? source.body;
     const priority = input.priority ?? source.priority;
     const tier = input.tier ?? source.tier;
-    const tags = input.tags ? JSON.stringify(input.tags) : (source.tags ? JSON.stringify(source.tags) : null);
+    // M2 (RIG-77): strip work:mechanical from inherited tags.
+    const rawTagsHAC: string[] | null = input.tags
+      ? input.tags
+      : source.tags
+        ? source.tags.filter((t) => t !== "work:mechanical")
+        : null;
+    const tags = rawTagsHAC ? JSON.stringify(rawTagsHAC) : null;
     const chain = JSON.stringify([...(source.chainOfRecord ?? []), source.qitemId]);
     const targetRepo = input.targetRepo === undefined ? source.targetRepo : input.targetRepo;
 
@@ -2130,6 +2252,17 @@ export class QueueRepository {
       throw new QueueRepositoryError(humanRoute.code, humanRoute.message, {
         missingFields: humanRoute.missingFields,
       });
+    }
+    if (this.validationGatePredicate) {
+      const gateResult = this.validationGatePredicate({
+        destinationSession: input.toSession,
+        tags: rawTagsHAC,
+        dedupSeed: `handoff:${input.qitemId}`,
+      });
+      if (gateResult.advisorRequest) this.pendingGateRequests.push(gateResult.advisorRequest);
+      if (!gateResult.ok) {
+        throw new QueueRepositoryError(gateResult.code, gateResult.message, gateResult.meta);
+      }
     }
 
     const events: Array<{ name: string; payload: import("./types.js").RigEvent }> = [];
