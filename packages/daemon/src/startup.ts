@@ -147,6 +147,7 @@ import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepaliv
 import { makeIdleGateQitemPolicy } from "./domain/policies/idle-gate-qitem.js";
 import { makeTurnAnomalyPolicy } from "./domain/policies/turn-anomaly.js";
 import { TurnAnomalyDetector } from "./domain/turn-anomaly-detector.js";
+import { makeCompactionLifecyclePolicy, COMPACTION_LIFECYCLE_POLICY_NAME } from "./domain/policies/compaction-lifecycle.js";
 import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME } from "./domain/policies/parked-owner-consumer.js";
 import { diagnoseRigParked } from "./domain/parked-query.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
@@ -2207,6 +2208,31 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         makeIdleGateQitemPolicy({ db, seatActivity: seatActivityService }),
         // RIG-79: windowed assistant-turn:user-message anomalies, told to the job target (the delivery recipient).
         makeTurnAnomalyPolicy({ detector: turnAnomalyDetector }),
+        // RIG-118: per-seat watch of one managed compaction attempt (the enforcer registers the
+        // job from onCompactSent). WARN log first; an advisory row to the operator seat only
+        // after a second consecutive missed window, once per attempt and stage.
+        makeCompactionLifecyclePolicy({
+          openrigHome: () => OPENRIG_HOME,
+          warn: (message, notes) => console.warn(`[${COMPACTION_LIFECYCLE_POLICY_NAME}] ${message}`, notes),
+          createAdvisory: async (advisory) => {
+            const operator = new ContextPackSettingsStore().resolveOne("workspace.operator_seat_name").value;
+            if (typeof operator !== "string" || operator.length === 0) {
+              console.warn(`[${COMPACTION_LIFECYCLE_POLICY_NAME}] no workspace.operator_seat_name: advisory ${advisory.dedupeKey} not created`);
+              return;
+            }
+            const open = queueRepoInstance
+              .list({ destinationSession: operator, state: ["pending", "in-progress", "blocked"], limit: 500 })
+              .some((r) => r.body.includes(advisory.dedupeKey));
+            if (open) return;
+            await queueRepoInstance.create({
+              sourceSession: "daemon@kernel",
+              destinationSession: operator,
+              body: advisory.body,
+              priority: "routine",
+              tags: [COMPACTION_LIFECYCLE_POLICY_NAME],
+            });
+          },
+        }),
         // OPR.0.5.6.24 F-14: the parked-owner consumer — the WHOLE shipped
         // parked diagnosis (diagnoseRigParked over the arbitrated oracle +
         // destination-scoped obligations + wake status; the same derivation
@@ -2574,6 +2600,27 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           terminalPolicies: new TerminalPolicyStore(db),
           resolveOccupantGeneration: (sessionName) =>
             sessionRegistry.currentOccupantGenerationForSession(sessionName),
+          // RIG-118: one lifecycle job per seat, refreshed with each new attempt.
+          onCompactSent: (info) => {
+            watchdogJobsRepoInstance.ensureAutoRegistration({
+              policy: COMPACTION_LIFECYCLE_POLICY_NAME,
+              targetSession: info.sessionName,
+              registeredBySession: "daemon@kernel",
+              intervalSeconds: 60,
+              activeWakeIntervalSeconds: null,
+              scanIntervalSeconds: null,
+              specYaml: [
+                `policy: ${COMPACTION_LIFECYCLE_POLICY_NAME}`,
+                "target:",
+                `  session: ${info.sessionName}`,
+                "context:",
+                `  attemptId: ${JSON.stringify(info.attemptId)}`,
+                `  mapPath: ${JSON.stringify(info.mapPath)}`,
+                `  startedAt: ${JSON.stringify(info.startedAt)}`,
+                "",
+              ].join("\n"),
+            });
+          },
           onPostRestoreComplete: (receipt) => {
             recordManagedWidthReceipt(
               receipt,
