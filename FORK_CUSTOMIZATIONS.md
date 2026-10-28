@@ -172,12 +172,12 @@ and the fallback fields in `rig ps` and `rig seat status` (RIG-101); compaction 
 shorter restore audit prompt (RIG-118, RIG-117); the delivery decay filter hook (RIG-111); the post-Enter gap and
 send FIFO (RIG-98). Details are in the RIG-146 commits.
 
-Open, found while restoring them (both existed in `e02d09c64^1`):
+Restored by RIG-147 (the last two): the `node.startup_delivery_manifest` event, its type and its emission in
+the startup orchestrator (RIG-36), and `globalSettingsCoversRelayEvents` hook dedup in the Claude adapter (RIG-3).
 
-| Missing | Ticket | Check ID |
-|---|---|---|
-| The `node.startup_delivery_manifest` event: its type in `types.ts` and its emission in `startup-orchestrator.ts` (`deliveredFiles`, `quickHash`, `resolvedHints`). `memory-coverage` reads this event, and 3 tests in `delivery-decay-filter.test.ts` plus `startup-delivery-manifest-pipeline.test.ts` fail without it. | RIG-36 | `!CF-25-delivery-manifest` |
-| `globalSettingsCoversRelayEvents` in `claude-code-adapter.ts` and its call in `reconcileClaudeActivityHooks` (skip the project-level activity-relay hooks when the global `~/.claude/settings.json` already has them). Two tests in `observer-dedup-e2e.test.ts` fail without it. | RIG-3 | `!CF-26-hook-dedup` |
+No gaps are open. One test, "an auto file that resolves to guidance_merge is not a bundle candidate" in
+`startup-orchestrator.test.ts`, still fails for a different reason: upstream now routes per-seat role files such
+as `guidance/role.md` to `send_text`, so the test premise is outdated. It is not a drop.
 
 Pre-merge source for all of the above: `git show e02d09c64^1:packages/daemon/src/{startup,index}.ts`.
 
@@ -301,8 +301,10 @@ CF-23-start-last     | has | packages/cli/src/commands/start.ts | selectLastRunn
 CF-24-bridge-register | callsite | packages/daemon/src/adapters/claude-code-adapter.ts | reconcileClaudeCompactionBridgeHooks | packages/daemon/src/adapters/claude-code-adapter.ts
 
 # Open gaps found by RIG-146 (present in e02d09c64^1, absent now)
-!CF-25-delivery-manifest | has | packages/daemon/src/domain/types.ts | type: "node.startup_delivery_manifest"
-!CF-26-hook-dedup | has | packages/daemon/src/adapters/claude-code-adapter.ts | globalSettingsCoversRelayEvents
+CF-25-delivery-manifest | has | packages/daemon/src/domain/types.ts | type: "node.startup_delivery_manifest"
+CF-26-hook-dedup | callsite | packages/daemon/src/adapters/claude-code-adapter.ts | globalSettingsCoversRelayEvents | packages/daemon/src/adapters/claude-code-adapter.ts
+CF-25-emit | has | packages/daemon/src/domain/startup-orchestrator.ts | type: "node.startup_delivery_manifest"
+CF-25-record | has | packages/daemon/src/domain/startup-orchestrator.ts | recordDelivered\(f, "post_launch"\)
 
 # RIG-125 truncation hook
 CF-16-hook       | file      | scripts/hooks/post-tool-truncate.sh
