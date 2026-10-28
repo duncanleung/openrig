@@ -2,7 +2,7 @@
 // Verifies that statusLine and activity-hook dedup logic works with real
 // file reads/writes, real path resolution, and real JSON round-trips.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { mkdirSync, writeFileSync, readFileSync, rmSync, mkdtempSync, existsSync, chmodSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -173,6 +173,49 @@ describe("Observer dedup E2E — real filesystem", () => {
       const hooks = settings.hooks as Record<string, unknown[]> | undefined;
       const allCmds = Object.values(hooks ?? {}).flat().flatMap((g: any) => (g.hooks ?? []).map((h: any) => h.command));
       expect(allCmds.filter((c: string) => c.includes("activity-relay.cjs"))).toEqual([]);
+    });
+  });
+
+  describe("CLAUDE_CONFIG_DIR global dedup (RIG-140)", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    function globalRelayHooks(): Record<string, unknown[]> {
+      const relayCmd = `node '${join(homeDir, ".openrig", "hooks", "scripts", "activity-relay.cjs")}'`;
+      const hooks: Record<string, unknown[]> = {};
+      for (const ev of ["SessionStart", "UserPromptSubmit", "Stop", "Notification"]) {
+        hooks[ev] = [{ hooks: [{ type: "command", command: relayCmd, timeout: 5 }] }];
+      }
+      return hooks;
+    }
+
+    function projectRelayCount(): number {
+      const settingsPath = join(projectDir, ".claude", "settings.local.json");
+      if (!existsSync(settingsPath)) return 0;
+      const hooks = readJsonFile(settingsPath).hooks as Record<string, unknown[]> | undefined;
+      const allCmds = Object.values(hooks ?? {}).flat().flatMap((g: any) => (g.hooks ?? []).map((h: any) => h.command));
+      return allCmds.filter((c: string) => c.includes("activity-relay.cjs")).length;
+    }
+
+    it("global relay hooks in $CLAUDE_CONFIG_DIR/settings.json suppress the project-level copy", async () => {
+      const configDir = join(homeDir, "custom-claude");
+      mkdirSync(configDir, { recursive: true });
+      writeFileSync(join(configDir, "settings.json"), JSON.stringify({ hooks: globalRelayHooks() }));
+      vi.stubEnv("CLAUDE_CONFIG_DIR", configDir);
+
+      await makeAdapter(realFsOps(homeDir)).project(plan(projectDir, [activityEntry(RELAY_ASSET)]), binding(projectDir));
+
+      expect(projectRelayCount()).toBe(0);
+    });
+
+    it("relay hooks in ~/.claude/settings.json do not suppress the project copy when another config dir is selected", async () => {
+      writeFileSync(join(homeDir, ".claude", "settings.json"), JSON.stringify({ hooks: globalRelayHooks() }));
+      vi.stubEnv("CLAUDE_CONFIG_DIR", join(homeDir, "custom-claude"));
+
+      await makeAdapter(realFsOps(homeDir)).project(plan(projectDir, [activityEntry(RELAY_ASSET)]), binding(projectDir));
+
+      expect(projectRelayCount()).toBeGreaterThan(0);
     });
   });
 

@@ -512,6 +512,66 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     expect(settings.statusLine).toBeUndefined();
   });
 
+  describe("global settings.json honors CLAUDE_CONFIG_DIR (RIG-140)", () => {
+    const userStatusLine = JSON.stringify({ statusLine: { type: "command", command: "/home/tester/statusline.sh" } });
+
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    async function provision() {
+      const adapter = new ClaudeCodeAdapter({
+        tmux: mockTmux(),
+        fsOps: mockFsOps(),
+        stateDir: tmpDir,
+        collectorAssetPath: "/fake/collector.js",
+      });
+      await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "test", nodeId: "n1" } as any);
+    }
+
+    /** The collector command in the project's settings.local.json, or undefined when none is installed. */
+    function installedStatusLine(): unknown {
+      const raw = written["/project/.claude/settings.local.json"];
+      return raw === undefined ? undefined : JSON.parse(raw).statusLine;
+    }
+
+    it("treats a statusLine in $CLAUDE_CONFIG_DIR/settings.json as the user's own and installs nothing", async () => {
+      vi.stubEnv("CLAUDE_CONFIG_DIR", "/cfg/claude");
+      written["/cfg/claude/settings.json"] = userStatusLine;
+
+      await provision();
+
+      expect(installedStatusLine()).toBeUndefined();
+    });
+
+    it("ignores ~/.claude/settings.json when CLAUDE_CONFIG_DIR selects another directory", async () => {
+      vi.stubEnv("CLAUDE_CONFIG_DIR", "/cfg/claude");
+      written["/home/tester/.claude/settings.json"] = userStatusLine;
+
+      await provision();
+
+      expect(installedStatusLine()).toMatchObject({ type: "command" });
+    });
+
+    it("resolves a relative CLAUDE_CONFIG_DIR against the seat cwd", async () => {
+      vi.stubEnv("CLAUDE_CONFIG_DIR", ".cfg");
+      written["/project/.cfg/settings.json"] = userStatusLine;
+
+      await provision();
+
+      expect(installedStatusLine()).toBeUndefined();
+    });
+
+    it.each(["", undefined])("falls back to ~/.claude/settings.json when CLAUDE_CONFIG_DIR is %j", async (value) => {
+      vi.stubEnv("CLAUDE_CONFIG_DIR", value as string);
+      written["/home/tester/.claude/settings.json"] = userStatusLine;
+
+      await provision();
+
+      expect(installedStatusLine()).toBeUndefined();
+    });
+  });
+
   it("ensureContextCollector is a public best-effort seam for adopted tmux sessions", () => {
     const adapter = new ClaudeCodeAdapter({
       tmux: mockTmux(),

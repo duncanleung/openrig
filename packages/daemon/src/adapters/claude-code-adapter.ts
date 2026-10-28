@@ -1103,11 +1103,11 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // A user statusLine in settings.json takes precedence: do not shadow it with the bare
     // collector in settings.local.json. The user's script can run the collector internally —
     // writing an override here would hide the user's display formatting. Check both the
-    // sibling settings.json (project-level) and the global ~/.claude/settings.json.
-    const home = this.fs.homedir ?? process.env["HOME"] ?? "";
+    // sibling settings.json (project-level) and the global settings.json (CLAUDE_CONFIG_DIR, else ~/.claude).
+    const globalSettingsPath = this.globalClaudeSettingsPath(binding.cwd);
     const userStatusLinePaths = [
       nodePath.join(binding.cwd!, ".claude", "settings.json"),
-      ...(home ? [nodePath.join(home, ".claude", "settings.json")] : []),
+      ...(globalSettingsPath ? [globalSettingsPath] : []),
     ];
     for (const candidate of [...new Set(userStatusLinePaths)]) {
       if (!this.fs.exists(candidate)) continue;
@@ -1250,11 +1250,24 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
    * copy is redundant (Claude Code merges hooks from all tiers) and fragile
    * (the project copy can be deleted while the global persists).
    */
+  /**
+   * The global Claude settings.json that Claude reads: `$CLAUDE_CONFIG_DIR/settings.json` when the
+   * daemon selects a config directory, else `~/.claude/settings.json`. The daemon's own
+   * CLAUDE_CONFIG_DIR is the selection ClaudeManagedLaunch uses (startup.ts), and a relative value
+   * resolves against the seat's cwd, as in ClaudeManagedLaunch.configPaths. Returns undefined when
+   * neither a config directory nor a home directory is known.
+   */
+  private globalClaudeSettingsPath(cwd?: string): string | undefined {
+    const configDir = typeof process !== "undefined" ? process.env["CLAUDE_CONFIG_DIR"] : undefined;
+    if (configDir) return nodePath.resolve(cwd ?? ".", configDir, "settings.json");
+    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env["HOME"] : undefined);
+    return home ? nodePath.join(home, ".claude", "settings.json") : undefined;
+  }
+
   private globalSettingsCoversRelayEvents(derivedEvents: ActivityRelayEvent[]): boolean {
     if (derivedEvents.length === 0) return false;
-    const home = this.fs.homedir ?? (typeof process !== "undefined" ? process.env.HOME : undefined);
-    if (!home) return false;
-    const globalSettingsPath = nodePath.join(home, ".claude", "settings.json");
+    const globalSettingsPath = this.globalClaudeSettingsPath();
+    if (!globalSettingsPath) return false;
     const globalSettings = this.readJsonObject(globalSettingsPath);
     const globalHooks = this.readJsonObjectField(globalSettings, "hooks");
     for (const { event } of derivedEvents) {
