@@ -1181,7 +1181,7 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     // cleanly. Mirrors the statusLine dedup in provisionContextCollector — no
     // cwd===home carve-out because settings.json and settings.local.json are
     // distinct tiers regardless of sharing the same .claude/ directory.
-    const globalCoversRelay = deliverable && this.globalSettingsCoversRelayEvents(derivedEvents);
+    const globalCoversRelay = deliverable && this.globalSettingsCoversRelayEvents(derivedEvents, cwd);
 
     const settingsExisted = this.fs.exists(settingsPath);
     // Fail closed: never clobber a settings file we cannot parse — preserve its bytes.
@@ -1264,9 +1264,9 @@ export class ClaudeCodeAdapter implements RuntimeAdapter {
     return home ? nodePath.join(home, ".claude", "settings.json") : undefined;
   }
 
-  private globalSettingsCoversRelayEvents(derivedEvents: ActivityRelayEvent[]): boolean {
+  private globalSettingsCoversRelayEvents(derivedEvents: ActivityRelayEvent[], cwd?: string): boolean {
     if (derivedEvents.length === 0) return false;
-    const globalSettingsPath = this.globalClaudeSettingsPath();
+    const globalSettingsPath = this.globalClaudeSettingsPath(cwd);
     if (!globalSettingsPath) return false;
     const globalSettings = this.readJsonObject(globalSettingsPath);
     const globalHooks = this.readJsonObjectField(globalSettings, "hooks");
