@@ -19,8 +19,10 @@ export type CompactionStrategy =
 
 const DECIMAL_MEGABYTE = 1_000_000;
 const DEFAULT_DENSE_SESSION_TOKENS_PER_MB = 153_000;
-const PREPARE_TARGET_TOKENS = 600_000;
-const CUTOVER_TARGET_TOKENS = 900_000;
+// Smart-zone-aware defaults: LLM quality degrades above ~200K tokens; prepare
+// well before that boundary so sessions spend minimal time in the dumb zone.
+const PREPARE_TARGET_TOKENS = 160_000;
+const CUTOVER_TARGET_TOKENS = 240_000;
 
 export const CONTINUITY_POLICY_DOC = [
   "Transcript bytes are a calibrated proxy, not tokens: measured density on this VM ranged 113K–153K tokens/MB and varies by session shape.",
@@ -40,6 +42,10 @@ export interface ContinuityPolicyMaterializationInput {
   tokensPerMegabyte?: number;
   registeredBySession?: string;
   seatIdentity?: Partial<ContinuitySeatIdentity>;
+  /** Override prepare threshold (tokens). Defaults to PREPARE_TARGET_TOKENS when absent. */
+  prepareTargetTokens?: number;
+  /** Override cutover threshold (tokens). Defaults to CUTOVER_TARGET_TOKENS when absent. */
+  cutoverTargetTokens?: number;
 }
 
 export interface ContinuityWatchdogPlan extends RegisterWatchdogJobInput {
@@ -172,7 +178,7 @@ export function materializeContinuityPolicy(
     );
   }
   const density = input.tokensPerMegabyte ?? DEFAULT_DENSE_SESSION_TOKENS_PER_MB;
-  const prepareThreshold = thresholdBytes(PREPARE_TARGET_TOKENS, density);
+  const prepareThreshold = thresholdBytes(input.prepareTargetTokens ?? PREPARE_TARGET_TOKENS, density);
   const watchedFilePath = input.watchedFilePath?.trim() || null;
   const common = {
     policy: "context-usage-threshold",
@@ -207,7 +213,7 @@ export function materializeContinuityPolicy(
       }],
     };
   }
-  const cutoverThreshold = thresholdBytes(CUTOVER_TARGET_TOKENS, density);
+  const cutoverThreshold = thresholdBytes(input.cutoverTargetTokens ?? CUTOVER_TARGET_TOKENS, density);
   const identity = seatIdentity(input);
   const prepareMessage = `${renderRung1IncumbentNotice(identity)}\n\nIf wiki/ exists in the project root, invoke /wiki-update to preserve session knowledge before handover.\n\n${CONTINUITY_POLICY_DOC}`;
   const cutoverBaton = renderRung2Baton(identity);

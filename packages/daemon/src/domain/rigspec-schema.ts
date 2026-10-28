@@ -63,7 +63,7 @@ const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startu
 const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
   "model", "effort", "advisor", "role", "permission_policy", "cwd", "restore_policy",
-  "compaction_strategy", "mechanic", "startup", "session_source", "starter_ref", "env",
+  "compaction_strategy", "compaction_threshold_tokens", "mechanic", "startup", "session_source", "starter_ref", "env",
   "agent_file", "append_system_prompt_file", "plugin_dirs", "fallback",
 ]);
 const EDGE_KEYS = new Set(["kind", "from", "to"]);
@@ -507,6 +507,12 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
     canonicalContinuityMechanic(member["mechanic"]) === null
   ) {
     errors.push(`${prefix}.mechanic: must be a canonical seat@rig session address`);
+  }
+  if (member["compaction_threshold_tokens"] !== undefined) {
+    const v = member["compaction_threshold_tokens"];
+    if (typeof v !== "number" || !Number.isInteger(v) || v <= 0) {
+      errors.push(`${prefix}.compaction_threshold_tokens: must be a positive integer when present (got ${JSON.stringify(v)})`);
+    }
   }
 
   if (!member["id"] || typeof member["id"] !== "string") {
@@ -1322,6 +1328,9 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
       : undefined,
     mechanic: m["mechanic"] !== undefined
       ? (canonicalContinuityMechanic(m["mechanic"]) ?? undefined)
+      : undefined,
+    compactionThresholdTokens: typeof m["compaction_threshold_tokens"] === "number" && m["compaction_threshold_tokens"] > 0
+      ? m["compaction_threshold_tokens"] as number
       : undefined,
     startup: m["startup"] ? normalizeStartupBlock(m["startup"]) : undefined,
     sessionSource: normalizeSessionSource(m["session_source"]),

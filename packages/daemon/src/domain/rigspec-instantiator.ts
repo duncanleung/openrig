@@ -2585,6 +2585,7 @@ export class PodRigInstantiator {
           runtime: input.member.runtime,
           targetSession: canonicalSessionName,
           sessionId: launchResult.session.id,
+          prepareTargetTokens: configResult.config.compactionThresholdTokens,
         });
       } catch (err) {
         (launchResult.warnings ??= []).push(

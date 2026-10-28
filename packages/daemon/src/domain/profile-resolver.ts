@@ -48,6 +48,8 @@ export interface ResolvedNodeConfig {
   compactionStrategy: string;
   /** Resolved continuity mechanic; absent unless explicitly declared. */
   mechanic: string | undefined;
+  /** Per-seat compaction prepare threshold override in tokens. Absent = daemon default. */
+  compactionThresholdTokens: number | undefined;
   lifecycle: LifecycleDefaults | undefined;
   selectedResources: ResolvedResources;
   startup: StartupBlock;
@@ -404,6 +406,7 @@ export function resolveNodeConfig(ctx: ResolutionContext): ResolutionResult {
       restorePolicy: restorePolicyResult.policy,
       compactionStrategy: compactionResult.strategy,
       mechanic: mechanicResult.mechanic,
+      compactionThresholdTokens: member.compactionThresholdTokens,
       lifecycle,
       selectedResources: selectedResult!,
       startup,
