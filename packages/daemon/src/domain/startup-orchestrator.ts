@@ -5,6 +5,8 @@ import type { SessionRegistry } from "./session-registry.js";
 import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter } from "../adapters/tmux.js";
 import { isClaudeResumeType } from "../adapters/claude-resume.js";
+import { statSync } from "node:fs";
+import type { DeliveryDecayFilter } from "./delivery-decay-filter.js";
 import type { StartupAction, StartupProofSelection, StartupFailureStage } from "./types.js";
 import type {
   RuntimeAdapter, NodeBinding, ResolvedStartupFile,
@@ -167,6 +169,10 @@ export function isSeatSkillsBootstrapLine(file: Pick<ResolvedStartupFile, "path"
   return file.path === SEAT_SKILLS_BOOTSTRAP_BLOCK_ID && file.deliveryHint === "guidance_merge";
 }
 
+// The non-"auto" members of ResolvedStartupFile["deliveryHint"] — what routing
+// and the delivery decay filter key off of once "auto" has been resolved.
+type ConcreteDeliveryHint = ReturnType<typeof resolveConcreteHint>;
+
 export interface StartupInput {
   rigId: string;
   nodeId: string;
@@ -255,6 +261,8 @@ interface StartupOrchestratorDeps {
   readinessSettings?: Pick<SettingsStore, "resolveOne">;
   /** Process observation for a Claude resume launch's own record of its process (#1077). */
   listProcesses?: NativeProcessLister;
+  /** RIG-111: per-file decay decision at delivery. Omitted = deliver everything (no decay). */
+  decayFilter?: DeliveryDecayFilter;
 }
 
 /**
@@ -287,6 +295,7 @@ export class StartupOrchestrator {
   private sessionTransport: SessionTransport;
   private readinessSettings: Pick<SettingsStore, "resolveOne">;
   private listProcesses: NativeProcessLister | undefined;
+  private decayFilter: DeliveryDecayFilter | undefined;
 
   constructor(deps: StartupOrchestratorDeps) {
     if (deps.db !== deps.sessionRegistry.db) throw new Error("StartupOrchestrator: sessionRegistry must share the same db handle");
@@ -299,6 +308,7 @@ export class StartupOrchestrator {
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.readinessSettings = deps.readinessSettings ?? new SettingsStore();
     this.listProcesses = deps.listProcesses;
+    this.decayFilter = deps.decayFilter;
     this.appliedLaunchStore = new AppliedLaunchObservationStore(deps.db);
     this.sessionTransport = new SessionTransport({
       db: deps.db,
@@ -310,6 +320,20 @@ export class StartupOrchestrator {
   }
 
   private readFile: (path: string) => string;
+
+  /** RIG-111: ask the decay filter about one resolved file. A filter or stat failure delivers the file. */
+  private shouldDeliverAfterDecay(f: ResolvedStartupFile, hint: ConcreteDeliveryHint, warnings: string[]): boolean {
+    try {
+      const lastAccess = statSync(f.absolutePath).mtime;
+      const deliver = this.decayFilter!.shouldDeliver({
+        surface: classifyDeliveredSurface(f.path, hint), path: f.path, lastAccess, accessCount: 0,
+      });
+      if (!deliver) warnings.push(`Decay filter ${this.decayFilter!.name} skipped ${f.path}`);
+      return deliver;
+    } catch {
+      return true;
+    }
+  }
 
   /** The process this Claude resume launch started, as the launch itself observes it (#1077): the one
    *  the adapter's readiness check pinned first, else one observed now. A rotation its hook later
@@ -449,6 +473,7 @@ export class StartupOrchestrator {
       const hint = f.deliveryHint === "auto"
         ? resolveConcreteHint(f.path, this.safeReadFile(f.absolutePath), f.orientation)
         : f.deliveryHint;
+      if (this.decayFilter && !this.shouldDeliverAfterDecay(f, hint, warnings)) continue;
       if (hint === "send_text") {
         postLaunchFiles.push(f);
       } else {
@@ -1301,4 +1326,41 @@ export class StartupOrchestrator {
 function isSessionIdentityAction(action: StartupAction): boolean {
   if (action.builtin === "session_identity") return true;
   return action.type === "send_text" && action.value.startsWith("OpenRig session identity:");
+}
+
+// Classifies a *delivered file* into a daemon-side surface label for the
+// node.startup_delivery_manifest event. This taxonomy is independently
+// maintained from MEMORY_SURFACES in scripts/analyze-memory-usage.py, which
+// classifies *transcript tool-use activity* (a different signal) into a
+// finer-grained set of labels. They are related but not identical — keep
+// this mapping in mind when reading the two side-by-side in that script's
+// report, and update both if you rename or split a surface here:
+//   role            -> role-guidance
+//   skill           -> (not tracked by analyze-memory-usage.py)
+//   wiki            -> wiki
+//   adr             -> adr
+//   restore-packet  -> restore-packet
+//   context-pack    -> context-pack
+//   guidance        -> project-guidance + role-guidance (split there)
+//   other           -> (not tracked)
+// analyze-memory-usage.py also tracks auto-memory, seat-lessons,
+// work-observations, queue, and peer-messages, none of which apply to files
+// this daemon delivers at startup.
+const SURFACE_PATTERNS: Array<[string, RegExp]> = [
+  ["role", /role\.md|agent_spec|guidance\/role/i],
+  ["skill", /skills?\//i],
+  ["wiki", /wiki\//i],
+  ["adr", /decisions?\//i],
+  ["restore-packet", /restore/i],
+  ["context-pack", /context-pack/i],
+  ["guidance", /guidance|CLAUDE\.md|openrig-start|openrig-project-guidance/i],
+];
+
+function classifyDeliveredSurface(path: string, hint: string): string {
+  if (hint === "skill_install") return "skill";
+  if (hint === "guidance_merge") return "guidance";
+  for (const [surface, pattern] of SURFACE_PATTERNS) {
+    if (pattern.test(path)) return surface;
+  }
+  return "other";
 }

@@ -130,6 +130,13 @@ Line ranges are approximate and drift; the checks do not depend on them.
 
 - `packages/daemon/src/domain/jev-classifier.ts`, `src/jev-classifier-surface.ts`, `packages/cli/src/commands/ticket-factory-jev.ts`; `ticket-factory.ts` calls `runJevClassify`.
 
+### RIG-83, RIG-101, RIG-116, RIG-117/118, RIG-111, RIG-98 (restored by RIG-146)
+
+- `packages/cli/src/commands/start.ts`: `--last` applies `selectLastRunning` after upstream's stopped-on-purpose rule. `packages/cli/src/commands/ps.ts`, `packages/daemon/src/domain/node-inventory.ts`, `seat-status-service.ts`, `types.ts`: runtime fallback visibility.
+- `packages/daemon/src/adapters/claude-code-adapter.ts`: `reconcileClaudeCompactionBridgeHooks`. `claude-compaction-enforcer.ts`: `stampRestoreRequestSent`. `watchdog-jobs-repository.ts`: `compaction-lifecycle`, `ticket-factory-poll`.
+- `packages/daemon/src/domain/startup-orchestrator.ts`: `shouldDeliverAfterDecay`. `session-transport.ts`: `sendSerializedByName` and the post-Enter gap.
+- Markers: the callsite checks `CF-19` to `CF-24` pin each function to its caller; they fail if either side is dropped again.
+
 ### RIG-77 validation gate (restored by RIG-145)
 
 - `packages/daemon/src/domain/rigspec-schema.ts`: `"validation_gate"` in `RIG_KEYS`; the parse call in `validate`; `validateValidationGateBlock` and `normalizeValidationGate` at the end of the file; `validationGate` in `normalize`.
@@ -159,21 +166,18 @@ reconcile timer (RIG-80), and the `shutdown-manifest` shutdown phase that calls 
 Restored by RIG-145 (same merge): the RIG-77 validation gate (schema, queue wiring, startup injection) and the
 RIG-91 `workspaceRoot` pass-through.
 
-Open, found by RIG-145 from RIG-tag counts in `e02d09c64^1` against `origin/main` (the symbol existed before the
-merge and no longer exists anywhere in the file):
+Restored by RIG-146 (same merge): `rig start --last` applies the shutdown manifest (RIG-83); `formatRuntimeFallback`
+and the fallback fields in `rig ps` and `rig seat status` (RIG-101); compaction restore bridge registration
+(RIG-116); `stampRestoreRequestSent`, the `compaction-lifecycle` and `ticket-factory-poll` policy names, and the
+shorter restore audit prompt (RIG-118, RIG-117); the delivery decay filter hook (RIG-111); the post-Enter gap and
+send FIFO (RIG-98). Details are in the RIG-146 commits.
+
+Open, found while restoring them (both existed in `e02d09c64^1`):
 
 | Missing | Ticket | Check ID |
 |---|---|---|
-| `formatRuntimeFallback` and the fallback marker in `rig ps` (`packages/cli/src/commands/ps.ts`) | RIG-101 | `!CF-19-ps-fallback` |
-| `decayFilter` in the startup orchestrator (`startup-orchestrator.ts`) | RIG-111 | `!CF-20-decay-filter` |
-| `DEFAULT_DELIVERY_GAP_MS` and the per-target send FIFO (`session-transport.ts`) | RIG-98 | `!CF-21-delivery-gap` |
-| `stampRestoreRequestSent` (`claude-compaction-enforcer.ts`) | RIG-118 | `!CF-22-restore-stamp` |
-| `selectLastRunning` for `rig start --last` (`packages/cli/src/commands/start.ts`) | RIG-83 | `!CF-23-start-last` |
-| compaction restore bridge registration in `claude-code-adapter.ts` | RIG-116 | `!CF-24-bridge-register` |
-
-Each has a pre-merge definition (`git show e02d09c64^1:<file>`). The checks assert only that the one symbol is back;
-restoring the feature needs the old code read in full. `runtime-fallback-visibility.test.ts` (6 tests, failing on
-`origin/main` before this change) is consistent with the RIG-101 drop.
+| The `node.startup_delivery_manifest` event: its type in `types.ts` and its emission in `startup-orchestrator.ts` (`deliveredFiles`, `quickHash`, `resolvedHints`). `memory-coverage` reads this event, and 3 tests in `delivery-decay-filter.test.ts` plus `startup-delivery-manifest-pipeline.test.ts` fail without it. | RIG-36 | `!CF-25-delivery-manifest` |
+| `globalSettingsCoversRelayEvents` in `claude-code-adapter.ts` and its call in `reconcileClaudeActivityHooks` (skip the project-level activity-relay hooks when the global `~/.claude/settings.json` already has them). Two tests in `observer-dedup-e2e.test.ts` fail without it. | RIG-3 | `!CF-26-hook-dedup` |
 
 Pre-merge source for all of the above: `git show e02d09c64^1:packages/daemon/src/{startup,index}.ts`.
 
@@ -288,13 +292,17 @@ CF-18-handoffac  | has       | packages/daemon/src/domain/queue-repository.ts | 
 CF-18-flush      | callsite  | packages/daemon/src/domain/queue-repository.ts | flushGateRequests | packages/daemon/src/domain/queue-repository.ts
 CF-18-workspace  | has       | packages/daemon/src/startup.ts | workspaceRoot: \(\) => healthSettingsStore
 
-# Open gaps found by RIG-145 (symbol existed in e02d09c64^1, absent now)
-!CF-19-ps-fallback    | has | packages/cli/src/commands/ps.ts | formatRuntimeFallback
-!CF-20-decay-filter   | has | packages/daemon/src/domain/startup-orchestrator.ts | decayFilter
-!CF-21-delivery-gap   | has | packages/daemon/src/domain/session-transport.ts | DEFAULT_DELIVERY_GAP_MS
-!CF-22-restore-stamp  | has | packages/daemon/src/domain/claude-compaction-enforcer.ts | stampRestoreRequestSent
-!CF-23-start-last     | has | packages/cli/src/commands/start.ts | selectLastRunning
-!CF-24-bridge-register| has | packages/daemon/src/adapters/claude-code-adapter.ts | compaction-restore-bridge
+# Restored by RIG-146 (symbols that existed in e02d09c64^1)
+CF-19-ps-fallback    | callsite | packages/cli/src/commands/ps.ts | formatRuntimeFallback | packages/cli/src/commands/ps.ts
+CF-20-decay-filter   | callsite | packages/daemon/src/domain/startup-orchestrator.ts | shouldDeliverAfterDecay | packages/daemon/src/domain/startup-orchestrator.ts
+CF-21-delivery-gap   | callsite | packages/daemon/src/domain/session-transport.ts | sendSerializedByName | packages/daemon/src/domain/session-transport.ts
+CF-22-restore-stamp  | callsite | packages/daemon/src/domain/claude-compaction-enforcer.ts | stampRestoreRequestSent | packages/daemon/src/domain/claude-compaction-enforcer.ts
+CF-23-start-last     | has | packages/cli/src/commands/start.ts | selectLastRunning\(
+CF-24-bridge-register | callsite | packages/daemon/src/adapters/claude-code-adapter.ts | reconcileClaudeCompactionBridgeHooks | packages/daemon/src/adapters/claude-code-adapter.ts
+
+# Open gaps found by RIG-146 (present in e02d09c64^1, absent now)
+!CF-25-delivery-manifest | has | packages/daemon/src/domain/types.ts | type: "node.startup_delivery_manifest"
+!CF-26-hook-dedup | has | packages/daemon/src/adapters/claude-code-adapter.ts | globalSettingsCoversRelayEvents
 
 # RIG-125 truncation hook
 CF-16-hook       | file      | scripts/hooks/post-tool-truncate.sh

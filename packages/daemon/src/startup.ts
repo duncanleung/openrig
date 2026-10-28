@@ -147,6 +147,7 @@ import { makeWorkflowKeepalivePolicy } from "./domain/policies/workflow-keepaliv
 import { makeIdleGateQitemPolicy } from "./domain/policies/idle-gate-qitem.js";
 import { makeTurnAnomalyPolicy } from "./domain/policies/turn-anomaly.js";
 import { TurnAnomalyDetector } from "./domain/turn-anomaly-detector.js";
+import { makeCompactionLifecyclePolicy, COMPACTION_LIFECYCLE_POLICY_NAME } from "./domain/policies/compaction-lifecycle.js";
 import { makeParkedOwnerConsumerPolicy, makeRigAnchor, PARKED_OWNER_POLICY_NAME } from "./domain/policies/parked-owner-consumer.js";
 import { diagnoseRigParked } from "./domain/parked-query.js";
 import { SpecReviewService } from "./domain/spec-review-service.js";
@@ -890,7 +891,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
 
   const startupOrchestrator = new StartupOrchestrator({ db, sessionRegistry, eventBus, tmuxAdapter, readFile: (p: string) => fs.readFileSync(p, "utf-8") });
   const runtimeSettings = new ContextPackSettingsStore().resolveConfig();
-  const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: replaceFile, listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: nodePath.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs"), autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), claudeHooksManifestPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json"), recordProjection: (targetPath: string, content: string) => projectionManifestStore.record({ targetPath, lastHash: hashContent(content), writtenAt: new Date().toISOString() }) });
+  const claudeAdapter = new ClaudeCodeAdapter({ tmux: tmuxAdapter, seatLaunchEnvironment, claudeManagedLaunch, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), copyFile: replaceFile, listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, readdir: (dir: string) => fs.readdirSync(dir), statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: os.homedir() }, stateDir: OPENRIG_HOME, collectorAssetPath: nodePath.resolve(import.meta.dirname, "../assets/claude-statusline-context.cjs"), autoDriveProviderPrompts: runtimeSettings.recoveryAutoDriveProviderPrompts, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), claudeHooksManifestPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/claude.json"), compactionBridgePath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/compaction-restore-bridge.cjs"), recordProjection: (targetPath: string, content: string) => projectionManifestStore.record({ targetPath, lastHash: hashContent(content), writtenAt: new Date().toISOString() }) });
   const codexAdapter = new CodexRuntimeAdapter({ prepareTeamWorkspace, tmux: tmuxAdapter, seatLaunchEnvironment, fsOps: { readFile: (p: string) => fs.readFileSync(p, "utf-8"), writeFile: (p: string, c: string) => fs.writeFileSync(p, c, "utf-8"), exists: (p: string) => fs.existsSync(p), mkdirp: (p: string) => fs.mkdirSync(p, { recursive: true }), listFiles: (dir: string) => { const r: string[] = []; /** Collect relative file paths recursively. */ function w(d: string, pre: string) { for (const e of fs.readdirSync(d, { withFileTypes: true })) { if (e.isDirectory()) w(nodePath.join(d, e.name), nodePath.join(pre, e.name)); else r.push(pre ? nodePath.join(pre, e.name) : e.name); } } w(dir, ""); return r; }, statMode: (p: string) => fs.statSync(p).mode, chmod: (p: string, m: number) => fs.chmodSync(p, m), homedir: daemonHome }, codexHome: configuredCodexHome, launchPath: process.env.PATH, detectDaemonSupport: codexDaemonSupportProbe(process.env.PATH, undefined, configuredCodexHome), readNetworkDefault: readCodexNetworkDefault, activityRelayPath: nodePath.resolve(import.meta.dirname, "../assets/plugins/openrig-core/hooks/scripts/activity-relay.cjs"), resolveCorePluginDir: () => vendoredCorePluginDir(), resolveCorePluginSelected: (nodeId: string) => Boolean(seatCodexCorePluginDir({ id: nodeId, runtime: "codex" }, db)), resolveHooksEnabled: async () => {
     const { SettingsStore } = await import("./domain/user-settings/settings-store.js");
     return new SettingsStore().resolveOne("runtime.codex.hooks_enabled").value as boolean;
@@ -2207,6 +2208,31 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         makeIdleGateQitemPolicy({ db, seatActivity: seatActivityService }),
         // RIG-79: windowed assistant-turn:user-message anomalies, told to the job target (the delivery recipient).
         makeTurnAnomalyPolicy({ detector: turnAnomalyDetector }),
+        // RIG-118: per-seat watch of one managed compaction attempt (the enforcer registers the
+        // job from onCompactSent). WARN log first; an advisory row to the operator seat only
+        // after a second consecutive missed window, once per attempt and stage.
+        makeCompactionLifecyclePolicy({
+          openrigHome: () => OPENRIG_HOME,
+          warn: (message, notes) => console.warn(`[${COMPACTION_LIFECYCLE_POLICY_NAME}] ${message}`, notes),
+          createAdvisory: async (advisory) => {
+            const operator = new ContextPackSettingsStore().resolveOne("workspace.operator_seat_name").value;
+            if (typeof operator !== "string" || operator.length === 0) {
+              console.warn(`[${COMPACTION_LIFECYCLE_POLICY_NAME}] no workspace.operator_seat_name: advisory ${advisory.dedupeKey} not created`);
+              return;
+            }
+            const open = queueRepoInstance
+              .list({ destinationSession: operator, state: ["pending", "in-progress", "blocked"], limit: 500 })
+              .some((r) => r.body.includes(advisory.dedupeKey));
+            if (open) return;
+            await queueRepoInstance.create({
+              sourceSession: "daemon@kernel",
+              destinationSession: operator,
+              body: advisory.body,
+              priority: "routine",
+              tags: [COMPACTION_LIFECYCLE_POLICY_NAME],
+            });
+          },
+        }),
         // OPR.0.5.6.24 F-14: the parked-owner consumer — the WHOLE shipped
         // parked diagnosis (diagnoseRigParked over the arbitrated oracle +
         // destination-scoped obligations + wake status; the same derivation
@@ -2574,6 +2600,27 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
           terminalPolicies: new TerminalPolicyStore(db),
           resolveOccupantGeneration: (sessionName) =>
             sessionRegistry.currentOccupantGenerationForSession(sessionName),
+          // RIG-118: one lifecycle job per seat, refreshed with each new attempt.
+          onCompactSent: (info) => {
+            watchdogJobsRepoInstance.ensureAutoRegistration({
+              policy: COMPACTION_LIFECYCLE_POLICY_NAME,
+              targetSession: info.sessionName,
+              registeredBySession: "daemon@kernel",
+              intervalSeconds: 60,
+              activeWakeIntervalSeconds: null,
+              scanIntervalSeconds: null,
+              specYaml: [
+                `policy: ${COMPACTION_LIFECYCLE_POLICY_NAME}`,
+                "target:",
+                `  session: ${info.sessionName}`,
+                "context:",
+                `  attemptId: ${JSON.stringify(info.attemptId)}`,
+                `  mapPath: ${JSON.stringify(info.mapPath)}`,
+                `  startedAt: ${JSON.stringify(info.startedAt)}`,
+                "",
+              ].join("\n"),
+            });
+          },
           onPostRestoreComplete: (receipt) => {
             recordManagedWidthReceipt(
               receipt,

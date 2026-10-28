@@ -142,6 +142,12 @@ Routes: `packages/daemon/src/routes/{transport,transcripts,ask,chat,whoami}.ts`
    is retried automatically. Unicode cell widths use the daemon's direct
    `string-width` dependency. See [per-seat terminal delivery](../../reference/seat-delivery.md)
    for activation, persistence, inspection and lifecycle tradeoffs.
+   **Post-Enter gap (RIG-98):** after a successful Enter, a send holds its seat (the
+   delivery lease, or a per-session-name FIFO when no delivery guard is installed)
+   for `OPENRIG_SEND_DELIVERY_GAP_MS` (default 500, cap 10000, `0` disables, invalid
+   values use the default) only when another send to the same target is queued
+   behind it, so the next paste cannot land while the TUI processes the submit.
+   A lone send adds no latency. Back-to-back sends to one seat each take the gap.
 5. Optional `--verify`: capture the last 30 pane lines before the paste and,
    500 ms after Enter, again, leaving out the current input box (the last
    prompt line and its continuation, `verificationTranscript`). A send

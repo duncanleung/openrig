@@ -1747,6 +1747,26 @@ export interface BroadcastResult {
   results: SendResult[];
 }
 
+// RIG-98: after a successful Enter, hold the seat for this long when another send is queued
+// behind it, so the TUI finishes processing the submit before the next paste lands.
+const DEFAULT_DELIVERY_GAP_MS = 500;
+const MAX_DELIVERY_GAP_MS = 10_000;
+
+/** Parse OPENRIG_SEND_DELIVERY_GAP_MS. Invalid input falls back to the default; 0 disables the gap. */
+export function parseDeliveryGapMs(raw: string | number | undefined | null): number {
+  if (raw === undefined || raw === null || (typeof raw === "string" && raw.trim() === "")) return DEFAULT_DELIVERY_GAP_MS;
+  const value = typeof raw === "number" ? raw : Number(raw);
+  if (!Number.isFinite(value) || value < 0) return DEFAULT_DELIVERY_GAP_MS;
+  return Math.min(value, MAX_DELIVERY_GAP_MS);
+}
+
+/** True when the result shows Enter was actually pressed: text and Enter both succeeded.
+ * Excludes failures, refusals, retained (no-write) results and an unverified prompt
+ * answer (which sends no trailing Enter). */
+function enterWasPressed(result: SendResult): boolean {
+  return result.ok && result.outcome !== "retained" && result.promptInteraction !== "unverified";
+}
+
 export interface TransportReadinessChecker {
   checkReady?(binding: NodeBinding, options?: ReadinessOptions): Promise<ReadinessResult>;
 }
@@ -1773,6 +1793,9 @@ interface SessionTransportDeps {
   runtimeAdapters?: Record<string, TransportReadinessChecker>;
   /** transport.verify_input_box, read per verified Claude Code or Codex send. Absent means off. */
   verifyInputBox?: () => boolean;
+  /** RIG-98: post-Enter gap (ms) held only while another send to the same target is queued.
+   * Default: OPENRIG_SEND_DELIVERY_GAP_MS, else 500. 0 disables. Invalid values use the default. */
+  deliveryGapMs?: number;
 }
 
 interface SessionRow { node_id: string; session_name: string; }
@@ -1825,6 +1848,10 @@ export class SessionTransport {
   private runtimeAdapters: Record<string, TransportReadinessChecker>;
   private inFlightReconciliations = new Map<string, Promise<boolean>>();
   private verifyInputBox?: () => boolean;
+  private deliveryGapMs: number;
+  /** RIG-98: per-session-name FIFO for sends with no delivery guard. `pending` counts the
+   * holder plus everyone queued behind it. Entries are removed when pending reaches zero. */
+  private unguardedChains = new Map<string, { tail: Promise<void>; pending: number }>();
 
   constructor(deps: SessionTransportDeps) {
     this.db = deps.db;
@@ -1843,6 +1870,7 @@ export class SessionTransport {
     this.listProcesses = deps.listProcesses;
     this.runtimeAdapters = deps.runtimeAdapters ?? {};
     this.verifyInputBox = deps.verifyInputBox;
+    this.deliveryGapMs = parseDeliveryGapMs(deps.deliveryGapMs ?? process.env.OPENRIG_SEND_DELIVERY_GAP_MS);
     const guard = this.tmuxAdapter.deliveryGuard;
     if (guard && (this.db.prepare("PRAGMA table_info(outbox_entries)").all() as Array<{ name: string }>).some(c => c.name === "guard_delivery")) this.guardedDelivery = new DraftAwareDelivery(this.db, guard,
       (session, text, opts) => this.sendUnguarded(session, text, opts));
@@ -2211,7 +2239,7 @@ export class SessionTransport {
     if (!guard) {
       // No guard, so no recorded delivery to read back: a caller already gone ends the send here.
       if (callerSignal(opts)?.aborted) return callerCancelled(sessionName);
-      const result = await this.sendUnguarded(sessionName, text, opts);
+      const result = await this.sendSerializedByName(sessionName, () => this.sendUnguarded(sessionName, text, opts));
       if (result.ok && result.sent !== false) {
         await this.reconcileStartupReadiness(sessionName).catch(() => {});
       }
@@ -2279,7 +2307,10 @@ export class SessionTransport {
           return this.guardedDelivery.send(sessionName, memberText, memberOpts ?? {},
             memberOpts?.committedOutboxIds ?? [`guard-send-${randomUUID()}`]);
         }
-        return this.sendUnguarded(sessionName, memberText, memberOpts);
+        const sent = await this.sendUnguarded(sessionName, memberText, memberOpts);
+        // RIG-98: keep the lease through the TUI's submit processing when a send is queued behind.
+        if (this.deliveryGapMs > 0 && enterWasPressed(sent) && guard.hasWaiters(sessionName)) await this.sleep(this.deliveryGapMs);
+        return sent;
       }, async target => {
         if (opts?.submitOnly) return { ok: false, sessionName, sent: false, reason: "typing_guard_enabled", error: "Typing guard prevents submit-only; no Enter was sent." };
         // Nothing is retained yet: a caller that went away while this send waited for the lease ends it here.
@@ -2331,6 +2362,31 @@ export class SessionTransport {
           error: `A text write to '${sessionName}' was issued, but its result was lost: ${(error as Error).message}` };
       }
       return { ok: false, sessionName, sent: false, reason: (error as { code?: string }).code ?? "guard_unavailable", error: (error as Error).message };
+    }
+  }
+
+  /** RIG-98: FIFO per session name for targets with no delivery guard. Releases in finally, so a
+   * thrown error or failed result never wedges later sends. No timeout: releasing while the holder
+   * may still be writing would re-create the interleave. A hung tmux call blocks only this name. */
+  private async sendSerializedByName(sessionName: string, run: () => Promise<SendResult>): Promise<SendResult> {
+    const chain = this.unguardedChains.get(sessionName) ?? { tail: Promise.resolve(), pending: 0 };
+    this.unguardedChains.set(sessionName, chain);
+    const queued = chain.pending > 0;
+    chain.pending++;
+    const before = chain.tail;
+    let release!: () => void;
+    const done = new Promise<void>((resolve) => { release = resolve; });
+    chain.tail = before.then(() => done);
+    try {
+      // A lone send starts synchronously, exactly as before; only a queued send waits its turn.
+      if (queued) await before;
+      const result = await run();
+      if (this.deliveryGapMs > 0 && enterWasPressed(result) && chain.pending > 1) await this.sleep(this.deliveryGapMs);
+      return result;
+    } finally {
+      chain.pending--;
+      if (chain.pending === 0 && this.unguardedChains.get(sessionName) === chain) this.unguardedChains.delete(sessionName);
+      release();
     }
   }
 

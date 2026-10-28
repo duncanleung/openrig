@@ -388,7 +388,8 @@ function buildPostCompactCompliancePrompt(postRestoreAuditInstruction?: string |
     "For each item, mark read depth as FULL, PARTIAL, or NOT_READ.",
     "Include the refocusing skill and the topology and work trace sources. Account for the current traces actually delivered during restore; do not rerun Python to duplicate them. If no current trace arrived, report that delivery gap. Read required notes and full sources with the native file-read tool; pointers, compact summaries and truncated extracts do not count as full source reads.",
     "Required items are your restore map's ranked entries above your restore class's tier line (with no map: the instruction files and the packet's restore-instructions.md); the other restore packet files and the session JSONL stay lookup-only.",
-    "Read every required item that is not FULL in full now, without skimming, then report the final read-depth table before continuing.",
+    "Read every required item that is not FULL in full now, without skimming.",
+    "Then report only exceptions, not the full table: one line with the count of required items and how many were FULL on the first check, then one line for each item that was not FULL on the first check, giving its final read depth and the reason. Do not list items that were FULL. A named gap (a missing source or a missing trace delivery) is an exception and must be listed. Then continue.",
   );
   return pieces.join(" ");
 }
@@ -473,6 +474,14 @@ export class ClaudeCompactionEnforcer {
   // retired-generation stage → refuse. Injected resolver (atom-B's currentOccupantTenure by session).
   private readonly pendingStageGeneration = new Map<string, string | null>();
   private readonly resolveOccupantGeneration?: (sessionName: string) => string | null;
+  // RIG-118: told when /compact was sent, so the daemon can watch that one attempt's lifecycle.
+  private readonly onCompactSent?: (info: {
+    sessionName: string;
+    attemptId: string;
+    mapPath: string;
+    occupantGeneration: string | null;
+    startedAt: string;
+  }) => void;
   private readonly onPostRestoreComplete?: (receipt: {
     sessionName: string;
     occupantGeneration: string | null;
@@ -497,6 +506,13 @@ export class ClaudeCompactionEnforcer {
       postCompactSendWaitMs?: number;
       compactSendIdleWaitMs?: number;
       resolveOccupantGeneration?: (sessionName: string) => string | null;
+      onCompactSent?: (info: {
+        sessionName: string;
+        attemptId: string;
+        mapPath: string;
+        occupantGeneration: string | null;
+        startedAt: string;
+      }) => void;
       onPostRestoreComplete?: (receipt: {
         sessionName: string;
         occupantGeneration: string | null;
@@ -519,6 +535,7 @@ export class ClaudeCompactionEnforcer {
     this.compactSendIdleWaitMs = opts?.compactSendIdleWaitMs ?? 1000;
     this.resolveOccupantGeneration = opts?.resolveOccupantGeneration;
     this.onPostRestoreComplete = opts?.onPostRestoreComplete;
+    this.onCompactSent = opts?.onCompactSent;
   }
 
   /**
@@ -695,6 +712,7 @@ export class ClaudeCompactionEnforcer {
         return { triggered: false, reason: "send_failed" };
       }
       this.pendingPostCompactRestore.set(input.sessionName, "compliance_prompt");
+      this.stampRestoreRequestSent(input.sessionName);
       this.restoreCarry.delete(input.sessionName);
       // OPR.0.4.3.14 — surface manual-trigger progress (no-op for auto seats).
       this.advanceManualStage(input.sessionName, "compact-sent", "restore-sent");
@@ -1117,11 +1135,39 @@ export class ClaudeCompactionEnforcer {
       });
     } else this.restoreCarry.delete(input.sessionName);
     attempt.status = "compact-sent";
+    try {
+      this.onCompactSent?.({
+        sessionName: input.sessionName,
+        attemptId: attempt.attemptId,
+        mapPath: attempt.mapPath,
+        occupantGeneration: attempt.occupantGeneration,
+        startedAt: new Date(this.now()).toISOString(),
+      });
+    } catch (err) {
+      console.warn(`[compaction-enforcer] onCompactSent failed for ${input.sessionName}: ${err instanceof Error ? err.message : err}`);
+    }
     this.lastAutoCompactAt.set(input.sessionName, this.now());
     this.triggeredAboveThreshold.add(input.sessionName);
     this.pendingPostCompactRestore.set(input.sessionName, "turn_boundary");
     this.pendingStageGeneration.set(input.sessionName, attempt.occupantGeneration);
     return { ok: true };
+  }
+
+  /**
+   * RIG-118: record on the seat's restore-pending marker that the restore request was sent.
+   * The compaction-lifecycle watchdog reads it as the managed "delivered" signal (deliveredAt
+   * is bridge-only). Best-effort and atomic: a missing or unreadable marker is left alone.
+   */
+  private stampRestoreRequestSent(sessionName: string): void {
+    const file = path.join(this.openrigHome, "compaction", "restore-pending", `${sanitizeSessionKey(sessionName)}.json`);
+    try {
+      const marker = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
+      if (!marker || typeof marker !== "object" || Array.isArray(marker)) return;
+      marker["restoreRequestSentAt"] = new Date(this.now()).toISOString();
+      const tmp = `${file}.${process.pid}.tmp`;
+      fs.writeFileSync(tmp, `${JSON.stringify(marker, null, 2)}\n`, "utf8");
+      fs.renameSync(tmp, file);
+    } catch { /* marker absent or unreadable: nothing to stamp */ }
   }
 
   /** The map the restore request names. With --skip-map: a map the seat completed at the attempt path

@@ -12,8 +12,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { ClaudeCodeAdapter, type ClaudeAdapterFsOps } from "../src/adapters/claude-code-adapter.js";
-import { shellQuote } from "../src/adapters/shell-quote.js";
-import { claudeCompactionBridgePath } from "../src/domain/claude-activity-hooks.js";
+import { claudeCompactionBridgePath, parseManagedClaudeNodeCommand } from "../src/domain/claude-activity-hooks.js";
 import type { NodeBinding } from "../src/domain/runtime-adapter.js";
 import type { ProjectionPlan, ProjectionEntry } from "../src/domain/projection-planner.js";
 import * as fs from "node:fs";
@@ -69,9 +68,14 @@ const activityEntry = (): ProjectionEntry => ({
 
 const settingsPath = () => join(cwd, ".claude", "settings.local.json");
 const settings = () => JSON.parse(readFileSync(settingsPath(), "utf-8")) as { hooks: Record<string, Array<{ matcher?: string; hooks: Array<{ command: string; timeout?: number }> }>> };
-const ownedCmd = () => `node ${shellQuote(claudeCompactionBridgePath(stateDir))}`;
+// Ownership is the managed node command (pinned executable + one quoted path), the same shape the
+// activity relay uses; match it by parsing so the test does not depend on the executable's path.
+const isBridgeCmd = (command: string) => {
+  const parsed = parseManagedClaudeNodeCommand(command);
+  return parsed?.args.length === 1 && parsed.args[0] === claudeCompactionBridgePath(stateDir);
+};
 const bridgeGroups = (s: ReturnType<typeof settings>, event: string) =>
-  (s.hooks[event] ?? []).filter((g) => g.hooks.some((h) => h.command === ownedCmd()));
+  (s.hooks[event] ?? []).filter((g) => g.hooks.some((h) => isBridgeCmd(h.command)));
 
 describe("RIG-116 compaction bridge hook wiring", () => {
   it("wires the bridge for SessionStart(compact), UserPromptSubmit and PostCompact", async () => {

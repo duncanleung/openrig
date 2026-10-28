@@ -2,11 +2,14 @@
 // Tests verify composition (slice-02 /api/up called, never private restore),
 // headless flags, honest reporting, kernel invariant, and idempotency.
 
-import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach, afterEach } from "vitest";
 import http from "node:http";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import { Command } from "commander";
 import { startCommand, lastStopState } from "../src/commands/start.js";
 import { DaemonClient } from "../src/client.js";
+import { shutdownManifestPath } from "../src/shutdown-manifest.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
 
 function mockLifecycleDeps(): LifecycleDeps {
@@ -366,6 +369,37 @@ describe("rig start (OPR.0.3.4.1)", () => {
   });
 
   // T3 detached-then-down
+  // RIG-83: merge e02d09c64 kept upstream's stop-intent selection and lost the call that applies the
+  // shutdown manifest. --last now applies both: stopped-on-purpose rigs stay down, and of the rest only
+  // rigs that were running at the daemon's last stop are restored.
+  describe("--last and the shutdown manifest (RIG-83)", () => {
+    const writeManifest = (content: string) => {
+      mkdirSync(dirname(shutdownManifestPath()), { recursive: true });
+      writeFileSync(shutdownManifestPath(), content);
+    };
+    const manifest = (rigs: Array<{ id: string; name: string }>) =>
+      JSON.stringify({ schema: "openrig.shutdown-manifest/v1", at: new Date().toISOString(), rigs });
+    beforeEach(() => rmSync(shutdownManifestPath(), { force: true }));
+    afterEach(() => rmSync(shutdownManifestPath(), { force: true }));
+
+    it("restores only rigs listed in the manifest, and still keeps a stopped-on-purpose rig down", async () => {
+      setupStoppedRigs([CRASHED, PLAIN_EXITED, DOWNED]);
+      writeManifest(manifest([{ id: "rig-crashed", name: "crashed" }, { id: "rig-downed", name: "downed" }]));
+      const { logs, exitCode } = await runStart("--last", "--json");
+      expect(exitCode).toBeUndefined();
+      expect(appliedRigIds()).toEqual(["rig-crashed"]);
+      expect(jsonResult(logs).keptDown).toEqual([{ rigName: "downed", restoreCommand: "rig start --rigs downed" }]);
+    });
+
+    it("restores every rig that was not stopped on purpose, and says why, when the manifest is corrupt", async () => {
+      setupStoppedRigs([CRASHED, PLAIN_EXITED, DOWNED]);
+      writeManifest("{not json");
+      const { logs } = await runStart("--last");
+      expect(appliedRigIds().sort()).toEqual(["rig-crashed", "rig-plain-exited"]);
+      expect(logs.join("\n")).toContain("No usable shutdown manifest (corrupt)");
+    });
+  });
+
   it("--last keeps a detached rig down once rig down confirmed its sessions are gone", async () => {
     setupStoppedRigs([DETACHED_DOWN_OK]);
     const { logs } = await runStart("--last", "--json");
