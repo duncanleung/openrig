@@ -8,6 +8,7 @@ import type {
   RigServicesWaitTarget,
   RigServicesSurface,
   RigServicesCheckpointHook,
+  ValidationGateConfigSpec,
   ValidationResult,
   WorkspaceSpec,
   WorkspaceRepoSpec,
@@ -56,7 +57,7 @@ const VALID_WORKSPACE_KINDS = new Set<string>(WORKSPACE_KINDS as readonly string
 
 const RIG_KEYS = new Set([
   "version", "name", "summary", "culture_file", "permission_policy", "managed_blocks", "docs",
-  "startup", "services", "workspace", "pods", "edges", "non_interruptive", "env",
+  "startup", "services", "workspace", "pods", "edges", "non_interruptive", "env", "validation_gate",
 ]);
 const POD_KEYS = new Set(["id", "label", "summary", "continuity_policy", "startup", "members", "edges"]);
 const MEMBER_KEYS = new Set([
@@ -200,6 +201,11 @@ export class RigSpecSchema {
       errors.push(...validateManagedBlocks(obj["managed_blocks"]));
     }
 
+    // RIG-77: optional validation_gate block
+    if (obj["validation_gate"] !== undefined && obj["validation_gate"] !== null) {
+      errors.push(...validateValidationGateBlock(obj["validation_gate"] as Record<string, unknown>, "validation_gate"));
+    }
+
     // pods: required array
     if (!obj["pods"] || !Array.isArray(obj["pods"])) {
       errors.push("pods: required non-empty array");
@@ -277,6 +283,7 @@ export class RigSpecSchema {
       startup: raw["startup"] ? normalizeStartupBlock(raw["startup"]) : undefined,
       services: raw["services"] ? normalizeServicesBlock(raw["services"], raw["name"] as string) : undefined,
       workspace: raw["workspace"] ? this.normalizeWorkspace(raw["workspace"]) : undefined,
+      validationGate: raw["validation_gate"] ? normalizeValidationGate(raw["validation_gate"] as Record<string, unknown>) : undefined,
       pods,
       edges,
     };
@@ -1507,4 +1514,40 @@ export class LegacyRigSpecSchema {
       edges,
     };
   }
+}
+
+/** RIG-77 — validate the optional validation_gate block. */
+function validateValidationGateBlock(obj: Record<string, unknown>, prefix: string): string[] {
+  const errors: string[] = [];
+  const mode = obj["mode"];
+  if (mode !== undefined && mode !== "off" && mode !== "warn" && mode !== "enforce") {
+    errors.push(`${prefix}.mode: must be "off", "warn", or "enforce"`);
+  }
+  const validators = obj["validators"];
+  if (validators !== undefined) {
+    if (!Array.isArray(validators) || validators.some((v) => typeof v !== "string")) {
+      errors.push(`${prefix}.validators: must be an array of strings`);
+    }
+  }
+  const implSeats = obj["impl_seats"];
+  if (implSeats !== undefined) {
+    if (!Array.isArray(implSeats) || implSeats.some((s) => typeof s !== "string")) {
+      errors.push(`${prefix}.impl_seats: must be an array of strings`);
+    }
+  }
+  const warnUntil = obj["warn_until"];
+  if (warnUntil !== undefined && typeof warnUntil !== "string") {
+    errors.push(`${prefix}.warn_until: must be an ISO date string`);
+  }
+  return errors;
+}
+
+/** RIG-77 — normalize the YAML validation_gate block into typed ValidationGateConfigSpec. */
+function normalizeValidationGate(raw: Record<string, unknown>): ValidationGateConfigSpec {
+  return {
+    mode: (raw["mode"] as ValidationGateConfigSpec["mode"]) ?? "warn",
+    validators: (raw["validators"] as string[]) ?? [],
+    impl_seats: (raw["impl_seats"] as string[]) ?? [],
+    warn_until: raw["warn_until"] as string | undefined,
+  };
 }
