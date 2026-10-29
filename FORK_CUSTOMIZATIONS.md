@@ -308,4 +308,10 @@ CF-25-record | has | packages/daemon/src/domain/startup-orchestrator.ts | record
 
 # RIG-125 truncation hook
 CF-16-hook       | file      | scripts/hooks/post-tool-truncate.sh
+
+# RIG-TUI-MCP: MCP config view in TUI sidebar (restored by RIG-155)
+CF-27-sections-entry | has | packages/tui/src/sections.ts | name: "mcp"
+CF-27-system-group   | has | packages/tui/src/sections.ts | SYSTEM_SECTIONS.*mcp
+CF-27-sidebar-row    | has | packages/tui/src/state.ts | MCP Servers
+CF-27-cmd-registry   | has | packages/tui/src/commands/registry.ts | name: "mcp"
 ```

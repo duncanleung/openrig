@@ -646,7 +646,8 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
       rows.push({ label: "  Connections", key: "section:connections", action: { type: "jump", section: "connections" } },
         { label: "  Usage", key: "section:usage", action: { type: "jump", section: "usage" } },
         { label: "  Usage · all hosts", key: "section:usage-hosts", action: { type: "jump", section: "usage-hosts" } },
-        { label: "  Cost", key: "section:cost", action: { type: "jump", section: "cost" } });
+        { label: "  Cost", key: "section:cost", action: { type: "jump", section: "cost" } },
+        { label: "  MCP Servers", key: "section:mcp", action: { type: "jump", section: "mcp" } });
       if (state.history?.length) rows.push({ label: "  Back", key: "system:back", action: { type: "back" } });
       continue;
     }
