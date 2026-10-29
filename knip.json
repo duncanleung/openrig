@@ -1,0 +1,25 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  "workspaces": {
+    ".": {
+      "entry": ["scripts/**/*.{js,mjs,ts}", "test/**/*.{js,mjs,ts}"],
+      "project": ["scripts/**/*.{js,mjs,ts}", "test/**/*.{js,mjs,ts}"]
+    },
+    "packages/daemon": {
+      "entry": ["test/**/*.ts"],
+      "project": ["src/**/*.ts", "test/**/*.ts"]
+    },
+    "packages/cli": {
+      "entry": ["src/index.ts", "src/bin-wrapper.ts", "test/**/*.ts"],
+      "project": ["src/**/*.ts", "test/**/*.ts"]
+    },
+    "packages/tui": {
+      "entry": ["src/index.ts", "src/main.ts", "test/**/*.ts"],
+      "project": ["src/**/*.ts", "test/**/*.ts"]
+    },
+    "packages/ui": {
+      "entry": ["src/main.tsx"],
+      "project": ["src/**/*.{ts,tsx}"]
+    }
+  }
+}
