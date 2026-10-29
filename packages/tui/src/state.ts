@@ -622,7 +622,7 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
   const rows: ExplorerRow[] = [];
   for (const section of state.sections) {
     const active = section.name === state.section || section.name === "system" && SYSTEM_SECTIONS.includes(state.section);
-    if (section.name === "config" || section.name === "connections" || section.name === "usage" || section.name === "usage-hosts" || section.name === "cost") continue;
+    if (SYSTEM_SECTIONS.includes(section.name) && section.name !== "system") continue;
     const label =
       section.name === "topology"
         ? "TOPOLOGY"
@@ -646,7 +646,8 @@ export function computeExplorerRows(state: ViewState, snap: FleetSnapshot): Expl
       rows.push({ label: "  Connections", key: "section:connections", action: { type: "jump", section: "connections" } },
         { label: "  Usage", key: "section:usage", action: { type: "jump", section: "usage" } },
         { label: "  Usage · all hosts", key: "section:usage-hosts", action: { type: "jump", section: "usage-hosts" } },
-        { label: "  Cost", key: "section:cost", action: { type: "jump", section: "cost" } });
+        { label: "  Cost", key: "section:cost", action: { type: "jump", section: "cost" } },
+        { label: "  MCP Servers", key: "section:mcp", action: { type: "jump", section: "mcp" } });
       if (state.history?.length) rows.push({ label: "  Back", key: "system:back", action: { type: "back" } });
       continue;
     }
