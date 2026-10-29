@@ -22,6 +22,8 @@ const DEFAULT_DENSE_SESSION_TOKENS_PER_MB = 153_000;
 // Smart-zone-aware defaults: LLM quality degrades above ~200K tokens; prepare
 // well before that boundary so sessions spend minimal time in the dumb zone.
 const PREPARE_TARGET_TOKENS = 160_000;
+// Cutover fires at PREPARE_TO_CUTOVER_RATIO × prepare threshold when only prepare is overridden.
+const PREPARE_TO_CUTOVER_RATIO = 1.5;
 const CUTOVER_TARGET_TOKENS = 240_000;
 
 export const CONTINUITY_POLICY_DOC = [
@@ -215,7 +217,7 @@ export function materializeContinuityPolicy(
   }
   const cutoverThreshold = thresholdBytes(
     input.cutoverTargetTokens ??
-    (input.prepareTargetTokens != null ? Math.round(input.prepareTargetTokens * 1.5) : CUTOVER_TARGET_TOKENS),
+    (input.prepareTargetTokens != null ? Math.round(input.prepareTargetTokens * PREPARE_TO_CUTOVER_RATIO) : CUTOVER_TARGET_TOKENS),
     density,
   );
   const identity = seatIdentity(input);
