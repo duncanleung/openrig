@@ -25,10 +25,14 @@
     "generate-context-packs": "node scripts/generate-context-packs.mjs",
     "generate-context-packs:check": "node scripts/generate-context-packs.mjs --check",
     "gate:substance": "node scripts/check-substance-gate.mjs",
-    "gate": "node scripts/gate-lane.mjs"
+    "gate": "node scripts/gate-lane.mjs",
+    "knip": "knip"
   },
   "engines": {
     "node": "^22 || ^24",
     "npm": ">=10"
+  },
+  "devDependencies": {
+    "knip": "^6.44.0"
   }
 }
