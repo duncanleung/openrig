@@ -98,6 +98,16 @@ describe("RigSpec codec (pod-aware)", () => {
     expect(normalized.pods[0]!.members[0]!.mechanic).toBe("mech@dev-rig");
   });
 
+  it("member compaction_threshold_tokens round-trips through serialize/parse/normalize", () => {
+    const yaml = RigSpecCodec.serialize({
+      ...VALID_RIG,
+      pods: [{ ...VALID_RIG.pods[0]!, members: [{ ...VALID_RIG.pods[0]!.members[0]!, compactionThresholdTokens: 120_000 }] }],
+    });
+    expect(yaml).toContain("compaction_threshold_tokens: 120000");
+    const normalized = RigSpecSchema.normalize(RigSpecCodec.parse(yaml) as Record<string, unknown>);
+    expect(normalized.pods[0]!.members[0]!.compactionThresholdTokens).toBe(120_000);
+  });
+
   it("loads YAML with member effort through validation, normalization, and serializes back", () => {
     const rawYaml = `
 version: "0.2"
