@@ -106,7 +106,7 @@ async function main() {
     .map((line) => JSON.parse(line));
 
   // Fetch PR body for override check
-  const body = JSON.parse(run(`gh pr view ${prNum} ${repoFlag} --json body --jq '.body'`)) ?? "";
+  const body = run(`gh pr view ${prNum} ${repoFlag} --json body --jq '.body'`) ?? "";
 
   // Compute inputs
   const kindCounts = { test: 0, docs: 0, source: 0, config: 0, migration: 0, other: 0 };
