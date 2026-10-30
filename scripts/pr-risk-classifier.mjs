@@ -79,7 +79,7 @@ function classify(inputs) {
 }
 
 function run(cmd) {
-  return execSync(cmd, { encoding: "utf8" }).trim();
+  return execSync(cmd, { encoding: "utf8", timeout: 30_000 }).trim();
 }
 
 async function main() {
@@ -87,6 +87,10 @@ async function main() {
   const prNum = args.find((a) => /^\d+$/.test(a));
   const repoIdx = args.indexOf("--repo");
   const repo = repoIdx !== -1 ? args[repoIdx + 1] : null;
+  if (repo && !/^[\w.-]+\/[\w.-]+$/.test(repo)) {
+    console.error(`[pr-risk-classifier] Invalid --repo format: ${repo} (expected owner/repo)`);
+    process.exit(1);
+  }
   const repoFlag = repo ? `--repo ${repo}` : "";
 
   if (!prNum) {
@@ -143,11 +147,15 @@ async function main() {
 
   // Log to ~/.claude/logs/merge-classifier/classifications.jsonl
   const logDir = `${homedir()}/.claude/logs/merge-classifier`;
-  mkdirSync(logDir, { recursive: true });
-  appendFileSync(
-    `${logDir}/classifications.jsonl`,
-    JSON.stringify({ timestamp: new Date().toISOString(), pr: parseInt(prNum, 10), ...result }) + "\n",
-  );
+  try {
+    mkdirSync(logDir, { recursive: true });
+    appendFileSync(
+      `${logDir}/classifications.jsonl`,
+      JSON.stringify({ timestamp: new Date().toISOString(), pr: parseInt(prNum, 10), ...result }) + "\n",
+    );
+  } catch (logErr) {
+    console.error(`[pr-risk-classifier] Warning: failed to write classification log: ${logErr.message}`);
+  }
 
   console.log(JSON.stringify(result, null, 2));
 }
