@@ -42,13 +42,17 @@ const base = (over: Partial<QueueUpdateInput> = {}): QueueUpdateInput => ({
 });
 
 describe("guardStatePreservingAppend", () => {
-  it("requires --state or a note", () => {
-    const f = guardStatePreservingAppend(base(), false);
+  it("requires --state, a note, or a valid summary", () => {
+    const f = guardStatePreservingAppend(base(), false, false);
     expect(f).toMatchObject({ ok: false, code: "state_or_note_required", meta: undefined });
   });
 
   it("passes a note-only append", () => {
-    expect(guardStatePreservingAppend(base({ transitionNote: "n" }), true)).toBeNull();
+    expect(guardStatePreservingAppend(base({ transitionNote: "n" }), true, false)).toBeNull();
+  });
+
+  it("passes a valid summary alone as a state-preserving append", () => {
+    expect(guardStatePreservingAppend(base({ summary: "s" }), false, true)).toBeNull();
   });
 
   it.each([
@@ -62,16 +66,16 @@ describe("guardStatePreservingAppend", () => {
     ["wakeMaxSeconds", { wakeMaxSeconds: 60 }],
     ["wakeProgressEvidence", { wakeProgressEvidence: {} }],
     ["wakeMessage", { wakeMessage: "m" }],
-    ["summary", { summary: "s" }],
     ["evidenceRef", { evidenceRef: "e" }],
   ] as const)("refuses state-write field %s", (_name, over) => {
-    const f = guardStatePreservingAppend(base({ transitionNote: "n", ...over }), true);
+    const f = guardStatePreservingAppend(base({ transitionNote: "n", ...over }), true, false);
     expect(f?.code).toBe("note_append_fields_not_admitted");
     expect(f?.meta).toBeUndefined();
   });
 
-  it("checks the note before the disallowed fields", () => {
-    const f = guardStatePreservingAppend(base({ summary: "s" }), false);
+  it("checks the state/note/summary check before the disallowed fields", () => {
+    // nothing provided (no state, no note, no valid summary) wins over a disallowed field present
+    const f = guardStatePreservingAppend(base({ evidenceRef: "e" }), false, false);
     expect(f?.code).toBe("state_or_note_required");
   });
 });
@@ -195,49 +199,59 @@ describe("guardInformationalPark", () => {
 });
 
 describe("guardFieldAdmission", () => {
-  it("rejects summary and evidence off a human park, naming both fields in meta", () => {
-    const f = guardFieldAdmission(base({ state: "done", summary: "s", evidenceRef: "e" }), false);
+  it("rejects summary off a non-human-park done close; evidenceRef is allowed on done close", () => {
+    const f = guardFieldAdmission(base({ state: "done", summary: "s", evidenceRef: "e" }), false, true);
     expect(f?.code).toBe("summary_evidence_not_persistable");
-    expect(f?.meta).toEqual({ invalidFields: ["summary", "evidenceRef"] });
-    expect(f?.message).toContain("--summary / --evidence-ref");
+    expect(f?.meta).toEqual({ invalidFields: ["summary"] });
+    expect(f?.message).toContain("--summary");
+  });
+
+  it("allows evidenceRef alone on a done close", () => {
+    expect(guardFieldAdmission(base({ state: "done", evidenceRef: "e" }), false, true)).toBeNull();
+  });
+
+  it("rejects evidenceRef on a non-human-park non-done state", () => {
+    const f = guardFieldAdmission(base({ state: "in-progress", evidenceRef: "e" }), false, false);
+    expect(f?.code).toBe("summary_evidence_not_persistable");
+    expect(f?.meta).toEqual({ invalidFields: ["evidenceRef"] });
   });
 
   it("allows summary and evidence on a human park", () => {
-    expect(guardFieldAdmission(base({ state: "blocked", summary: "s", evidenceRef: "e", blockedOn: "human-d@kernel" }), true)).toBeNull();
+    expect(guardFieldAdmission(base({ state: "blocked", summary: "s", evidenceRef: "e", blockedOn: "human-d@kernel" }), true, false)).toBeNull();
   });
 
   it("rejects closure fields on a state that cannot store them, with an empty meta object", () => {
-    const f = guardFieldAdmission(base({ state: "pending", closureReason: "no-follow-on" }), false);
+    const f = guardFieldAdmission(base({ state: "pending", closureReason: "no-follow-on" }), false, false);
     expect(f?.code).toBe("closure_fields_not_admitted");
     expect(f?.meta).toEqual({});
   });
 
   it.each([
-    ["done", { closureReason: "no-follow-on" }],
-    ["blocked", { closureReason: "blocked_on", closureTarget: "qitem-9" }],
-    ["handed-off", { closureReason: "handed_off_to", closureTarget: "x" }],
-    ["canceled", { closureReason: "superseded", closureTarget: "qitem-9" }],
-  ] as const)("admits the closure form for state %s", (state, over) => {
-    expect(guardFieldAdmission(base({ state, ...over }), false)).toBeNull();
+    ["done", { closureReason: "no-follow-on" }, true],
+    ["blocked", { closureReason: "blocked_on", closureTarget: "qitem-9" }, false],
+    ["handed-off", { closureReason: "handed_off_to", closureTarget: "x" }, false],
+    ["canceled", { closureReason: "superseded", closureTarget: "qitem-9" }, false],
+  ] as const)("admits the closure form for state %s", (state, over, isDoneClose) => {
+    expect(guardFieldAdmission(base({ state, ...over }), false, isDoneClose)).toBeNull();
   });
 
   it("requires a successor for a superseded cancel, with an empty meta object", () => {
-    const f = guardFieldAdmission(base({ state: "canceled", closureReason: "superseded" }), false);
+    const f = guardFieldAdmission(base({ state: "canceled", closureReason: "superseded" }), false, false);
     expect(f?.code).toBe("missing_closure_target");
     expect(f?.meta).toEqual({});
   });
 
   it("rejects blockedOn off a blocked state, with an empty meta object", () => {
-    const f = guardFieldAdmission(base({ state: "pending", blockedOn: "x" }), false);
+    const f = guardFieldAdmission(base({ state: "pending", blockedOn: "x" }), false, false);
     expect(f?.code).toBe("blocked_on_not_admitted");
     expect(f?.meta).toEqual({});
   });
 
   it("keeps the summary, closure, supersede, blocked_on order", () => {
     const all = base({ state: "pending", summary: "s", closureReason: "no-follow-on", blockedOn: "x" });
-    expect(guardFieldAdmission(all, false)?.code).toBe("summary_evidence_not_persistable");
-    expect(guardFieldAdmission({ ...all, summary: undefined }, false)?.code).toBe("closure_fields_not_admitted");
-    expect(guardFieldAdmission({ ...all, summary: undefined, closureReason: undefined }, false)?.code).toBe("blocked_on_not_admitted");
+    expect(guardFieldAdmission(all, false, false)?.code).toBe("summary_evidence_not_persistable");
+    expect(guardFieldAdmission({ ...all, summary: undefined }, false, false)?.code).toBe("closure_fields_not_admitted");
+    expect(guardFieldAdmission({ ...all, summary: undefined, closureReason: undefined }, false, false)?.code).toBe("blocked_on_not_admitted");
   });
 });
 
@@ -314,7 +328,8 @@ describe("QueueRepository.update wiring", () => {
   it("surfaces the append guards", async () => {
     const id = await newRow();
     expect(refusal({ qitemId: id, actorSession: "a@r" }).code).toBe("state_or_note_required");
-    expect(refusal({ qitemId: id, actorSession: "a@r", transitionNote: "n", summary: "s" }).code).toBe("note_append_fields_not_admitted");
+    // evidenceRef is disallowed on state-preserving appends (summary with a note is allowed)
+    expect(refusal({ qitemId: id, actorSession: "a@r", transitionNote: "n", evidenceRef: "e" }).code).toBe("note_append_fields_not_admitted");
   });
 
   it("surfaces the state and wake guards before the reopen and field guards", async () => {
