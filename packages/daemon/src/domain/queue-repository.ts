@@ -2936,45 +2936,6 @@ export class QueueRepository {
     const fieldGuard = guardFieldAdmission(input, isHumanPark, isDoneClose);
     if (fieldGuard) throw new QueueRepositoryError(fieldGuard.code, fieldGuard.message, fieldGuard.meta);
 
-    // SWEEP-a (shape f2576102) — closure/blocked-field COHERENCE, beside the reference
-    // reject above: an incoherent field must never silently persist (worse than a drop —
-    // the COALESCE below would write it). Admits-map, derived from LIVE schema use:
-    //   closure_reason/closure_target → state "done", OR the PARK-RECORD form
-    //     (state "blocked" with closureReason "blocked_on" — the workflow gate/park
-    //     writers' established shape, workflow-runtime.ts:587/1013);
-    //   blocked_on → state "blocked" only.
-    const isParkRecord = input.state === "blocked" && input.closureReason === "blocked_on";
-    // Third live form (found by the neighborhood suites): the transactional handoff
-    // closes its source as state "handed-off" with closureReason "handed_off_to".
-    const isHandoffClose = input.state === "handed-off" && input.closureReason === "handed_off_to";
-    // 0.5.1-53 Atom 2a — FOURTH admitted form: the supersession-cancel. A row corrected by
-    // cancel-and-replace records state=canceled + closureReason=superseded + closureTarget=<successor>,
-    // so superseded is distinguishable from abandoned (a plain cancel keeps closureReason=null).
-    const isSupersedeCancel = input.state === "canceled" && input.closureReason === "superseded";
-    if (input.state !== "done" && !isParkRecord && !isHandoffClose && !isSupersedeCancel && (input.closureReason != null || input.closureTarget != null)) {
-      throw new QueueRepositoryError(
-        "closure_fields_not_admitted",
-        `closure_reason/closure_target persist only on state=done, the blocked park-record form, the handoff close, or the superseded cancel; the '${input.state}' transition cannot store them. Close the item (--state done --closure-reason …) or drop the flags.`,
-        {},
-      );
-    }
-    // A supersession must name WHAT replaced this row — fail LOUD before any write (never a silent
-    // no-op leaving a stale row, the dead-signal class), symmetric with handed_off_to's target rule.
-    if (isSupersedeCancel && !input.closureTarget) {
-      throw new QueueRepositoryError(
-        "missing_closure_target",
-        `closure_reason=superseded requires closure_target (the successor qitem that replaced this row).`,
-        {},
-      );
-    }
-    if (input.blockedOn != null && input.state !== "blocked") {
-      throw new QueueRepositoryError(
-        "blocked_on_not_admitted",
-        `blocked_on persists only on state=blocked; the '${input.state}' transition cannot store it. Park the item (rig queue block --on …) or drop --blocked-on.`,
-        {},
-      );
-    }
-
     const blockerGuard = guardBlocker(input, isHumanPark, effectiveBlockedOn, (id) => this.getById(id), vocab);
     if (blockerGuard) throw new QueueRepositoryError(blockerGuard.code, blockerGuard.message, blockerGuard.meta);
 
