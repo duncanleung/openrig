@@ -43,7 +43,7 @@ budget:
   context_ceiling: 140000
   max_review_rounds: 3
 
-merge_policy: auto-low-risk
+merge_policy: auto-risk-classifier
 
 approval_batching:
   plan_gate: escalate-only

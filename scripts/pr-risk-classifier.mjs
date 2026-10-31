@@ -30,7 +30,7 @@ function fileKind(path) {
 }
 
 function classify(inputs) {
-  const { diffSize, kindCounts, testFileRatio } = inputs;
+  const { diffSize, additions, deletions, kindCounts, testFileRatio } = inputs;
 
   // Trivial: no source or migration changes, small diff (docs/tests/config only)
   if (
@@ -56,6 +56,24 @@ function classify(inputs) {
       reason: [
         `no migrations`,
         `diff ${diffSize} ≤ ${THRESHOLDS.MODERATE_MAX_DIFF}`,
+        `test ratio ${testFileRatio.toFixed(2)} ≥ ${THRESHOLDS.MODERATE_MIN_TEST_RATIO}`,
+        `source files ${kindCounts.source} ≤ ${THRESHOLDS.MODERATE_MAX_SOURCE_FILES}`,
+      ].join("; "),
+    };
+  }
+
+  // Net-deletion refactors: deletions exceed additions with good test coverage.
+  // Raw diffSize overstates risk when most changes are removals (RIG-171).
+  if (
+    kindCounts.migration === 0 &&
+    deletions > additions &&
+    testFileRatio >= THRESHOLDS.MODERATE_MIN_TEST_RATIO &&
+    kindCounts.source <= THRESHOLDS.MODERATE_MAX_SOURCE_FILES
+  ) {
+    return {
+      level: "moderate",
+      reason: [
+        `net-deletion refactor (${additions}+ / ${deletions}-)`,
         `test ratio ${testFileRatio.toFixed(2)} ≥ ${THRESHOLDS.MODERATE_MIN_TEST_RATIO}`,
         `source files ${kindCounts.source} ≤ ${THRESHOLDS.MODERATE_MAX_SOURCE_FILES}`,
       ].join("; "),
