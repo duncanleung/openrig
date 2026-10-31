@@ -50,12 +50,12 @@ export interface QueueGuardBlocker {
 }
 export type QueueGuardBlockerLookup = (qitemId: string) => QueueGuardBlocker | null | undefined;
 
-/** A state-preserving append: only --note (and an optional same --state) is allowed. */
-export function guardStatePreservingAppend(input: QueueUpdateInput, hasNote: boolean): QueueGuardFailure | null {
-  if (input.state === undefined && !hasNote) {
+/** A state-preserving append: only --note, a valid --summary (or both), and an optional same --state, are allowed. */
+export function guardStatePreservingAppend(input: QueueUpdateInput, hasNote: boolean, hasValidSummary: boolean): QueueGuardFailure | null {
+  if (input.state === undefined && !hasNote && !hasValidSummary) {
     return guardFail(
       "state_or_note_required",
-      "queue update requires --state or a non-empty --note; nothing was written",
+      "queue update requires --state, a non-empty --note, or a non-empty --summary; nothing was written",
     );
   }
   const disallowed = input.reopen === true
@@ -68,8 +68,9 @@ export function guardStatePreservingAppend(input: QueueUpdateInput, hasNote: boo
     || input.wakeMaxSeconds != null
     || input.wakeProgressEvidence != null
     || input.wakeMessage != null
-    || input.summary != null
-    || input.evidenceRef != null;
+    || input.evidenceRef != null
+    || (input.state !== undefined && input.summary != null)
+    || (input.summary != null && !hasValidSummary);
   if (disallowed) {
     return guardFail(
       "note_append_fields_not_admitted",
@@ -185,21 +186,22 @@ export function guardInformationalPark(
 }
 
 /** Summary and evidence admission, then closure-field and blocked-on coherence. */
-export function guardFieldAdmission(input: QueueUpdateInput, isHumanPark: boolean): QueueGuardFailure | null {
-  // OPR.0.5.1 slice-51-06 D2 — summary/evidence_ref are persist-able ONLY at a human-seat park
-  // (see the FR-6 note below). Silently ignoring them on any other transition is a data-loss trap
-  // (the operator believes the metadata was saved). HARD-REJECT before ANY UPDATE/log/event so the
-  // caller learns immediately and nothing is half-applied. null/undefined = absent (allowed);
-  // empty string = present (a deliberate value → rejected on a non-park transition).
+export function guardFieldAdmission(input: QueueUpdateInput, isHumanPark: boolean, isDoneClose: boolean): QueueGuardFailure | null {
+  // OPR.0.5.1 slice-51-06 D2 — summary persists ONLY at a human-seat park or on its own (no --state).
+  // evidenceRef persists at a human-seat park or on a done close. Silently ignoring them is a data-loss
+  // trap. HARD-REJECT before ANY UPDATE/log/event.
   if (!isHumanPark) {
     const invalidFields: Array<"summary" | "evidenceRef"> = [];
     if (input.summary != null) invalidFields.push("summary");
-    if (input.evidenceRef != null) invalidFields.push("evidenceRef");
+    if (input.evidenceRef != null && !isDoneClose) invalidFields.push("evidenceRef");
     if (invalidFields.length > 0) {
       const flags = invalidFields.map((f) => (f === "summary" ? "--summary" : "--evidence-ref")).join(" / ");
+      const where = invalidFields.map((f) => f === "summary"
+        ? "summary persists on a human-seat park, or on its own (rig queue update <id> --summary … with no --state)"
+        : "evidenceRef persists on a human-seat park or a done close").join("; ");
       return guardFail(
         "summary_evidence_not_persistable",
-        `${invalidFields.join(" + ")} persist only on a human-seat park (state=blocked on a human seat); the '${input.state}' transition cannot store them. Remove ${flags}, or park the item (rig queue block --on <human-seat> --summary … --evidence-ref …).`,
+        `${where}; the '${input.state}' transition cannot store ${invalidFields.length > 1 ? "them" : "it"}. Remove ${flags}, or use one of those.`,
         { invalidFields },
       );
     }
