@@ -337,7 +337,7 @@ export class WatchdogPolicyEngine {
     const parsed = this.parseSpec(job.specYaml);
     const isContextUsageThreshold = job.policy === "context-usage-threshold";
     const target = watchdogJobTarget(job, parsed.target);
-    const occupantGeneration = isContextUsageThreshold
+    const occupantGeneration = (isContextUsageThreshold || job.policy === "turn-anomaly")
       ? (this.resolveTargetGeneration?.(job.targetSession) ?? null)
       : null;
     let watchedFilePath = job.watchedFilePath;
