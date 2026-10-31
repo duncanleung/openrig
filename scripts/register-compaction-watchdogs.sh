@@ -19,23 +19,24 @@ set -euo pipefail
 RIG="${1:-openrig}"
 REGISTRAR="orch-lead@${RIG}"
 
-# Seat → threshold mapping
+# Seat → threshold mapping (POSIX case — no declare -A, compatible with bash 3.2)
 # Orchestrators compact earlier because their context is ~80% their own thinking
-declare -A THRESHOLDS=(
-  ["orch-lead"]=120000
-  ["orch-advisor"]=120000
-  ["dev-impl"]=160000
-  ["dev-memory"]=160000
-  ["quality-reviewer"]=160000
-)
+SEATS="orch-lead orch-advisor dev-impl dev-memory quality-reviewer"
+
+seat_threshold() {
+  case "$1" in
+    orch-lead|orch-advisor) echo 120000 ;;
+    *)                      echo 160000 ;;
+  esac
+}
 
 echo "Registering compaction watchdogs for rig: $RIG"
 echo "Thresholds: orchestrators=120K, others=160K"
 echo
 
-for seat in "${!THRESHOLDS[@]}"; do
+for seat in $SEATS; do
   session="${seat}@${RIG}"
-  threshold="${THRESHOLDS[$seat]}"
+  threshold=$(seat_threshold "$seat")
   threshold_k=$((threshold / 1000))
 
   echo -n "  ${session} (${threshold_k}K tokens)... "
