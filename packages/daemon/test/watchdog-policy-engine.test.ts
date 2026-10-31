@@ -547,6 +547,35 @@ describe("WatchdogPolicyEngine — fire-time target-generation gate (i-c)", () =
     await makeEngine().evaluate(armReminder("gen-A"));
     expect(deliveryCalls.length).toBe(1);
   });
+
+  it("turn-anomaly job: resolveTargetGeneration result reaches policy as occupantGeneration (RIG-79 wiring)", async () => {
+    liveGenBySession.set("ops@rig", "gen-turn-anomaly-42");
+    let capturedOccupantGeneration: string | null | undefined;
+    const spyPolicy = {
+      name: "turn-anomaly",
+      evaluate: async (pj: { occupantGeneration: string | null }) => {
+        capturedOccupantGeneration = pj.occupantGeneration;
+        return { action: "skip" as const, reason: "no_turn_anomaly" };
+      },
+    };
+    const engine = new WatchdogPolicyEngine({
+      jobsRepo,
+      historyLog: log,
+      eventBus: bus,
+      deliver: async (req) => { deliveryCalls.push(req); return { status: "ok" }; },
+      resolveTargetGeneration: (s) => liveGenBySession.get(s) ?? null,
+      additionalPolicies: [spyPolicy],
+    } as never);
+    const job = jobsRepo.register({
+      policy: "turn-anomaly",
+      specYaml: "policy: turn-anomaly\ntarget:\n  session: ops@rig\ninterval_seconds: 60\n",
+      targetSession: "ops@rig",
+      intervalSeconds: 60,
+      registeredBySession: "ops@kernel",
+    });
+    await engine.evaluate(job);
+    expect(capturedOccupantGeneration).toBe("gen-turn-anomaly-42");
+  });
 });
 
 // ─── OPR.0.5.6.24 F-14 — the two ruled shared-engine effects, pinned ──────────
