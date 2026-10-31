@@ -7,8 +7,8 @@ import os from "node:os";
 import path from "node:path";
 import { createDaemon } from "../src/startup.js";
 import type { AppDeps } from "../src/server.js";
-import type { CmuxTransportFactory } from "../src/terminal/cmux-transport.js";
-import type { ExecFn } from "../src/domain/tmux-adapter.js";
+import type { CmuxTransportFactory } from "../src/adapters/cmux.js";
+import type { ExecFn } from "../src/adapters/tmux.js";
 import type Database from "better-sqlite3";
 
 let db: Database.Database;
