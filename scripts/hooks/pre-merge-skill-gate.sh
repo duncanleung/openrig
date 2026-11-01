@@ -40,13 +40,24 @@ if [[ -z "$REPO" ]]; then
   exit 0
 fi
 
-# Fetch the current PR head SHA.
+# Fetch the current PR head SHA — fail-closed if empty (gate must not pass without a verifiable SHA).
 HEAD_SHA=$(gh pr view "$PR_NUM" --repo "$REPO" --json headRefOid -q .headRefOid 2>/dev/null || true)
+if [[ -z "$HEAD_SHA" ]]; then
+  echo "⛔ SKILL GATE: could not fetch PR #${PR_NUM} head SHA — cannot verify gate approval." >&2
+  echo "   Check that the PR exists and gh is authenticated." >&2
+  exit 2
+fi
 
 # Fetch complete file list using paginated REST API (no 200-file truncation).
+# Fail-closed: an API error must not silently open the gate.
+ALL_FILES=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUM}/files" --jq '.[].filename' 2>/dev/null) || {
+  echo "⛔ SKILL GATE: gh api call failed for PR #${PR_NUM} — cannot verify file list." >&2
+  echo "   Check gh authentication and repo access." >&2
+  exit 2
+}
+
 # A skill file is any .md under a skills/ directory.
-SKILL_FILES=$(gh api --paginate "repos/${REPO}/pulls/${PR_NUM}/files" --jq '.[].filename' 2>/dev/null \
-  | grep -E '(^|/)skills/.*\.md$' || true)
+SKILL_FILES=$(echo "$ALL_FILES" | grep -E '(^|/)skills/.*\.md$' || true)
 
 if [[ -z "$SKILL_FILES" ]]; then
   exit 0  # No skill files — gate not required.
@@ -56,7 +67,7 @@ SKILL_COUNT=$(echo "$SKILL_FILES" | wc -l | tr -d ' ')
 GATE_FILE="$PROJECT_DIR/.ai/status/skill-gate-pr${PR_NUM}.md"
 
 # Bypass: emergency override.
-if [[ -f "$GATE_FILE" ]] && grep -qE 'bypass:' "$GATE_FILE" 2>/dev/null; then
+if [[ -f "$GATE_FILE" ]] && grep -qE '^bypass:' "$GATE_FILE" 2>/dev/null; then
   echo "✅ SKILL GATE: bypass accepted for PR #${PR_NUM} (${SKILL_COUNT} skill file(s))." >&2
   exit 0
 fi
@@ -66,7 +77,7 @@ if [[ ! -f "$GATE_FILE" ]]; then
   echo "   Skill files changed:" >&2
   echo "$SKILL_FILES" | head -5 | sed 's/^/     /' >&2
   echo "   Required: create .ai/status/skill-gate-pr${PR_NUM}.md containing:" >&2
-  echo "     approved-sha: ${HEAD_SHA:-<pr-head-sha>}" >&2
+  echo "     approved-sha: ${HEAD_SHA}" >&2
   echo "     approved: canary-verified  # or another human approval note" >&2
   echo "   Emergency override: add 'bypass: <reason>' instead." >&2
   exit 2
@@ -83,11 +94,11 @@ fi
 APPROVED_SHA=$(grep -E '^approved-sha:' "$GATE_FILE" 2>/dev/null | head -1 | awk '{print $2}' || true)
 if [[ -z "$APPROVED_SHA" ]]; then
   echo "⛔ SKILL GATE: .ai/status/skill-gate-pr${PR_NUM}.md has no 'approved-sha:' line." >&2
-  echo "   Add 'approved-sha: ${HEAD_SHA:-<pr-head-sha>}' to bind the approval to the current commit." >&2
+  echo "   Add 'approved-sha: ${HEAD_SHA}' to bind the approval to the current commit." >&2
   exit 2
 fi
 
-if [[ -n "$HEAD_SHA" && "$APPROVED_SHA" != "$HEAD_SHA" ]]; then
+if [[ "$APPROVED_SHA" != "$HEAD_SHA" ]]; then
   echo "⛔ SKILL GATE: PR #${PR_NUM} head has moved since approval." >&2
   echo "   Approved SHA : $APPROVED_SHA" >&2
   echo "   Current SHA  : $HEAD_SHA" >&2
