@@ -22,6 +22,7 @@ import type {
   ProviderKind,
   ProviderUsageAllowance,
   SeatConfiguredAccount,
+  SeatFallbackEntry,
   UsageAllowanceIdentity,
 } from "./provider-types.js";
 import { USAGE_CLOCK_TOLERANCE_MS } from "./usage-windows.js";
@@ -104,6 +105,8 @@ export interface UsageAcrossHosts extends AggregatedPayload<UsageAllowanceGroup>
   registry: { state: "read" | "absent" | "unreadable"; note?: string };
   /** Each host's configured seat accounts, verbatim; never linked to an allowance. */
   seatAccounts: Array<{ hostId: string; seats: SeatConfiguredAccount[] }>;
+  /** Each host's seats currently on a fallback runtime. Omitted when no host reports any. */
+  seatFallbacks?: Array<{ hostId: string; fallbacks: SeatFallbackEntry[] }>;
   asOf: string;
 }
 
@@ -359,6 +362,20 @@ export const isSeat = record({
   })),
 });
 
+/** A served seat fallback entry with every field the views read, typed as provider-types.ts says. */
+export const isFallbackEntry = record({
+  seatSession: str,
+  rigName: str,
+  state: oneOf("on_fallback", "swap_back_pending"),
+  originalRuntime: nullable(str),
+  currentRuntime: nullable(str),
+  poolKey: nullable(str),
+  enteredAt: nullable(str),
+  expiresAt: nullable(str),
+  swapBack: nullable(oneOf("at_expiry", "manual")),
+  swapBackPending: bool,
+});
+
 /**
  * A host's answer with any string that contains the bearer configured for that host replaced, and any key that
  * contains it dropped, so a host echoing it can't put it in the view, the CLI or the kept refresh record (the same
@@ -434,6 +451,7 @@ interface HostRead {
   status: UsageHostStatus;
   rows: ProviderUsageAllowance[];
   seats: SeatConfiguredAccount[] | null;
+  fallbacks: SeatFallbackEntry[] | null;
 }
 
 async function readHost(host: HostEntry, deps: UsageHostsDeps, now: () => string): Promise<HostRead> {
@@ -450,6 +468,7 @@ async function readHost(host: HostEntry, deps: UsageHostsDeps, now: () => string
       },
       rows: [],
       seats: null,
+      fallbacks: null,
     };
   }
   const timeoutMs = deps.readTimeoutMs ?? USAGE_HOSTS_READ_TIMEOUT_MS;
@@ -459,45 +478,49 @@ async function readHost(host: HostEntry, deps: UsageHostsDeps, now: () => string
   const ok = (usage: HostUsageCoverage, usageReason?: string): UsageHostStatus =>
     ({ hostId, status: "ok", usage, ...(usageReason ? { usageReason } : {}), readAt });
   if (!res.ok) {
-    if (isRedirect(res)) return { status: ok("unavailable", `redirected (HTTP ${res.status}); not followed`), rows: [], seats: null };
-    if (res.tooLarge) return { status: ok("unavailable", res.detail), rows: [], seats: null };
+    if (isRedirect(res)) return { status: ok("unavailable", `redirected (HTTP ${res.status}); not followed`), rows: [], seats: null, fallbacks: null };
+    if (res.tooLarge) return { status: ok("unavailable", res.detail), rows: [], seats: null, fallbacks: null };
     if (res.kind === "http" && (res.status === 401 || res.status === 403)) {
-      return { status: { hostId, status: "auth-failed", error: `HTTP ${res.status}`, usage: "unavailable", usageReason: "not read", readAt: null }, rows: [], seats: null };
+      return { status: { hostId, status: "auth-failed", error: `HTTP ${res.status}`, usage: "unavailable", usageReason: "not read", readAt: null }, rows: [], seats: null, fallbacks: null };
     }
     if (res.kind === "http" && res.status === 404) {
-      return { status: ok("older", "this host has no provider status route (its daemon predates it)"), rows: [], seats: null };
+      return { status: ok("older", "this host has no provider status route (its daemon predates it)"), rows: [], seats: null, fallbacks: null };
     }
     if (res.kind === "http" && res.status === 503) {
-      return { status: ok("unavailable", "the provider service is unavailable on this host"), rows: [], seats: null };
+      return { status: ok("unavailable", "the provider service is unavailable on this host"), rows: [], seats: null, fallbacks: null };
     }
-    return { status: transportFailure(hostId, res, timeoutMs), rows: [], seats: null };
+    return { status: transportFailure(hostId, res, timeoutMs), rows: [], seats: null, fallbacks: null };
   }
   const model = isRecord(res.payload) ? res.payload : {};
   if (Array.isArray(model["usage"])) {
     if (!model["usage"].every(isUsageRow)) {
-      return { status: ok("unavailable", "this host served usage rows in a shape this daemon doesn't recognize"), rows: [], seats: null };
+      return { status: ok("unavailable", "this host served usage rows in a shape this daemon doesn't recognize"), rows: [], seats: null, fallbacks: null };
     }
     const seats = model["seatAccounts"];
     if (seats !== undefined && !(Array.isArray(seats) && seats.every(isSeat))) {
-      return { status: ok("unavailable", "this host served seat accounts in a shape this daemon doesn't recognize"), rows: [], seats: null };
+      return { status: ok("unavailable", "this host served seat accounts in a shape this daemon doesn't recognize"), rows: [], seats: null, fallbacks: null };
     }
-    return { status: ok("served"), rows: model["usage"], seats: (seats as SeatConfiguredAccount[] | undefined) ?? null };
+    const rawFallbacks = model["seatFallbacks"];
+    if (rawFallbacks !== undefined && !(Array.isArray(rawFallbacks) && rawFallbacks.every(isFallbackEntry))) {
+      return { status: ok("unavailable", "this host served seat fallbacks in a shape this daemon doesn't recognize"), rows: [], seats: null, fallbacks: null };
+    }
+    return { status: ok("served"), rows: model["usage"], seats: (seats as SeatConfiguredAccount[] | undefined) ?? null, fallbacks: (rawFallbacks as SeatFallbackEntry[] | undefined) ?? null };
   }
   // No usage key: off, or a daemon that predates usage windows. The host's own settings tell which (the TUI's rule).
   const config = await get("/api/config?view=browser");
-  if (isRedirect(config)) return { status: ok("unavailable", `this host served no usage windows, and its settings read was redirected (HTTP ${(config as { status?: number }).status}); not followed`), rows: [], seats: null };
+  if (isRedirect(config)) return { status: ok("unavailable", `this host served no usage windows, and its settings read was redirected (HTTP ${(config as { status?: number }).status}); not followed`), rows: [], seats: null, fallbacks: null };
   const entries = config.ok && isRecord(config.payload) && Array.isArray(config.payload["entries"])
     ? (config.payload["entries"] as unknown[]).filter(isRecord)
     : null;
   if (!entries) {
-    return { status: ok("unavailable", "this host served no usage windows, and its settings couldn't be read to say whether they are off"), rows: [], seats: null };
+    return { status: ok("unavailable", "this host served no usage windows, and its settings couldn't be read to say whether they are off"), rows: [], seats: null, fallbacks: null };
   }
   const entry = entries.find((e) => e["key"] === "provider.usage_windows");
-  if (!entry) return { status: ok("older", "this host doesn't know the provider.usage_windows setting (its daemon predates usage windows)"), rows: [], seats: null };
-  if (entry["value"] === true) return { status: ok("unavailable", "provider.usage_windows is on there, but it served no usage windows"), rows: [], seats: null };
+  if (!entry) return { status: ok("older", "this host doesn't know the provider.usage_windows setting (its daemon predates usage windows)"), rows: [], seats: null, fallbacks: null };
+  if (entry["value"] === true) return { status: ok("unavailable", "provider.usage_windows is on there, but it served no usage windows"), rows: [], seats: null, fallbacks: null };
   const value = entry["value"];
   const shown = value === null || ["string", "number", "boolean"].includes(typeof value) ? String(value) : "an unrecognized value";
-  return { status: ok("off", `usage windows are off on this host (provider.usage_windows = ${shown})`), rows: [], seats: null };
+  return { status: ok("off", `usage windows are off on this host (provider.usage_windows = ${shown})`), rows: [], seats: null, fallbacks: null };
 }
 
 /** A host's read with anything it throws (reading, checking or scrubbing its answer) kept to that host. The thrown text
@@ -516,6 +539,7 @@ async function readHostContained(host: HostEntry, deps: UsageHostsDeps, now: () 
       },
       rows: [],
       seats: null,
+      fallbacks: null,
     };
   }
 }
@@ -557,6 +581,7 @@ export async function readUsageAcrossHosts(
     },
     rows: [],
     seats: null,
+    fallbacks: null,
   });
 
   const withRefresh = (s: UsageHostStatus): UsageHostStatus => {
@@ -567,6 +592,7 @@ export async function readUsageAcrossHosts(
     status: { hostId: LOCAL_HOST_ID, status: "ok", usage: "served", readAt: asOf },
     rows: local.usage ?? [],
     seats: local.seatAccounts ?? null,
+    fallbacks: local.seatFallbacks ?? null,
   };
   const all = [localRead, ...remotes.map((host, i) => reads[i] ?? late(host))];
   const observations = all.flatMap((r) => r.rows.map((row) => ({ hostId: r.status.hostId, readAt: r.status.readAt!, row })));
@@ -576,6 +602,7 @@ export async function readUsageAcrossHosts(
     skipped: selection.skipped,
     registry: selection.registry,
     seatAccounts: all.filter((r) => r.seats !== null).map((r) => ({ hostId: r.status.hostId, seats: r.seats! })),
+    ...(all.some((r) => r.fallbacks !== null) ? { seatFallbacks: all.filter((r) => r.fallbacks !== null).map((r) => ({ hostId: r.status.hostId, fallbacks: r.fallbacks! })) } : {}),
     asOf,
   };
 }

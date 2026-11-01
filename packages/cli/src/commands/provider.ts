@@ -307,6 +307,9 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     for (const s of (v["seatAccounts"] as Array<Record<string, unknown>>) ?? []) {
       renderSeatAccounts((s["seats"] as Array<Record<string, unknown>>) ?? [], ` on ${s["hostId"]}`);
     }
+    for (const f of (v["seatFallbacks"] as Array<Record<string, unknown>>) ?? []) {
+      renderSeatFallbacks(f["fallbacks"] as Array<Record<string, unknown>>);
+    }
   }
 
   // A host where Claude doesn't apply (no claude, no login, not a subscription login, or no Claude refresh there) is a
