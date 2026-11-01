@@ -133,6 +133,21 @@ export type PrecheckResult = { safe: true } | { safe: false; reasons: PrecheckRe
 
 export type SwitchOutcome = "succeeded" | "rebind_in_progress" | "failed_safely";
 
+/** RIG-167: one row per seat currently on a fallback runtime. Omitted when no seat is on fallback. */
+export interface SeatFallbackEntry {
+  seatSession: string;
+  rigName: string;
+  /** "on_fallback" = actively running on the fallback runtime; "swap_back_pending" = expiry fired, waiting for return swap. */
+  state: "on_fallback" | "swap_back_pending";
+  originalRuntime: string | null;
+  currentRuntime: string | null;
+  poolKey: string | null;
+  enteredAt: string | null;
+  expiresAt: string | null;
+  swapBack: "at_expiry" | "manual" | null;
+  swapBackPending: boolean;
+}
+
 /** The whole four-block read model, emitted by `rig provider status --json`. */
 export interface FourBlockReadModel {
   accounts: ProviderAccount[];
@@ -149,6 +164,8 @@ export interface FourBlockReadModel {
   /** Slice 01 — each live seat's CONFIGURED account and its source, kept apart from observed allowances
    *  (never linked to a usage row). ADDITIVE and present only while `provider.usage_windows` is on. */
   seatAccounts?: SeatConfiguredAccount[];
+  /** RIG-167 — seats currently on a fallback runtime. Omitted when no seat is on fallback. */
+  seatFallbacks?: SeatFallbackEntry[];
 }
 
 /** Slice 01 — where a seat's account configuration comes from. A registry row is metadata: it doesn't prove
