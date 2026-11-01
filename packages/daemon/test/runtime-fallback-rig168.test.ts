@@ -145,5 +145,23 @@ describe("RIG-168 — swap_back lifecycle", () => {
       expect(row.fallback_state).toBe("swap_back_pending");
       db.close();
     });
+
+    it("manual_operator throw path: handover() throw emits runtime_fallback_return_failed (RIG-168 M1)", async () => {
+      const db = createFullTestDb();
+      const eventBus = new EventBus(db);
+      setupNode(db, { state: "swap_back_pending", swapBack: "manual" });
+
+      const handover = vi.fn().mockRejectedValue(new Error("handover network error"));
+      const shs = { handover } as unknown as SeatHandoverService;
+      const svc = new RuntimeFallbackService({ db, eventBus, seatHandoverService: shs });
+
+      const emitted: string[] = [];
+      eventBus.subscribe((e: PersistedEvent) => { emitted.push(e.type); });
+
+      await svc.triggerReverseSwap({ nodeId: "node-a", poolKey: "pool-1" });
+
+      expect(emitted).toContain("seat.runtime_fallback_return_failed");
+      db.close();
+    });
   });
 });

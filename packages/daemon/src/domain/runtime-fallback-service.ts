@@ -204,6 +204,20 @@ export class RuntimeFallbackService {
         }
       } catch (err) {
         this.log(`reverse swap threw for ${seatRef}: ${err instanceof Error ? err.message : String(err)}`);
+        if (trigger === "manual_operator") {
+          try {
+            this.eventBus.emit({
+              type: "seat.runtime_fallback_return_failed",
+              rigId: node.rig_id,
+              nodeId: node.id,
+              logicalId: node.logical_id,
+              poolKey,
+              trigger,
+            });
+          } catch (emitErr) {
+            this.log(`runtime_fallback_return_failed emit error: ${emitErr instanceof Error ? emitErr.message : String(emitErr)}`);
+          }
+        }
       }
     } catch (err) {
       this.log(`reverse swap error for node ${nodeId}: ${err instanceof Error ? err.message : String(err)}`);
