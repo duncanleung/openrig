@@ -26,7 +26,7 @@ import type {
   ProviderSwitchInput,
   ProviderSwitchResult,
 } from "./provider-service.js";
-import type { FourBlockReadModel, PrecheckResult, ProviderSignal } from "./provider-types.js";
+import type { FourBlockReadModel, PrecheckResult, ProviderSignal, SeatFallbackEntry } from "./provider-types.js";
 
 export interface ProviderServiceImplDeps {
   db: Database.Database;
@@ -69,7 +69,7 @@ export class ProviderServiceImpl implements ProviderService {
       }
       return result.signals;
     };
-    const model = collectFourBlockReadModel({
+    const rawModel = collectFourBlockReadModel({
       readCodexAuth: readAuth,
       listSeats,
       collectSignals: () => [
@@ -78,6 +78,9 @@ export class ProviderServiceImpl implements ProviderService {
       ],
       now: () => asOf,
     });
+    // RIG-167: attach seat fallback entries unconditionally (independent of usage_windows).
+    const seatFallbacks = this.listSeatFallbacks();
+    const model: FourBlockReadModel = seatFallbacks.length > 0 ? { ...rawModel, seatFallbacks } : rawModel;
     // Slice 01: memory only. A read never starts a native probe (the wake ladder reads this every tick).
     const usage = this.usageWindowsEnabled() ? this.deps.usageWindows!.windows.project(asOf) : null;
     if (!usage) return model;
@@ -132,6 +135,29 @@ export class ProviderServiceImpl implements ProviderService {
       }
     }
     return seats;
+  }
+
+  private listSeatFallbacks(): SeatFallbackEntry[] {
+    const entries: SeatFallbackEntry[] = [];
+    for (const rig of this.deps.listRigs()) {
+      for (const entry of getNodeInventory(this.deps.db, rig.id)) {
+        if (!entry.canonicalSessionName || !entry.runtimeFallback) continue;
+        const fb = entry.runtimeFallback;
+        entries.push({
+          seatSession: entry.canonicalSessionName,
+          rigName: entry.rigName ?? "",
+          state: fb.state,
+          originalRuntime: fb.originalRuntime,
+          currentRuntime: fb.currentRuntime,
+          poolKey: fb.poolKey,
+          enteredAt: fb.enteredAt,
+          expiresAt: fb.expiresAt,
+          swapBack: fb.swapBack,
+          swapBackPending: fb.swapBackPending,
+        });
+      }
+    }
+    return entries;
   }
 
   async precheck(input: ProviderPrecheckInput): Promise<PrecheckResult> {

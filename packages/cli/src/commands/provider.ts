@@ -123,6 +123,9 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     // prints beside the kept reading.
     if (Array.isArray(m["usage"])) renderUsage(m["usage"] as Array<Record<string, unknown>>);
     if (Array.isArray(m["seatAccounts"])) renderSeatAccounts(m["seatAccounts"] as Array<Record<string, unknown>>);
+    if (Array.isArray(m["seatFallbacks"]) && (m["seatFallbacks"] as unknown[]).length > 0) {
+      renderSeatFallbacks(m["seatFallbacks"] as Array<Record<string, unknown>>);
+    }
   }
 
   // Slice 01 — each seat's configured account and its source (present only while provider.usage_windows is on).
@@ -153,6 +156,19 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       else if (observed?.["windowsSampled"] === false) console.log("    observed: no status-line windows from this seat yet");
       else if (observed?.["note"]) console.log(`    observed: ${observed["note"]}`);
       if (allowance["reason"]) console.log(`    allowance not linked: ${allowance["reason"]}`);
+    }
+  }
+
+  // RIG-167 — seats currently on a fallback runtime. Only rendered when at least one seat is on fallback.
+  function renderSeatFallbacks(rows: Array<Record<string, unknown>>): void {
+    console.log("RUNTIME FALLBACKS");
+    for (const r of rows) {
+      const state = r["state"] as string;
+      const pending = r["swapBackPending"] ? " [return pending]" : "";
+      const policy = r["swapBack"] ? `  swap-back=${r["swapBack"]}` : "";
+      let line = `  ${r["seatSession"]}  ${r["currentRuntime"] ?? "unknown"} (was ${r["originalRuntime"] ?? "unknown"})  pool=${r["poolKey"] ?? "?"} state=${state}${pending}${policy}`;
+      if (r["expiresAt"]) line += `  expires=${r["expiresAt"]}`;
+      console.log(line);
     }
   }
 
