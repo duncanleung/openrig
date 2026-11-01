@@ -1303,7 +1303,6 @@ export class SeatHandoverService {
             fallback_state = NULL,
             fallback_pool_key = NULL,
             fallback_entered_at = NULL,
-            fallback_swap_back = NULL,
             fallback_original_runtime = NULL,
             fallback_expires_at = NULL
           WHERE id = ?

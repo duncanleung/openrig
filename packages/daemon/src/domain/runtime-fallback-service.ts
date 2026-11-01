@@ -183,6 +183,22 @@ export class RuntimeFallbackService {
         });
         if (!result.ok) {
           this.log(`reverse swap failed for ${seatRef}: ${result.message}`);
+          if (trigger === "at_expiry") {
+            this.handleManualSwapBack(node, poolKey);
+          } else {
+            try {
+              this.eventBus.emit({
+                type: "seat.runtime_fallback_return_failed",
+                rigId: node.rig_id,
+                nodeId: node.id,
+                logicalId: node.logical_id,
+                poolKey,
+                trigger,
+              });
+            } catch (emitErr) {
+              this.log(`runtime_fallback_return_failed emit error: ${emitErr instanceof Error ? emitErr.message : String(emitErr)}`);
+            }
+          }
         } else {
           this.log(`reverse swap complete for ${seatRef} → ${node.fallback_original_runtime}`);
         }
