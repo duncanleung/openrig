@@ -1,14 +1,21 @@
 #!/usr/bin/env node
 // Deterministic PR risk classifier. V1 inputs: diff size, FileKind distribution, test-file ratio.
 // See RIG-163. ADR-0008 governs LLM classifiers (jev-classifier.ts); this script is rule-based only.
+// RIG-176: skill-file detection — any PR touching a skills/ .md file forces high + skillFileGate.
 //
 // Usage: node scripts/pr-risk-classifier.mjs <PR_NUMBER> [--repo owner/repo]
-// Output: JSON { level, inputs, reason, override } to stdout.
+// Output: JSON { level, inputs, reason, override, skillFileGate? } to stdout.
+//   skillFileGate: { required: true, skillFiles: string[], sha: string } — present when skill files detected.
+//   The pre-merge-skill-gate.sh hook enforces this gate independently of the risk level.
 // Logs every classification to ~/.claude/logs/merge-classifier/classifications.jsonl.
+//
+// File list: uses gh api --paginate (REST, no 200-file truncation). Falls back to gh pr view --json
+// files if the REST call fails (e.g. no repo name available and not in a git repo).
 
 import { execSync } from "child_process";
 import { mkdirSync, appendFileSync } from "fs";
 import { homedir } from "os";
+import { fileURLToPath } from "url";
 
 // Conservative thresholds. Tune down with calibration data after 50+ PRs.
 const THRESHOLDS = {
@@ -18,8 +25,17 @@ const THRESHOLDS = {
   MODERATE_MAX_SOURCE_FILES: 8,
 };
 
+/**
+ * A skill file is any .md file under a directory named "skills" (at any depth).
+ * This covers skills/, .claude/skills/, skills/_canonical/, and similar structures.
+ * RIG-176: skill-file PRs require a separate mandatory human approval gate.
+ */
+export function isSkillFile(path) {
+  return /(^|\/)skills\//.test(path) && /\.md$/i.test(path);
+}
+
 /** Same regex as jev-classifier.ts fileKind — must stay in sync if that changes. */
-function fileKind(path) {
+export function fileKind(path) {
   const p = path.toLowerCase();
   if (/(^|\/)migrations?\//.test(p)) return "migration";
   if (/(^|\/)(tests?|__tests__)\//.test(p) || /\.(test|spec)\.[a-z0-9]+$/.test(p)) return "test";
@@ -29,7 +45,7 @@ function fileKind(path) {
   return "other";
 }
 
-function classify(inputs) {
+export function classify(inputs) {
   const { diffSize, additions, deletions, kindCounts, testFileRatio } = inputs;
 
   // Trivial: no source or migration changes, small diff (docs/tests/config only)
@@ -116,25 +132,52 @@ async function main() {
     process.exit(1);
   }
 
-  // Fetch PR files (path, additions, deletions)
-  const filesRaw = run(`gh pr view ${prNum} ${repoFlag} --json files --jq '.files[]'`);
-  const files = filesRaw
-    .split("\n")
-    .filter(Boolean)
-    .map((line) => JSON.parse(line));
+  // Resolve repo path for REST API (required for pagination; falls back to gh pr view on error).
+  // RIG-176: uses REST API --paginate to avoid the 200-file GraphQL truncation in gh pr view.
+  let repoPath = repo;
+  if (!repoPath) {
+    try {
+      repoPath = run(`gh repo view --json nameWithOwner -q .nameWithOwner`);
+    } catch {
+      repoPath = null;
+    }
+  }
 
-  // Fetch PR body for override check
-  const body = run(`gh pr view ${prNum} ${repoFlag} --json body --jq '.body'`) ?? "";
+  // Fetch complete PR file list using paginated REST API (no 200-file cap).
+  let files;
+  if (repoPath) {
+    const filesRaw = run(
+      `gh api --paginate "repos/${repoPath}/pulls/${prNum}/files" --jq '.[] | {path: .filename, additions: .additions, deletions: .deletions}'`
+    );
+    files = filesRaw
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  } else {
+    // Fallback: gh pr view (truncates at 200 files; reachable only when repo cannot be resolved).
+    console.error("[pr-risk-classifier] Warning: could not resolve repo; falling back to gh pr view (may truncate at 200 files)");
+    const filesRaw = run(`gh pr view ${prNum} ${repoFlag} --json files --jq '.files[]'`);
+    files = filesRaw
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+  }
 
-  // Compute inputs
+  // Fetch PR body and head SHA.
+  const body = run(`gh pr view ${prNum} ${repoFlag} --json body,headRefOid --jq '[.body, .headRefOid] | @json'`);
+  const [prBody, headSha] = JSON.parse(body ?? "[\"\", \"\"]");
+
+  // Compute inputs and detect skill files (RIG-176).
   const kindCounts = { test: 0, docs: 0, source: 0, config: 0, migration: 0, other: 0 };
   let additions = 0;
   let deletions = 0;
+  const detectedSkillFiles = [];
   for (const f of files) {
     const kind = fileKind(f.path);
     kindCounts[kind] += 1;
     additions += f.additions ?? 0;
     deletions += f.deletions ?? 0;
+    if (isSkillFile(f.path)) detectedSkillFiles.push(f.path);
   }
   const diffSize = additions + deletions;
   const totalFiles = files.length;
@@ -143,8 +186,8 @@ async function main() {
   const inputs = { diffSize, additions, deletions, totalFiles, kindCounts, testFileRatio };
 
   // Check PR description for manual override
-  const overrideMatch = typeof body === "string"
-    ? body.match(/risk_override:\s*(trivial|moderate|high)/i)
+  const overrideMatch = typeof prBody === "string"
+    ? prBody.match(/risk_override:\s*(trivial|moderate|high)/i)
     : null;
 
   let level, reason, override;
@@ -161,7 +204,27 @@ async function main() {
     reason = computed.reason;
   }
 
-  const result = { level, inputs, reason, override };
+  // RIG-176: skill-file gate — force high and attach gate descriptor.
+  // This is separate from the risk level: the gate must be cleared regardless of auto-risk-classifier
+  // outcome (auto-after-advisor cannot bypass it; only a human-approved gate file clears it).
+  let skillFileGate = undefined;
+  if (detectedSkillFiles.length > 0) {
+    if (level !== "high") {
+      level = "high";
+      reason = `skill-file gate: ${detectedSkillFiles.length} skill file(s) changed (${detectedSkillFiles.slice(0, 3).join(", ")}${detectedSkillFiles.length > 3 ? ", …" : ""}); elevated from computed level`;
+    } else {
+      reason = `${reason}; skill-file gate: ${detectedSkillFiles.length} skill file(s) changed`;
+    }
+    skillFileGate = {
+      required: true,
+      skillFiles: detectedSkillFiles,
+      sha: headSha || null,
+    };
+  }
+
+  const result = skillFileGate !== undefined
+    ? { level, inputs, reason, override, skillFileGate }
+    : { level, inputs, reason, override };
 
   // Log to ~/.claude/logs/merge-classifier/classifications.jsonl
   const logDir = `${homedir()}/.claude/logs/merge-classifier`;
@@ -178,7 +241,9 @@ async function main() {
   console.log(JSON.stringify(result, null, 2));
 }
 
-main().catch((err) => {
-  console.error("[pr-risk-classifier] Fatal:", err.message);
-  process.exit(1);
-});
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  main().catch((err) => {
+    console.error("[pr-risk-classifier] Fatal:", err.message);
+    process.exit(1);
+  });
+}

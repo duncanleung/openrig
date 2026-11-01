@@ -1,5 +1,40 @@
 # Hook scripts
 
+## pre-merge-skill-gate.sh (RIG-176)
+
+A project-level `PreToolUse` hook delegate. Blocks `gh pr merge` when the PR touches
+skill files (`.md` files under any `skills/` directory) and no human-approved gate
+file exists for the current PR head SHA.
+
+Called by `~/.claude/hooks/pre-merge-review-gate.sh` after the review-evidence check
+passes. The global hook delegates here when this script exists in the project.
+
+### Gate file
+
+`.ai/status/skill-gate-pr<N>.md` — create with both lines present:
+
+```
+approved-sha: <40-char PR head SHA>
+approved: canary-verified   # or another human approval note
+```
+
+Emergency override: `bypass: <reason>` instead of the two-line form.
+
+### How the gate works
+
+1. Fetches the complete PR file list via `gh api --paginate` (no 200-file truncation).
+2. If no skill files changed, exits 0 immediately.
+3. Checks the gate file: must exist, have `approved:` and `approved-sha:` matching the
+   current head. A SHA mismatch means the PR moved after approval — re-verify and update.
+4. Exits 0 (allowed) or 2 (blocked) accordingly.
+
+### Activate it (automatic)
+
+`~/.claude/hooks/pre-merge-review-gate.sh` already calls this script when it exists in
+the project at `scripts/hooks/pre-merge-skill-gate.sh`. No extra wiring needed.
+
+---
+
 ## post-tool-truncate.sh (RIG-125)
 
 A `PostToolUse` hook. It caps very large tool output before the model sees it, so tool
