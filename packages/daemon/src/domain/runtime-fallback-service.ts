@@ -204,7 +204,9 @@ export class RuntimeFallbackService {
         }
       } catch (err) {
         this.log(`reverse swap threw for ${seatRef}: ${err instanceof Error ? err.message : String(err)}`);
-        if (trigger === "manual_operator") {
+        if (trigger === "at_expiry") {
+          this.handleManualSwapBack(node, poolKey);
+        } else {
           try {
             this.eventBus.emit({
               type: "seat.runtime_fallback_return_failed",
