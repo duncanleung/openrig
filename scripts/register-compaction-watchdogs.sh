@@ -47,7 +47,7 @@ for seat in $SEATS; do
     --interval-seconds 60 \
     --threshold-tokens "$threshold" \
     --registered-by "$REGISTRAR" \
-    --message "Context usage crossed ${threshold_k}K tokens for ${session}. Run /precompact to prepare, then /compact." \
+    --message "Context usage crossed ${threshold_k}K tokens for ${session}. OpenRig managed-compaction will handle preparation and compaction automatically." \
     --json 2>&1) || { echo "FAILED: $result"; continue; }
 
   job_id=$(echo "$result" | python3 -c "import sys,json; print(json.loads(sys.stdin.read()).get('jobId','?'))" 2>/dev/null)
