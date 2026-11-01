@@ -244,6 +244,7 @@ export type RigEvent =
   | { type: "seat.runtime_fallback_entered"; rigId: string; nodeId: string; logicalId: string; fromRuntime: string | null; toRuntime: string; poolKey: string | null; expiresAt: string | null; swapBack: FallbackSwapBack | null }
   | { type: "seat.runtime_fallback_exited"; rigId: string; nodeId: string; logicalId: string; fromRuntime: string | null; toRuntime: string | null; poolKey: string; trigger: "at_expiry" | "manual_operator" }
   | { type: "seat.runtime_fallback_swap_back_pending"; rigId: string; nodeId: string; logicalId: string; poolKey: string; originalRuntime: string | null }
+  | { type: "seat.runtime_fallback_return_failed"; rigId: string; nodeId: string; logicalId: string; poolKey: string; trigger: "at_expiry" | "manual_operator" }
   // Bundle events (cross-rig)
   | { type: "bundle.created"; bundleName: string; bundleVersion: string; archiveHash: string }
   // Teardown events
