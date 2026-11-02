@@ -17,13 +17,27 @@
 set -euo pipefail
 
 INPUT=$(cat)
-COMMAND=$(echo "$INPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('tool_input',{}).get('command','') or d.get('command',''))" 2>/dev/null || echo "")
+COMMAND=$(echo "$INPUT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('tool_input',{}).get('command','') or d.get('command',''))" 2>/dev/null || true)
+if [[ -z "$COMMAND" ]]; then
+  # M2 (RIG-178): parse failure — scan raw input for merge pattern, fail-closed if found.
+  if echo "$INPUT" | grep -qE 'gh[[:space:]]+pr[[:space:]]+merge'; then
+    echo "⛔ PRE-MERGE GATE: could not parse hook input; possible merge detected." >&2
+    echo "   Ensure python3 is available and hook input is valid JSON." >&2
+    exit 2
+  fi
+  exit 0
+fi
 
 if ! echo "$COMMAND" | grep -qE 'gh\s+pr\s+merge'; then
   exit 0
 fi
 
-PR_NUM=$(echo "$COMMAND" | grep -oE '[0-9]+' 2>/dev/null | head -1 || true)
+PR_NUM=$(echo "$COMMAND" \
+  | grep -oE 'gh[[:space:]]+pr[[:space:]]+merge[[:space:]].*' \
+  | tr ' \t' '\n' \
+  | grep -xE '[0-9]+' \
+  | head -1 \
+  || true)
 if [[ -z "$PR_NUM" ]]; then
   echo "⛔ PRE-MERGE GATE: could not extract PR number from command." >&2
   echo "   Use: gh pr merge <N> (explicit number required for review-gate verification)." >&2

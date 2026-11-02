@@ -44,6 +44,46 @@ function writeSkillGate(projectDir, exitCode) {
   );
 }
 
+// ─── M1: PR number extracted from post-merge tokens only ─────────────────────
+
+test("M1: digit in flag value does not become PR number", { skip: SKIP }, () => {
+  const tmp = mkdtempSync(join(tmpdir(), "rg-test-"));
+  try {
+    // Without M1 fix: grep '[0-9]+' finds '42' from 'org-v42/project', not 99 → exit 2 (wrong file)
+    // With M1 fix: post-merge token scan finds '99' (only pure-number token) → exit 0
+    writeReviewFile(tmp, "99", "✅ complete\n");
+    const result = runHook(makeInput("gh pr merge --repo org-v42/project 99"), tmp);
+    assert.equal(result.status, 0, `expected exit 0 (PR 99 identified, not 42 from repo name), got ${result.status}.\nstderr: ${result.stderr}`);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// ─── M2: python3 parse failure → fail-closed on merge pattern ─────────────────
+
+test("M2: parse failure with merge pattern in raw input → exits 2", { skip: SKIP }, () => {
+  const tmp = mkdtempSync(join(tmpdir(), "rg-test-"));
+  try {
+    // Invalid JSON — python3 fails; raw input contains 'gh pr merge'
+    const result = runHook(`invalid-json containing gh pr merge 42`, tmp);
+    assert.equal(result.status, 2, `expected exit 2 (fail-closed on parse failure), got ${result.status}.\nstderr: ${result.stderr}`);
+    assert.match(result.stderr, /could not parse hook input/, "error must mention parse failure");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("M2: parse failure without merge pattern → exits 0 (safe to allow)", { skip: SKIP }, () => {
+  const tmp = mkdtempSync(join(tmpdir(), "rg-test-"));
+  try {
+    // Invalid JSON, no merge pattern — should exit 0 (not a merge command)
+    const result = runHook(`invalid-json containing ls -la`, tmp);
+    assert.equal(result.status, 0, `expected exit 0 (not a merge), got ${result.status}.\nstderr: ${result.stderr}`);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 // ─── D: tool_input.command input format ──────────────────────────────────────
 
 test("D: nested tool_input.command is parsed (happy path → exits 0)", { skip: SKIP }, () => {
@@ -169,6 +209,17 @@ test("✅ complete marker exits 0", { skip: SKIP }, () => {
   try {
     writeReviewFile(tmp, "99", "✅ complete\n");
     const result = runHook(makeInput("gh pr merge 99 --squash"), tmp);
+    assert.equal(result.status, 0, `expected exit 0, got ${result.status}.\nstderr: ${result.stderr}`);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("✅ reviewed marker exits 0", { skip: SKIP }, () => {
+  const tmp = mkdtempSync(join(tmpdir(), "rg-test-"));
+  try {
+    writeReviewFile(tmp, "42", "✅ reviewed\nDetails here.\n");
+    const result = runHook(makeInput("gh pr merge 42"), tmp);
     assert.equal(result.status, 0, `expected exit 0, got ${result.status}.\nstderr: ${result.stderr}`);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
