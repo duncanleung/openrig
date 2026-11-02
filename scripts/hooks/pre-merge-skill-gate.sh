@@ -31,6 +31,12 @@ if [[ -z "$PR_NUM" ]]; then
 fi
 
 # Resolve the repo for the gh api call (required for complete file list).
+# On forks, gh repo view defaults to upstream. Use origin remote first.
+if [[ -z "$REPO" ]]; then
+  REPO=$(git -C "$PROJECT_DIR" remote get-url origin 2>/dev/null \
+    | sed -n 's|.*github\.com[:/]\(.*\)\.git$|\1|p; s|.*github\.com[:/]\(.*\)$|\1|p' \
+    | head -1 || true)
+fi
 if [[ -z "$REPO" ]]; then
   REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)
 fi
