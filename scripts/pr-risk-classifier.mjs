@@ -46,7 +46,7 @@ export function fileKind(path) {
 }
 
 export function classify(inputs) {
-  const { diffSize, additions, deletions, kindCounts, testFileRatio } = inputs;
+  const { diffSize, additions, deletions, kindCounts, testFileRatio, shellSourceFiles = 0 } = inputs;
 
   // Trivial: no source or migration changes, small diff (docs/tests/config only)
   if (
@@ -91,6 +91,25 @@ export function classify(inputs) {
       reason: [
         `net-deletion refactor (${additions}+ / ${deletions}-)`,
         `test ratio ${testFileRatio.toFixed(2)} ≥ ${THRESHOLDS.MODERATE_MIN_TEST_RATIO}`,
+        `source files ${kindCounts.source} ≤ ${THRESHOLDS.MODERATE_MAX_SOURCE_FILES}`,
+      ].join("; "),
+    };
+  }
+
+  // Script-only PRs: shell scripts have no tests in this project, so testFileRatio
+  // is always 0. Small bounded .sh-only changes cap at moderate (RIG-179).
+  if (
+    kindCounts.migration === 0 &&
+    shellSourceFiles > 0 &&
+    shellSourceFiles === kindCounts.source &&
+    diffSize <= THRESHOLDS.MODERATE_MAX_DIFF &&
+    kindCounts.source <= THRESHOLDS.MODERATE_MAX_SOURCE_FILES
+  ) {
+    return {
+      level: "moderate",
+      reason: [
+        `script-only PR (${kindCounts.source} .sh file(s), no test-ratio requirement)`,
+        `diff ${diffSize} ≤ ${THRESHOLDS.MODERATE_MAX_DIFF}`,
         `source files ${kindCounts.source} ≤ ${THRESHOLDS.MODERATE_MAX_SOURCE_FILES}`,
       ].join("; "),
     };
@@ -171,6 +190,7 @@ async function main() {
   const kindCounts = { test: 0, docs: 0, source: 0, config: 0, migration: 0, other: 0 };
   let additions = 0;
   let deletions = 0;
+  let shellSourceFiles = 0;
   const detectedSkillFiles = [];
   for (const f of files) {
     const kind = fileKind(f.path);
@@ -178,12 +198,13 @@ async function main() {
     additions += f.additions ?? 0;
     deletions += f.deletions ?? 0;
     if (isSkillFile(f.path)) detectedSkillFiles.push(f.path);
+    if (kind === "source" && /\.sh$/i.test(f.path)) shellSourceFiles += 1;
   }
   const diffSize = additions + deletions;
   const totalFiles = files.length;
   const testFileRatio = totalFiles === 0 ? 0 : Math.min(1, kindCounts.test / totalFiles);
 
-  const inputs = { diffSize, additions, deletions, totalFiles, kindCounts, testFileRatio };
+  const inputs = { diffSize, additions, deletions, totalFiles, kindCounts, testFileRatio, shellSourceFiles };
 
   // Check PR description for manual override
   const overrideMatch = typeof prBody === "string"
