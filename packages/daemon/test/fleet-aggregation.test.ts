@@ -10,6 +10,7 @@ import { digestEscalationCountSchema } from "../src/db/migrations/101_digest_esc
 import { digestSessionTimestampsSchema } from "../src/db/migrations/102_digest_session_timestamps.js";
 import { digestSkillInvocationsSchema } from "../src/db/migrations/103_digest_skill_invocations.js";
 import { digestStallPatternsSchema } from "../src/db/migrations/108_session_digest_stall_patterns.js";
+import { reviewSuppressRulesSchema } from "../src/db/migrations/109_review_suppress_rules.js";
 import {
   FleetStore,
   UNATTRIBUTED,
@@ -27,7 +28,7 @@ function freshDb(): Database {
   for (const m of [
     reviewRunsSchema, reviewFindingsSchema, sessionDigestsSchema, dailyTokenSnapshotsSchema,
     digestTokenUsageSchema, digestEscalationCountSchema, digestSessionTimestampsSchema,
-    digestSkillInvocationsSchema, digestStallPatternsSchema,
+    digestSkillInvocationsSchema, digestStallPatternsSchema, reviewSuppressRulesSchema,
   ]) db.exec(m.sql);
   return db;
 }
@@ -300,5 +301,129 @@ describe("renderFleetDashboard", () => {
   it("escapes filter values in the header", () => {
     const s = new FleetStore(freshDb()).summary();
     expect(renderFleetDashboard(s, { filters: { rig: `"><img src=x>` } })).not.toContain("<img");
+  });
+});
+
+describe("RIG-9 suppress-rules routes", () => {
+  let db: Database;
+  let store: FleetStore;
+  let app: Hono;
+  beforeEach(() => {
+    db = freshDb();
+    store = new FleetStore(db);
+    app = new Hono();
+    app.route("/api/fleet", fleetStoreRoutes({ db: () => db }));
+  });
+  const get = (p: string) => app.request(`/api/fleet${p}`);
+  const post = (p: string, body: unknown) =>
+    app.request(`/api/fleet${p}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const patch = (p: string, body?: unknown) =>
+    app.request(`/api/fleet${p}`, {
+      method: "PATCH",
+      headers: body !== undefined ? { "content-type": "application/json" } : {},
+      body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+
+  it("GET /suppress-rules returns empty list with no rules", async () => {
+    const res = await get("/suppress-rules");
+    expect(res.status).toBe(200);
+    const body = await res.json() as { ok: boolean; rules: unknown[] };
+    expect(body.ok).toBe(true);
+    expect(body.rules).toEqual([]);
+  });
+
+  it("POST /suppress-rules creates a rule and GET returns it", async () => {
+    const res = await post("/suppress-rules", { repo: "owner/repo", category: "style", reason: "too noisy", status: "active" });
+    expect(res.status).toBe(201);
+    const body = await res.json() as { ok: boolean; rule: { id: number; repo: string; status: string } };
+    expect(body.ok).toBe(true);
+    expect(body.rule.repo).toBe("owner/repo");
+    expect(body.rule.status).toBe("active");
+
+    const listRes = await get("/suppress-rules?repo=owner/repo");
+    const list = await listRes.json() as { ok: boolean; rules: Array<{ id: number }> };
+    expect(list.rules).toHaveLength(1);
+    expect(list.rules[0]!.id).toBe(body.rule.id);
+  });
+
+  it("POST /suppress-rules rejects missing required fields", async () => {
+    const noRepo = await post("/suppress-rules", { reason: "x", category: "style" });
+    expect(noRepo.status).toBe(400);
+    const noReason = await post("/suppress-rules", { repo: "r/r", category: "style" });
+    expect(noReason.status).toBe(400);
+    const noMatcher = await post("/suppress-rules", { repo: "r/r", reason: "x", status: "active" });
+    expect(noMatcher.status).toBe(400);
+  });
+
+  it("PATCH /suppress-rules/:id/retire retires a rule", async () => {
+    const rule = store.createSuppressRule({ repo: "r/r", category: "style", reason: "noisy", status: "active" });
+    const res = await patch(`/suppress-rules/${rule.id}/retire`);
+    expect(res.status).toBe(200);
+    const rules = store.listSuppressRules({ repo: "r/r" });
+    expect(rules[0]!.status).toBe("retired");
+  });
+
+  it("PATCH /suppress-rules/:id/retire returns 404 for unknown id", async () => {
+    const res = await patch("/suppress-rules/9999/retire");
+    expect(res.status).toBe(404);
+  });
+
+  it("PATCH /reviews/:traceId/findings/:findingId/action sets user action", async () => {
+    const traceId = "trace-action-1";
+    store.upsertReviewRun(
+      { traceId, prNumber: 1, repo: "r/r", branch: "b", ticket: null, headSha: "sha", mode: null, validationMode: null, modelReview: null, modelValidator: null, bundleSizeChars: null, mustFix: 1, suggestion: 0, dismissed: 0, deferred: 0, escalated: 0, crossAgreed: 0, crossClaudeOnly: 0, crossCodexOnly: 0, metricsJson: "{}", rigName: "atlas", seatName: "reviewer", startedAt: null, completedAt: null, durationSeconds: null, logDir: null, sourceHash: null, parserVersion: null },
+      [{ runTraceId: traceId, findingId: "f-1", file: "src/a.ts", lines: null, category: "style", hunterKey: null, stack: null, score: 1, verdict: "suggestion", hasFixSpec: null, descriptionPrefix: "too verbose", descriptionHash: null }],
+    );
+    const res = await patch(`/reviews/${traceId}/findings/f-1/action`, { action: "dismissed" });
+    expect(res.status).toBe(200);
+    const findings = store.getReviewFindings(traceId);
+    expect(findings[0]!.user_action).toBe("dismissed");
+  });
+
+  it("PATCH /reviews/:traceId/findings/:findingId/action returns 404 for unknown finding", async () => {
+    const res = await patch("/reviews/missing/findings/none/action", { action: "dismissed" });
+    expect(res.status).toBe(404);
+  });
+
+  it("GET /reviews/:traceId/findings returns shadowSuppressed array in response", async () => {
+    const traceId = "trace-shadow-1";
+    store.upsertReviewRun(
+      { traceId, prNumber: 7, repo: "myorg/myrepo", branch: "b", ticket: null, headSha: "sha", mode: null, validationMode: null, modelReview: null, modelValidator: null, bundleSizeChars: null, mustFix: 0, suggestion: 1, dismissed: 0, deferred: 0, escalated: 0, crossAgreed: 0, crossClaudeOnly: 0, crossCodexOnly: 0, metricsJson: "{}", rigName: "atlas", seatName: "reviewer", startedAt: null, completedAt: null, durationSeconds: null, logDir: null, sourceHash: null, parserVersion: null },
+      [{ runTraceId: traceId, findingId: "f-style", file: "src/a.ts", lines: null, category: "style", hunterKey: null, stack: null, score: 1, verdict: "suggestion", hasFixSpec: null, descriptionPrefix: null, descriptionHash: null }],
+    );
+    store.createSuppressRule({ repo: "myorg/myrepo", category: "style", reason: "style is noisy", status: "active" });
+    const res = await get(`/reviews/${traceId}/findings`);
+    expect(res.status).toBe(200);
+    const body = await res.json() as { ok: boolean; findings: unknown[]; shadowSuppressed: Array<{ findingId: string; ruleId: number }> };
+    expect(body.ok).toBe(true);
+    expect(body.findings).toHaveLength(1);
+    expect(body.shadowSuppressed).toHaveLength(1);
+    expect(body.shadowSuppressed[0]!.findingId).toBe("f-style");
+  });
+
+  it("GET /reviews/:traceId/findings never suppresses must_fix in shadow mode", async () => {
+    const traceId = "trace-shadow-mustfix";
+    store.upsertReviewRun(
+      { traceId, prNumber: 8, repo: "myorg/myrepo", branch: "b", ticket: null, headSha: "sha", mode: null, validationMode: null, modelReview: null, modelValidator: null, bundleSizeChars: null, mustFix: 1, suggestion: 0, dismissed: 0, deferred: 0, escalated: 0, crossAgreed: 0, crossClaudeOnly: 0, crossCodexOnly: 0, metricsJson: "{}", rigName: "atlas", seatName: "reviewer", startedAt: null, completedAt: null, durationSeconds: null, logDir: null, sourceHash: null, parserVersion: null },
+      [{ runTraceId: traceId, findingId: "f-mf", file: "src/b.ts", lines: null, category: "style", hunterKey: null, stack: null, score: 5, verdict: "must_fix", hasFixSpec: null, descriptionPrefix: null, descriptionHash: null }],
+    );
+    store.createSuppressRule({ repo: "myorg/myrepo", category: "style", reason: "style noisy", status: "active" });
+    const res = await get(`/reviews/${traceId}/findings`);
+    const body = await res.json() as { ok: boolean; shadowSuppressed: unknown[] };
+    expect(body.shadowSuppressed).toHaveLength(0);
+  });
+
+  it("normalizeFinding computes SHA-256 from description field", async () => {
+    const traceId = "trace-hash-compat";
+    const createRes = await post("/reviews", {
+      run: { traceId, prNumber: 2, repo: "r/r", branch: "feat/x", headSha: "aabbcc", mustFix: 0, suggestion: 1, dismissed: 0, metricsJson: "{}" },
+      findings: [
+        { findingId: "fh-1", description: "use const instead of let", file: "src/a.ts", category: "style", verdict: "suggestion", score: 1 },
+      ],
+    });
+    expect([200, 201]).toContain(createRes.status);
+    const findings = store.getReviewFindings(traceId);
+    expect(findings).toHaveLength(1);
+    expect(findings[0]!.description_hash).toMatch(/^[0-9a-f]{64}$/);
   });
 });

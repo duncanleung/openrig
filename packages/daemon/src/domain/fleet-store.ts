@@ -170,6 +170,8 @@ export interface ReviewFindingRow {
   score: number | null;
   verdict: string | null;
   description_prefix: string | null;
+  description_hash: string | null;
+  user_action: string | null;
 }
 
 export interface SnapshotRow {
@@ -662,11 +664,21 @@ export class FleetStore {
   getReviewFindings(traceId: string): ReviewFindingRow[] {
     return this.db.prepare(`
       SELECT id, run_trace_id, finding_id, file, lines, category,
-             hunter_key, stack, score, verdict, description_prefix
+             hunter_key, stack, score, verdict, description_prefix,
+             description_hash, user_action
       FROM review_findings
       WHERE run_trace_id = ?
       ORDER BY score DESC
     `).all(traceId) as ReviewFindingRow[];
+  }
+
+  /** Repo and PR number for a run — used to scope suppress rules. Returns null when the run does not exist. */
+  getRunMeta(traceId: string): { repo: string | null; prNumber: number | null } | null {
+    const row = this.db.prepare(
+      "SELECT repo, pr_number FROM review_runs WHERE trace_id = ? LIMIT 1",
+    ).get(traceId) as { repo: string | null; pr_number: number | null } | undefined;
+    if (!row) return null;
+    return { repo: row.repo, prNumber: row.pr_number };
   }
 
   // ── RIG-9: review finding user actions and suppress rules ─────────────────
