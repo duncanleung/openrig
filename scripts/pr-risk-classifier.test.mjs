@@ -84,6 +84,7 @@ function inputs(overrides = {}) {
     totalFiles: 1,
     kindCounts: { test: 0, docs: 0, source: 0, config: 0, migration: 0, other: 0 },
     testFileRatio: 0,
+    shellSourceFiles: 0,
     ...overrides,
   };
 }
@@ -136,6 +137,74 @@ test("classify — high: large diff", () => {
     totalFiles: 4,
     kindCounts: { test: 1, docs: 0, source: 3, config: 0, migration: 0, other: 0 },
     testFileRatio: 0.25,
+  }));
+  assert.equal(result.level, "high");
+});
+
+// ─── classify — script-only moderate branch (RIG-179) ───────────────────────
+
+test("classify — moderate: script-only small .sh PR (no test-ratio requirement)", () => {
+  const result = classify(inputs({
+    diffSize: 21,
+    additions: 11,
+    deletions: 10,
+    totalFiles: 1,
+    kindCounts: { test: 0, docs: 0, source: 1, config: 0, migration: 0, other: 0 },
+    testFileRatio: 0,
+    shellSourceFiles: 1,
+  }));
+  assert.equal(result.level, "moderate");
+  assert.match(result.reason, /script-only/);
+});
+
+test("classify — high: mixed shell + TypeScript source (script-only cap does not apply)", () => {
+  const result = classify(inputs({
+    diffSize: 100,
+    additions: 60,
+    deletions: 40,
+    totalFiles: 3,
+    kindCounts: { test: 0, docs: 0, source: 2, config: 0, migration: 0, other: 0 },
+    testFileRatio: 0,
+    shellSourceFiles: 1,
+  }));
+  assert.equal(result.level, "high");
+});
+
+test("classify — high: oversized shell PR (diff exceeds MODERATE_MAX_DIFF)", () => {
+  const result = classify(inputs({
+    diffSize: 400,
+    additions: 400,
+    deletions: 0,
+    totalFiles: 5,
+    kindCounts: { test: 0, docs: 0, source: 5, config: 0, migration: 0, other: 0 },
+    testFileRatio: 0,
+    shellSourceFiles: 5,
+  }));
+  assert.equal(result.level, "high");
+});
+
+test("classify — high: shell PR exceeds MODERATE_MAX_SOURCE_FILES (source-count ceiling)", () => {
+  const result = classify(inputs({
+    diffSize: 100,
+    additions: 100,
+    deletions: 0,
+    totalFiles: 9,
+    kindCounts: { test: 0, docs: 0, source: 9, config: 0, migration: 0, other: 0 },
+    testFileRatio: 0,
+    shellSourceFiles: 9,
+  }));
+  assert.equal(result.level, "high");
+});
+
+test("classify — high: migration present in shell-only PR (migration precedence preserved)", () => {
+  const result = classify(inputs({
+    diffSize: 50,
+    additions: 40,
+    deletions: 10,
+    totalFiles: 2,
+    kindCounts: { test: 0, docs: 0, source: 1, config: 0, migration: 1, other: 0 },
+    testFileRatio: 0,
+    shellSourceFiles: 1,
   }));
   assert.equal(result.level, "high");
 });
