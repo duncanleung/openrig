@@ -404,11 +404,16 @@ export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
     if (action !== null && !isUserAction(action)) {
       return c.json({ ok: false, code: "invalid_field", error: `action must be one of: ${["accepted", "dismissed", "fixed-before-merge", "deferred"].join(", ")}, or null.` }, 400);
     }
-    const updated = store().setUserAction(traceId, findingId, action ?? null);
-    if (!updated) {
-      return c.json({ ok: false, code: "not_found", error: "Finding not found." }, 404);
+    try {
+      const updated = store().setUserAction(traceId, findingId, action ?? null);
+      if (!updated) {
+        return c.json({ ok: false, code: "not_found", error: "Finding not found." }, 404);
+      }
+      return c.json({ ok: true });
+    } catch (err) {
+      console.error("[fleet-store] PATCH /reviews/:traceId/findings/:findingId/action error:", err instanceof Error ? err.message : String(err));
+      return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
     }
-    return c.json({ ok: true });
   });
 
   writeApp.post("/suppress-rules", async (c) => {
@@ -626,9 +631,6 @@ export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
             ruleId: s.ruleId,
             reason: s.reason,
           }));
-          if (result.suppressed.length > 0) {
-            st.recordSuppressMatches(result.suppressed.map((s) => s.ruleId));
-          }
         }
       }
       return c.json({ ok: true, findings, shadowSuppressed });
