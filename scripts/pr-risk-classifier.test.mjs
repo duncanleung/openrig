@@ -183,6 +183,19 @@ test("classify — high: oversized shell PR (diff exceeds MODERATE_MAX_DIFF)", (
   assert.equal(result.level, "high");
 });
 
+test("classify — high: shell PR exceeds MODERATE_MAX_SOURCE_FILES (source-count ceiling)", () => {
+  const result = classify(inputs({
+    diffSize: 100,
+    additions: 100,
+    deletions: 0,
+    totalFiles: 9,
+    kindCounts: { test: 0, docs: 0, source: 9, config: 0, migration: 0, other: 0 },
+    testFileRatio: 0,
+    shellSourceFiles: 9,
+  }));
+  assert.equal(result.level, "high");
+});
+
 test("classify — high: migration present in shell-only PR (migration precedence preserved)", () => {
   const result = classify(inputs({
     diffSize: 50,
