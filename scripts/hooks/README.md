@@ -1,5 +1,28 @@
 # Hook scripts
 
+## pre-merge-review-gate.sh (RIG-176, RIG-178)
+
+The **canonical source** for `~/.claude/hooks/pre-merge-review-gate.sh`. The global
+hook lives outside the repo (wired in `~/.claude/settings.json`); this file is the
+versioned reference so fresh checkouts can reproduce the installation.
+
+Blocks `gh pr merge` unless `/code-review-dual` evidence exists:
+`.ai/status/review-pr<N>.md` with a completion marker (`✅ complete`, `✅ reviewed`,
+or `dual-stack`). A `bypass: <reason>` line (anchored, must start the line) is an
+emergency override.
+
+After the review-evidence check passes, delegates to `scripts/hooks/pre-merge-skill-gate.sh`
+when it exists in the project (RIG-176 skill-file gate).
+
+### Install
+
+```bash
+cp scripts/hooks/pre-merge-review-gate.sh ~/.claude/hooks/pre-merge-review-gate.sh
+# Then wire in ~/.claude/settings.json PreToolUse for the Bash tool.
+```
+
+---
+
 ## pre-merge-skill-gate.sh (RIG-176)
 
 A project-level `PreToolUse` hook delegate. Blocks `gh pr merge` when the PR touches
