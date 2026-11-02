@@ -753,6 +753,14 @@ export class FleetStore {
     return toSuppressRule(row);
   }
 
+  /** Promote a quarantined rule to active. Returns false when the rule does not exist or is not quarantined. */
+  activateSuppressRule(id: number): boolean {
+    const info = this.db.prepare(
+      "UPDATE review_suppress_rules SET status = 'active' WHERE id = ? AND status = 'quarantined'",
+    ).run(id);
+    return info.changes > 0;
+  }
+
   /** Retire a rule. The row stays for audit. Returns false when the rule does not exist or is already retired. */
   retireSuppressRule(id: number): boolean {
     const info = this.db.prepare(

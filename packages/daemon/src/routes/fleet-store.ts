@@ -429,6 +429,14 @@ export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
     if (rawStatus !== "quarantined" && rawStatus !== "active") {
       return c.json({ ok: false, code: "invalid_field", error: "status must be quarantined or active." }, 400);
     }
+    if (raw.descriptionHash !== undefined && raw.descriptionHash !== null && typeof raw.descriptionHash !== "string") {
+      return c.json({ ok: false, code: "invalid_field", error: "descriptionHash must be a string." }, 400);
+    }
+    if (raw.quarantinedPr !== undefined && raw.quarantinedPr !== null) {
+      if (typeof raw.quarantinedPr !== "number" || !Number.isInteger(raw.quarantinedPr) || raw.quarantinedPr <= 0) {
+        return c.json({ ok: false, code: "invalid_field", error: "quarantinedPr must be a positive integer." }, 400);
+      }
+    }
     const quarantinedPr = numOrNull(raw.quarantinedPr);
     try {
       const rule = store().createSuppressRule({
@@ -444,6 +452,24 @@ export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       return c.json({ ok: false, code: "invalid_field", error: msg }, 400);
+    }
+  });
+
+  writeApp.patch("/suppress-rules/:id/activate", (c) => {
+    try {
+      const rawId = c.req.param("id");
+      const id = Number(rawId);
+      if (!Number.isInteger(id) || id <= 0) {
+        return c.json({ ok: false, code: "invalid_field", error: "id must be a positive integer." }, 400);
+      }
+      const activated = store().activateSuppressRule(id);
+      if (!activated) {
+        return c.json({ ok: false, code: "not_found", error: "Rule not found or not in quarantined status." }, 404);
+      }
+      return c.json({ ok: true });
+    } catch (err) {
+      console.error("[fleet-store] PATCH /suppress-rules/:id/activate error:", err instanceof Error ? err.message : String(err));
+      return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
     }
   });
 

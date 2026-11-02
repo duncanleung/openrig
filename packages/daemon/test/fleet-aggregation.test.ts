@@ -368,6 +368,37 @@ describe("RIG-9 suppress-rules routes", () => {
     expect(res.status).toBe(404);
   });
 
+  it("PATCH /suppress-rules/:id/activate promotes quarantined to active", async () => {
+    const rule = store.createSuppressRule({ repo: "r/r", category: "style", reason: "test", status: "quarantined", quarantinedPr: 5 });
+    expect(rule.status).toBe("quarantined");
+    const res = await patch(`/suppress-rules/${rule.id}/activate`);
+    expect(res.status).toBe(200);
+    const rules = store.listSuppressRules({ repo: "r/r" });
+    expect(rules[0]!.status).toBe("active");
+  });
+
+  it("PATCH /suppress-rules/:id/activate returns 404 for already-active rule", async () => {
+    const rule = store.createSuppressRule({ repo: "r/r", category: "style", reason: "test", status: "active" });
+    const res = await patch(`/suppress-rules/${rule.id}/activate`);
+    expect(res.status).toBe(404);
+  });
+
+  it("POST /suppress-rules rejects non-string descriptionHash", async () => {
+    const res = await post("/suppress-rules", { repo: "r/r", reason: "x", descriptionHash: 123, status: "active" });
+    expect(res.status).toBe(400);
+    const body = await res.json() as { code: string };
+    expect(body.code).toBe("invalid_field");
+  });
+
+  it("POST /suppress-rules rejects non-integer quarantinedPr", async () => {
+    const neg = await post("/suppress-rules", { repo: "r/r", reason: "x", category: "style", quarantinedPr: -1.5, status: "active" });
+    expect(neg.status).toBe(400);
+    const zero = await post("/suppress-rules", { repo: "r/r", reason: "x", category: "style", quarantinedPr: 0, status: "active" });
+    expect(zero.status).toBe(400);
+    const frac = await post("/suppress-rules", { repo: "r/r", reason: "x", category: "style", quarantinedPr: 1.5, status: "active" });
+    expect(frac.status).toBe(400);
+  });
+
   it("PATCH /reviews/:traceId/findings/:findingId/action sets user action", async () => {
     const traceId = "trace-action-1";
     store.upsertReviewRun(
