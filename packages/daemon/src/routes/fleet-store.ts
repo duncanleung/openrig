@@ -455,6 +455,10 @@ export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
       });
       return c.json({ ok: true, rule }, 201);
     } catch (err) {
+      if (err instanceof Error && err.name === "SqliteError") {
+        console.error("[fleet-store] POST /suppress-rules error:", err.message);
+        return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
+      }
       const msg = err instanceof Error ? err.message : String(err);
       return c.json({ ok: false, code: "invalid_field", error: msg }, 400);
     }
