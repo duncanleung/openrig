@@ -6,6 +6,13 @@ import {
   type UserAction,
 } from "./review-suppress-rules.js";
 
+export class FleetStoreValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FleetStoreValidationError";
+  }
+}
+
 // ── Fleet store: upsert writers for the four analytics tables (migrations 096–099). ──
 
 export interface SessionDigestInput {
@@ -170,6 +177,8 @@ export interface ReviewFindingRow {
   score: number | null;
   verdict: string | null;
   description_prefix: string | null;
+  description_hash: string | null;
+  user_action: string | null;
 }
 
 export interface SnapshotRow {
@@ -662,11 +671,21 @@ export class FleetStore {
   getReviewFindings(traceId: string): ReviewFindingRow[] {
     return this.db.prepare(`
       SELECT id, run_trace_id, finding_id, file, lines, category,
-             hunter_key, stack, score, verdict, description_prefix
+             hunter_key, stack, score, verdict, description_prefix,
+             description_hash, user_action
       FROM review_findings
       WHERE run_trace_id = ?
       ORDER BY score DESC
     `).all(traceId) as ReviewFindingRow[];
+  }
+
+  /** Repo and PR number for a run — used to scope suppress rules. Returns null when the run does not exist. */
+  getRunMeta(traceId: string): { repo: string | null; prNumber: number | null } | null {
+    const row = this.db.prepare(
+      "SELECT repo, pr_number FROM review_runs WHERE trace_id = ? LIMIT 1",
+    ).get(traceId) as { repo: string | null; pr_number: number | null } | undefined;
+    if (!row) return null;
+    return { repo: row.repo, prNumber: row.pr_number };
   }
 
   // ── RIG-9: review finding user actions and suppress rules ─────────────────
@@ -714,16 +733,16 @@ export class FleetStore {
   }): SuppressRule {
     const status = input.status ?? "quarantined";
     if (status !== "quarantined" && status !== "active") {
-      throw new Error(`a new suppress rule cannot start as '${status}'`);
+      throw new FleetStoreValidationError(`a new suppress rule cannot start as '${status}'`);
     }
     if (input.category == null && input.fileGlob == null && input.descriptionHash == null) {
-      throw new Error("a suppress rule needs at least one matcher: category, fileGlob or descriptionHash");
+      throw new FleetStoreValidationError("a suppress rule needs at least one matcher: category, fileGlob or descriptionHash");
     }
     if (status === "quarantined" && input.quarantinedPr == null) {
-      throw new Error("a quarantined suppress rule needs its source PR (quarantinedPr)");
+      throw new FleetStoreValidationError("a quarantined suppress rule needs its source PR (quarantinedPr)");
     }
     if (input.reason.trim().length === 0) {
-      throw new Error("a suppress rule needs a reason (it is shown in the audit log)");
+      throw new FleetStoreValidationError("a suppress rule needs a reason (it is shown in the audit log)");
     }
     const info = this.db.prepare(`
       INSERT INTO review_suppress_rules (repo, category, file_glob, description_hash, reason, status, quarantined_pr)
@@ -739,6 +758,14 @@ export class FleetStore {
     });
     const row = this.db.prepare("SELECT * FROM review_suppress_rules WHERE id = ?").get(Number(info.lastInsertRowid)) as SuppressRuleDbRow;
     return toSuppressRule(row);
+  }
+
+  /** Promote a quarantined rule to active. Returns false when the rule does not exist or is not quarantined. */
+  activateSuppressRule(id: number): boolean {
+    const info = this.db.prepare(
+      "UPDATE review_suppress_rules SET status = 'active' WHERE id = ? AND status = 'quarantined'",
+    ).run(id);
+    return info.changes > 0;
   }
 
   /** Retire a rule. The row stays for audit. Returns false when the rule does not exist or is already retired. */

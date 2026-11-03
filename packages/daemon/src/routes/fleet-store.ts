@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import type { Database } from "better-sqlite3";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
-import { FleetStore } from "../domain/fleet-store.js";
+import { FleetStore, FleetStoreValidationError } from "../domain/fleet-store.js";
 import type { AggregateFilter } from "../domain/fleet-store.js";
 import { renderFleetDashboard } from "../domain/fleet-dashboard.js";
 import type {
@@ -11,6 +12,8 @@ import type {
   DailyTokenSnapshotInput,
 } from "../domain/fleet-store.js";
 import type { FleetIngestionService } from "../domain/fleet-ingestion-service.js";
+import { applySuppressRules, isUserAction, SUPPRESS_RULE_STATUSES } from "../domain/review-suppress-rules.js";
+import type { SuppressRuleStatus } from "../domain/review-suppress-rules.js";
 
 export interface FleetStoreRouteDeps {
   db: () => Database;
@@ -145,6 +148,14 @@ function normalizeFinding(f: Record<string, unknown>, runTraceId: string): Revie
   const findingId = strRequired(f.findingId);
   if (!findingId) return "findingId is required.";
 
+  const description = typeof f.description === "string" && f.description ? f.description : null;
+  const descriptionPrefix = description
+    ? description.slice(0, 200)
+    : strOrNull(f.descriptionPrefix);
+  const descriptionHash = description
+    ? createHash("sha256").update(description).digest("hex")
+    : strOrNull(f.descriptionHash);
+
   return {
     runTraceId,
     findingId,
@@ -156,8 +167,8 @@ function normalizeFinding(f: Record<string, unknown>, runTraceId: string): Revie
     score: numOrNull(f.score),
     verdict: strOrNull(f.verdict),
     hasFixSpec: numOrNull(f.hasFixSpec),
-    descriptionPrefix: strOrNull(f.descriptionPrefix),
-    descriptionHash: strOrNull(f.descriptionHash),
+    descriptionPrefix,
+    descriptionHash,
   };
 }
 
@@ -377,6 +388,117 @@ export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
     }
   });
 
+  writeApp.patch("/reviews/:traceId/findings/:findingId/action", async (c) => {
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      return c.json({ ok: false, code: "invalid_json", error: "Request body must be JSON." }, 400);
+    }
+    if (!isRecord(raw)) {
+      return c.json({ ok: false, code: "invalid_json", error: "Body must be a JSON object." }, 400);
+    }
+    const traceId = c.req.param("traceId");
+    const findingId = c.req.param("findingId");
+    const action = raw.action;
+    if (action !== null && !isUserAction(action)) {
+      return c.json({ ok: false, code: "invalid_field", error: `action must be one of: ${["accepted", "dismissed", "fixed-before-merge", "deferred"].join(", ")}, or null.` }, 400);
+    }
+    try {
+      const updated = store().setUserAction(traceId, findingId, action ?? null);
+      if (!updated) {
+        return c.json({ ok: false, code: "not_found", error: "Finding not found." }, 404);
+      }
+      return c.json({ ok: true });
+    } catch (err) {
+      console.error("[fleet-store] PATCH /reviews/:traceId/findings/:findingId/action error:", err instanceof Error ? err.message : String(err));
+      return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
+    }
+  });
+
+  writeApp.post("/suppress-rules", async (c) => {
+    let raw: unknown;
+    try {
+      raw = await c.req.json();
+    } catch {
+      return c.json({ ok: false, code: "invalid_json", error: "Request body must be JSON." }, 400);
+    }
+    if (!isRecord(raw)) {
+      return c.json({ ok: false, code: "invalid_json", error: "Body must be a JSON object." }, 400);
+    }
+    const repo = strRequired(raw.repo);
+    if (!repo) return c.json({ ok: false, code: "invalid_field", error: "repo is required." }, 400);
+    const reason = strRequired(raw.reason);
+    if (!reason) return c.json({ ok: false, code: "invalid_field", error: "reason is required." }, 400);
+    const rawStatus = strOrNull(raw.status) ?? "quarantined";
+    if (rawStatus !== "quarantined" && rawStatus !== "active") {
+      return c.json({ ok: false, code: "invalid_field", error: "status must be quarantined or active." }, 400);
+    }
+    if (raw.descriptionHash !== undefined && raw.descriptionHash !== null && typeof raw.descriptionHash !== "string") {
+      return c.json({ ok: false, code: "invalid_field", error: "descriptionHash must be a string." }, 400);
+    }
+    if (raw.quarantinedPr !== undefined && raw.quarantinedPr !== null) {
+      if (typeof raw.quarantinedPr !== "number" || !Number.isInteger(raw.quarantinedPr) || raw.quarantinedPr <= 0) {
+        return c.json({ ok: false, code: "invalid_field", error: "quarantinedPr must be a positive integer." }, 400);
+      }
+    }
+    const quarantinedPr = numOrNull(raw.quarantinedPr);
+    try {
+      const rule = store().createSuppressRule({
+        repo,
+        category: strOrNull(raw.category),
+        fileGlob: strOrNull(raw.fileGlob),
+        descriptionHash: strOrNull(raw.descriptionHash),
+        reason,
+        status: rawStatus,
+        quarantinedPr,
+      });
+      return c.json({ ok: true, rule }, 201);
+    } catch (err) {
+      if (err instanceof FleetStoreValidationError) {
+        return c.json({ ok: false, code: "invalid_field", error: err.message }, 400);
+      }
+      console.error("[fleet-store] POST /suppress-rules error:", err instanceof Error ? err.message : String(err));
+      return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
+    }
+  });
+
+  writeApp.patch("/suppress-rules/:id/activate", (c) => {
+    try {
+      const rawId = c.req.param("id");
+      const id = Number(rawId);
+      if (!Number.isInteger(id) || id <= 0) {
+        return c.json({ ok: false, code: "invalid_field", error: "id must be a positive integer." }, 400);
+      }
+      const activated = store().activateSuppressRule(id);
+      if (!activated) {
+        return c.json({ ok: false, code: "not_found", error: "Rule not found or not in quarantined status." }, 404);
+      }
+      return c.json({ ok: true });
+    } catch (err) {
+      console.error("[fleet-store] PATCH /suppress-rules/:id/activate error:", err instanceof Error ? err.message : String(err));
+      return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
+    }
+  });
+
+  writeApp.patch("/suppress-rules/:id/retire", (c) => {
+    try {
+      const rawId = c.req.param("id");
+      const id = Number(rawId);
+      if (!Number.isInteger(id) || id <= 0) {
+        return c.json({ ok: false, code: "invalid_field", error: "id must be a positive integer." }, 400);
+      }
+      const retired = store().retireSuppressRule(id);
+      if (!retired) {
+        return c.json({ ok: false, code: "not_found", error: "Rule not found or already retired." }, 404);
+      }
+      return c.json({ ok: true });
+    } catch (err) {
+      console.error("[fleet-store] PATCH /suppress-rules/:id/retire error:", err instanceof Error ? err.message : String(err));
+      return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
+    }
+  });
+
   app.route("/", writeApp);
 
   // Aggregation + dashboard (RIG-80): read-only, registered before param routes.
@@ -489,10 +611,49 @@ export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
   app.get("/reviews/:traceId/findings", (c) => {
     try {
       const traceId = c.req.param("traceId");
-      const findings = store().getReviewFindings(traceId);
-      return c.json({ ok: true, findings });
+      const st = store();
+      const findings = st.getReviewFindings(traceId);
+      const meta = st.getRunMeta(traceId);
+      let shadowSuppressed: Array<{ findingId: string; ruleId: number; reason: string }> = [];
+      if (meta?.repo) {
+        const rules = st.listSuppressRules({ repo: meta.repo });
+        if (rules.length > 0) {
+          const suppressible = findings.map((f) => ({
+            findingId: f.finding_id,
+            file: f.file,
+            category: f.category,
+            verdict: f.verdict,
+            descriptionHash: f.description_hash,
+          }));
+          const result = applySuppressRules(suppressible, rules, {
+            repo: meta.repo,
+            prNumber: meta.prNumber,
+          });
+          shadowSuppressed = result.suppressed.map((s) => ({
+            findingId: s.finding.findingId,
+            ruleId: s.ruleId,
+            reason: s.reason,
+          }));
+        }
+      }
+      return c.json({ ok: true, findings, shadowSuppressed });
     } catch (err) {
       console.error("[fleet-store] GET /reviews/:traceId/findings error:", err instanceof Error ? err.message : String(err));
+      return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
+    }
+  });
+
+  app.get("/suppress-rules", (c) => {
+    try {
+      const q = c.req.query();
+      const status = q.status as SuppressRuleStatus | undefined;
+      if (status !== undefined && !(SUPPRESS_RULE_STATUSES as readonly string[]).includes(status)) {
+        return c.json({ ok: false, code: "invalid_field", error: `status must be one of: ${SUPPRESS_RULE_STATUSES.join(", ")}.` }, 400);
+      }
+      const rules = store().listSuppressRules({ repo: q.repo || undefined, status });
+      return c.json({ ok: true, rules });
+    } catch (err) {
+      console.error("[fleet-store] GET /suppress-rules error:", err instanceof Error ? err.message : String(err));
       return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
     }
   });
