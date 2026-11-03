@@ -247,8 +247,8 @@ async function main() {
     ? { level, inputs, reason, override, skillFileGate }
     : { level, inputs, reason, override };
 
-  // Log to ~/.claude/logs/merge-classifier/classifications.jsonl
-  const logDir = `${homedir()}/.claude/logs/merge-classifier`;
+  // Log to CLASSIFIER_LOG_DIR when set (e.g. in tests), otherwise ~/.claude/logs/merge-classifier/.
+  const logDir = process.env.CLASSIFIER_LOG_DIR ?? `${homedir()}/.claude/logs/merge-classifier`;
   try {
     mkdirSync(logDir, { recursive: true });
     appendFileSync(
