@@ -242,7 +242,7 @@ if (args.includes('nameWithOwner')) {
 }
 `, { mode: 0o755 });
 
-    const env = { ...process.env, PATH: `${tmp}:${process.env.PATH}` };
+    const env = { ...process.env, PATH: `${tmp}:${process.env.PATH}`, CLASSIFIER_LOG_DIR: tmp };
     const result = spawnSync(process.execPath, [CLASSIFIER, "42"], {
       encoding: "utf8",
       env,
@@ -283,7 +283,7 @@ if (args.includes('nameWithOwner')) {
 }
 `, { mode: 0o755 });
 
-    const env = { ...process.env, PATH: `${tmp}:${process.env.PATH}` };
+    const env = { ...process.env, PATH: `${tmp}:${process.env.PATH}`, CLASSIFIER_LOG_DIR: tmp };
     const result = spawnSync(process.execPath, [CLASSIFIER, "42"], {
       encoding: "utf8",
       env,
