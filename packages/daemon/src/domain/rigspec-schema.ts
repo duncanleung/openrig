@@ -64,7 +64,7 @@ const MEMBER_KEYS = new Set([
   "id", "label", "agent_ref", "profile", "runtime", "codex_config_profile",
   "model", "effort", "advisor", "role", "permission_policy", "cwd", "restore_policy",
   "compaction_strategy", "compaction_threshold_tokens", "mechanic", "startup", "session_source", "starter_ref", "env",
-  "agent_file", "append_system_prompt_file", "plugin_dirs", "fallback",
+  "agent_file", "append_system_prompt_file", "plugin_dirs", "fallback", "context_lifecycle",
 ]);
 const EDGE_KEYS = new Set(["kind", "from", "to"]);
 
@@ -512,6 +512,12 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
     const v = member["compaction_threshold_tokens"];
     if (typeof v !== "number" || !Number.isInteger(v) || v <= 0) {
       errors.push(`${prefix}.compaction_threshold_tokens: must be a positive integer when present (got ${JSON.stringify(v)})`);
+    }
+  }
+  if (member["context_lifecycle"] !== undefined) {
+    const v = member["context_lifecycle"];
+    if (v !== "elephant" && v !== "goldfish") {
+      errors.push(`${prefix}.context_lifecycle: must be "elephant" or "goldfish" when present (got ${JSON.stringify(v)})`);
     }
   }
 
@@ -1339,6 +1345,9 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     ...(typeof m["append_system_prompt_file"] === "string" ? { appendSystemPromptFile: m["append_system_prompt_file"] } : {}),
     ...(Array.isArray(m["plugin_dirs"]) ? { pluginDirs: m["plugin_dirs"] as string[] } : {}),
     fallback: normalizeFallbackSpec(m["fallback"]),
+    ...(m["context_lifecycle"] === "goldfish" || m["context_lifecycle"] === "elephant"
+      ? { contextLifecycle: m["context_lifecycle"] as "elephant" | "goldfish" }
+      : {}),
   }));
 
   const edges = Array.isArray(raw["edges"])

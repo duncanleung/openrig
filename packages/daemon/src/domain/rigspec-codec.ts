@@ -185,6 +185,7 @@ export class RigSpecCodec {
         if (m.starterRef) {
           member["starter_ref"] = { name: m.starterRef.name };
         }
+        if (m.contextLifecycle) member["context_lifecycle"] = m.contextLifecycle;
         return member;
       });
 
