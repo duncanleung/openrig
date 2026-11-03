@@ -108,6 +108,28 @@ describe("RigSpec codec (pod-aware)", () => {
     expect(normalized.pods[0]!.members[0]!.compactionThresholdTokens).toBe(120_000);
   });
 
+  it("context_lifecycle goldfish round-trips through serialize/parse/normalize", () => {
+    const yaml = RigSpecCodec.serialize({
+      ...VALID_RIG,
+      pods: [{ ...VALID_RIG.pods[0]!, members: [{ ...VALID_RIG.pods[0]!.members[0]!, contextLifecycle: "goldfish" as const }] }],
+    });
+    expect(yaml).toContain("context_lifecycle: goldfish");
+    const normalized = RigSpecSchema.normalize(RigSpecCodec.parse(yaml) as Record<string, unknown>);
+    expect(normalized.pods[0]!.members[0]!.contextLifecycle).toBe("goldfish");
+  });
+
+  it("context_lifecycle invalid value is rejected by schema validation", () => {
+    const raw = {
+      ...RigSpecCodec.parse(RigSpecCodec.serialize(VALID_RIG)) as object,
+    } as Record<string, unknown>;
+    (raw["pods"] as Record<string, unknown>[])[0]!["members"] = [
+      { ...((raw["pods"] as Record<string, unknown>[])[0]!["members"] as Record<string, unknown>[])[0]!, context_lifecycle: "neither" },
+    ];
+    const result = RigSpecSchema.validate(raw);
+    expect(result.valid).toBe(false);
+    expect(result.errors.some((e) => e.includes("context_lifecycle"))).toBe(true);
+  });
+
   it("loads YAML with member effort through validation, normalization, and serializes back", () => {
     const rawYaml = `
 version: "0.2"

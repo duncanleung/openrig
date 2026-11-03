@@ -1263,6 +1263,10 @@ export interface RigSpecPodMember {
   /** RIG-43: optional runtime fallback declaration. When the primary runtime's
    *  usage-limit pool is exhausted, the daemon swaps the occupant to this runtime. */
   fallback?: FallbackSpec;
+  /** RIG-182: context lifecycle for this seat. "goldfish" = orchestrator compacts the
+   *  seat before each dispatch to shed previous-task context. "elephant" (default) =
+   *  no pre-dispatch compaction; the seat retains cross-task continuity. */
+  contextLifecycle?: "elephant" | "goldfish";
 }
 
 /** RIG-43 — per-member fallback declaration in rig spec. */
