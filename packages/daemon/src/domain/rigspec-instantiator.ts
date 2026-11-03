@@ -1588,6 +1588,7 @@ export class PodRigInstantiator {
             runtime: member.runtime,
             model: member.model ?? configResult.config.model,
             effort: member.effort ?? configResult.config.effort,
+            contextLifecycle: member.contextLifecycle,
             advisor: configResult.config.advisor,
             codexConfigProfile: member.codexConfigProfile,
             // OPR.0.4.8.3 Seam B: bootstrap inline addNode is the FOURTH node-creation
@@ -1888,6 +1889,7 @@ export class PodRigInstantiator {
           runtime: member.runtime,
           model: member.model,
           effort: member.effort,
+          contextLifecycle: member.contextLifecycle,
           advisor: member.advisor,
           env: member.env,
           cwd: effectiveCwd,
@@ -1977,6 +1979,7 @@ export class PodRigInstantiator {
       runtime: input.member.runtime,
       model: input.member.model,
       effort: input.member.effort,
+      contextLifecycle: input.member.contextLifecycle,
       advisor,
       codexConfigProfile: input.member.codexConfigProfile,
       // OPR.0.4.8.3 Seam B: the member's OWN raw ref persists on the node (like role);
