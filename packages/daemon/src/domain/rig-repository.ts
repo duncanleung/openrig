@@ -158,6 +158,8 @@ interface NodeOptions {
   resolvedSpecHash?: string;
   /** RIG-43: optional fallback spec to write as fallback_runtime/model/swap_back columns. */
   fallback?: import("./types.js").FallbackSpec;
+  /** RIG-186: seat's declared context lifecycle; stored in nodes.context_lifecycle. */
+  contextLifecycle?: "elephant" | "goldfish";
 }
 
 export class RigRepository {
@@ -533,6 +535,10 @@ export class RigRepository {
     if (opts?.effort && this.hasNodeColumn("effort")) {
       this.db.prepare("UPDATE nodes SET effort = ? WHERE id = ?")
         .run(opts.effort, id);
+    }
+    if (opts?.contextLifecycle && this.hasNodeColumn("context_lifecycle")) {
+      this.db.prepare("UPDATE nodes SET context_lifecycle = ? WHERE id = ?")
+        .run(opts.contextLifecycle, id);
     }
     if (opts?.advisor) this.setNodeAdvisor(id, opts.advisor);
 

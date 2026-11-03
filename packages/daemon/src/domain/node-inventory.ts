@@ -44,6 +44,7 @@ interface InventoryRow {
   model: string | null;
   effort: string | null;
   effort_choice: string | null;
+  context_lifecycle: string | null;
   codex_config_profile: string | null;
   agent_ref: string | null;
   profile: string | null;
@@ -623,6 +624,7 @@ function runInventoryRowQuery(db: Database.Database, whereClause: string, orderC
       n.model,
       ${nodeColumnOrNull("effort")} as effort,
       ${nodeColumnOrNull("effort_choice")} as effort_choice,
+      ${nodeColumnOrNull("context_lifecycle")} as context_lifecycle,
       ${codexConfigProfileSelect} as codex_config_profile,
       n.agent_ref,
       n.profile,
@@ -799,6 +801,7 @@ function buildInventoryEntry(
     // Configured launch effort only; an observed level is reported by the
     // seat-effort route, which reads the running process and native transcript.
     effort: effortResolution.effective,
+    ...(row.context_lifecycle ? { contextLifecycle: row.context_lifecycle as "elephant" | "goldfish" } : {}),
     effortSource: effortResolution.source,
     agentRef: row.agent_ref,
     profile: row.profile,
@@ -1049,6 +1052,7 @@ export function getNodeDetail(
       canonicalSessionName: e.canonicalSessionName,
       attachmentType: e.attachmentType,
       runtime: e.runtime,
+      ...(e.contextLifecycle ? { contextLifecycle: e.contextLifecycle } : {}),
     }));
 
   // Edges: outgoing and incoming for this node

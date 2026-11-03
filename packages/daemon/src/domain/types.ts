@@ -871,6 +871,9 @@ export interface NodeInventoryEntry {
    *  the active repo, or `knowledge` when cwd is under knowledgeRoot.
    *  null when the rig does not declare a workspace. */
   workspace?: NodeWorkspaceInfo | null;
+  /** RIG-186: seat's declared context lifecycle from the rig spec. Absent when
+   *  the seat has no explicit declaration (equivalent to "elephant" default). */
+  contextLifecycle?: "elephant" | "goldfish";
 }
 
 /**
@@ -920,6 +923,8 @@ export interface NodeDetailPeer {
   canonicalSessionName: string | null;
   attachmentType?: "tmux" | "external_cli" | null;
   runtime: string | null;
+  /** RIG-186: seat's declared context lifecycle. Absent when no explicit declaration. */
+  contextLifecycle?: "elephant" | "goldfish";
 }
 
 export interface NodeDetailEdge {
