@@ -457,4 +457,20 @@ describe("RIG-9 suppress-rules routes", () => {
     expect(findings).toHaveLength(1);
     expect(findings[0]!.description_hash).toMatch(/^[0-9a-f]{64}$/);
   });
+
+  it("POST /suppress-rules returns 400 for quarantined status without quarantinedPr", async () => {
+    const res = await post("/suppress-rules", { repo: "r/r", reason: "x", category: "style", status: "quarantined" });
+    expect(res.status).toBe(400);
+    const body = await res.json() as { ok: boolean; code: string };
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("invalid_field");
+  });
+
+  it("POST /suppress-rules returns 400 for whitespace-only reason", async () => {
+    const res = await post("/suppress-rules", { repo: "r/r", reason: "   ", category: "style", status: "active" });
+    expect(res.status).toBe(400);
+    const body = await res.json() as { ok: boolean; code: string };
+    expect(body.ok).toBe(false);
+    expect(body.code).toBe("invalid_field");
+  });
 });

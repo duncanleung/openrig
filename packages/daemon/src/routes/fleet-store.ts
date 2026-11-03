@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { Hono } from "hono";
 import type { Database } from "better-sqlite3";
 import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
-import { FleetStore } from "../domain/fleet-store.js";
+import { FleetStore, FleetStoreValidationError } from "../domain/fleet-store.js";
 import type { AggregateFilter } from "../domain/fleet-store.js";
 import { renderFleetDashboard } from "../domain/fleet-dashboard.js";
 import type {
@@ -455,12 +455,11 @@ export function fleetStoreRoutes(deps: FleetStoreRouteDeps): Hono {
       });
       return c.json({ ok: true, rule }, 201);
     } catch (err) {
-      if (err instanceof Error && err.name === "SqliteError") {
-        console.error("[fleet-store] POST /suppress-rules error:", err.message);
-        return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
+      if (err instanceof FleetStoreValidationError) {
+        return c.json({ ok: false, code: "invalid_field", error: err.message }, 400);
       }
-      const msg = err instanceof Error ? err.message : String(err);
-      return c.json({ ok: false, code: "invalid_field", error: msg }, 400);
+      console.error("[fleet-store] POST /suppress-rules error:", err instanceof Error ? err.message : String(err));
+      return c.json({ ok: false, code: "fleet_store_error", error: "Internal fleet store error." }, 500);
     }
   });
 

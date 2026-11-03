@@ -6,6 +6,13 @@ import {
   type UserAction,
 } from "./review-suppress-rules.js";
 
+export class FleetStoreValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "FleetStoreValidationError";
+  }
+}
+
 // ── Fleet store: upsert writers for the four analytics tables (migrations 096–099). ──
 
 export interface SessionDigestInput {
@@ -726,16 +733,16 @@ export class FleetStore {
   }): SuppressRule {
     const status = input.status ?? "quarantined";
     if (status !== "quarantined" && status !== "active") {
-      throw new Error(`a new suppress rule cannot start as '${status}'`);
+      throw new FleetStoreValidationError(`a new suppress rule cannot start as '${status}'`);
     }
     if (input.category == null && input.fileGlob == null && input.descriptionHash == null) {
-      throw new Error("a suppress rule needs at least one matcher: category, fileGlob or descriptionHash");
+      throw new FleetStoreValidationError("a suppress rule needs at least one matcher: category, fileGlob or descriptionHash");
     }
     if (status === "quarantined" && input.quarantinedPr == null) {
-      throw new Error("a quarantined suppress rule needs its source PR (quarantinedPr)");
+      throw new FleetStoreValidationError("a quarantined suppress rule needs its source PR (quarantinedPr)");
     }
     if (input.reason.trim().length === 0) {
-      throw new Error("a suppress rule needs a reason (it is shown in the audit log)");
+      throw new FleetStoreValidationError("a suppress rule needs a reason (it is shown in the audit log)");
     }
     const info = this.db.prepare(`
       INSERT INTO review_suppress_rules (repo, category, file_glob, description_hash, reason, status, quarantined_pr)
