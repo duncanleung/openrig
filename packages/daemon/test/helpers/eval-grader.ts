@@ -77,14 +77,14 @@ export function grade(evalCase: EvalCase, transcript: string): GradeResult {
 
   let allExpectedMatched = true;
   for (const source of evalCase.expectedPatterns) {
-    const matched = new RegExp(source).test(transcript);
+    const matched = new RegExp(source, "i").test(transcript);
     patternResults.push({ pattern: source, matched, type: "expected" });
     if (!matched) allExpectedMatched = false;
   }
 
   let noForbiddenMatched = true;
   for (const source of evalCase.forbiddenPatterns ?? []) {
-    const matched = new RegExp(source).test(transcript);
+    const matched = new RegExp(source, "i").test(transcript);
     patternResults.push({ pattern: source, matched, type: "forbidden" });
     if (matched) noForbiddenMatched = false;
   }
