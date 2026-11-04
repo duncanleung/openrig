@@ -253,7 +253,15 @@ async function main() {
     mkdirSync(logDir, { recursive: true });
     appendFileSync(
       `${logDir}/classifications.jsonl`,
-      JSON.stringify({ timestamp: new Date().toISOString(), pr: parseInt(prNum, 10), ...result }) + "\n",
+      JSON.stringify({
+        event: "prediction",
+        version: 1,
+        timestamp: new Date().toISOString(),
+        pr: parseInt(prNum, 10),
+        repo: repoPath ?? null,
+        sha: headSha || null,
+        ...result,
+      }) + "\n",
     );
   } catch (logErr) {
     console.error(`[pr-risk-classifier] Warning: failed to write classification log: ${logErr.message}`);
