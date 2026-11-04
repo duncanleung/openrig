@@ -202,6 +202,8 @@ export interface AppDeps {
   seatActivityService?: import("./domain/seat-activity-service.js").SeatActivityService;
   /** RIG-123 — the independent stuck-seat observer. The operational summary reads its cached findings only. */
   stuckSeatObserver?: import("./domain/stuck-seat-observer.js").StuckSeatObserver;
+  /** Fork stuck-message sweeper — detect and safely auto-Enter stuck OpenRig deliveries. */
+  stuckMessageSweeper?: import("./domain/stuck-message-sweeper.js").StuckMessageSweeper;
   /** RIG-79 — fleet turn-anomaly detector. The operational summary reads its cached episodes only. */
   turnAnomalyDetector?: import("./domain/turn-anomaly-detector.js").TurnAnomalyDetector;
   /** 5b82324b — the structural pane-activity cache; feeds attachAgentActivity so ACTIVITY is real. */
@@ -648,6 +650,7 @@ export function createApp(deps: AppDeps): Hono {
     // hasAssignedWork via attachTerminalActivityAndWork.
     c.set("seatActivityService" as never, deps.seatActivityService);
     c.set("stuckSeatObserver" as never, deps.stuckSeatObserver);
+    c.set("stuckMessageSweeper" as never, deps.stuckMessageSweeper);
     c.set("turnAnomalyDetector" as never, deps.turnAnomalyDetector);
     c.set("seatStructuralActivityService" as never, deps.seatStructuralActivityService);
     c.set("activityHookToken" as never, deps.activityHookToken);

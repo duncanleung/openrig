@@ -4,6 +4,8 @@ import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { requireSenderIdentity, transportSenderSession } from "./require-sender-identity.js";
 import type { OutboxHandler } from "../domain/outbox-handler.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
+import type { StuckMessageSweeper } from "../domain/stuck-message-sweeper.js";
+import { DEFAULT_STUCK_GRACE_MS } from "../domain/stuck-message-attribution.js";
 
 // S2 (OPR.0.5.4.3) — the sender-side half of two-ended honesty: appended to any
 // unattributed delivery's success payload and surfaced by the CLI renderers.
@@ -354,6 +356,40 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       return c.json({ ...result, warning: UNKNOWN_SENDER_NOTICE });
     }
     return c.json(result);
+  });
+
+  // Fork stuck-message sweeper — scan idle seats for unsubmitted OpenRig deliveries and
+  // optionally press Enter when attribution + idle + prompt guards pass.
+  router.post("/sweep-stuck", async (c) => {
+    const sweeper = c.get("stuckMessageSweeper" as never) as StuckMessageSweeper | undefined;
+    if (!sweeper) {
+      return c.json({ error: "stuck_message_sweeper_unavailable", message: "stuck-message sweeper is not wired" }, 503);
+    }
+    const body = await c.req.json<{
+      dryRun?: boolean;
+      graceMs?: number;
+      rig?: string;
+      autoEnter?: boolean;
+    }>().catch(() => ({} as { dryRun?: boolean; graceMs?: number; rig?: string; autoEnter?: boolean }));
+
+    const graceMs = typeof body.graceMs === "number" && Number.isFinite(body.graceMs) && body.graceMs > 0
+      ? body.graceMs
+      : DEFAULT_STUCK_GRACE_MS;
+
+    try {
+      const report = await sweeper.sweep({
+        dryRun: body.dryRun === true,
+        graceMs,
+        rig: typeof body.rig === "string" && body.rig.trim() ? body.rig.trim() : undefined,
+        autoEnter: body.autoEnter !== false,
+      });
+      return c.json(report, report.unresolved ? 409 : 200);
+    } catch (error) {
+      return c.json({
+        error: "stuck_message_sweep_failed",
+        message: error instanceof Error ? error.message : String(error),
+      }, 500);
+    }
   });
 
   return router;

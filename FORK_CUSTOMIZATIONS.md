@@ -91,6 +91,16 @@ Line ranges are approximate and drift; the checks do not depend on them.
 - `packages/daemon/src/domain/operational-summary.ts` reads `turnAnomalies`.
 - Marker: construction and policy registration lines in `startup.ts`, plus the summary field.
 
+### Stuck-message sweeper (Enter never registered)
+
+- Resolves the upstream "text pasted, Enter never lands" stall ([#14](https://github.com/mvschwarz/openrig/issues/14), [#2429](https://github.com/mvschwarz/openrig/issues/2429)). RIG-123 observes; this sweeper resolves.
+- `packages/daemon/src/domain/stuck-message-attribution.ts`, `stuck-message-sweeper.ts`, `stuck-message-notify.ts`.
+- `packages/daemon/src/routes/transport.ts` — `POST /api/transport/sweep-stuck`.
+- `packages/daemon/src/startup.ts` — `new StuckMessageSweeper(` wired next to the session transport.
+- `packages/cli/src/commands/sweep-stuck.ts` registered in `packages/cli/src/index.ts`.
+- Docs: `docs/reference/stuck-message-sweeper.md`; launchd template: `scripts/stuck-message-sweep.plist.template`.
+- Marker: sweeper construction in `startup.ts`, CLI registration, and the transport route handler.
+
 ### RIG-80/60/9 fleet aggregation, digest redaction, suppress rules
 
 - `packages/daemon/src/domain/fleet-store.ts`, `fleet-ingestion-service.ts`, `fleet-dashboard.ts`, `routes/fleet-store.ts`; `server.ts` ~L867 mounts `fleetStoreRoutes`; `packages/cli/src/commands/fleet.ts` registered in `packages/cli/src/index.ts`.
@@ -238,6 +248,15 @@ CF-06-policy     | has       | packages/daemon/src/startup.ts | makeTurnAnomalyP
 CF-06-summary    | has       | packages/daemon/src/domain/operational-summary.ts | turnAnomalies
 CF-07-observer   | has       | packages/daemon/src/startup.ts | new StuckSeatObserver\(
 CF-07-ledger     | file      | packages/daemon/src/domain/delivery-attempt-ledger.ts
+
+# Stuck-message sweeper (auto-Enter for unsubmitted OpenRig deliveries)
+CF-28-sweeper    | has       | packages/daemon/src/startup.ts | new StuckMessageSweeper\(
+CF-28-cli        | has       | packages/cli/src/index.ts | sweepStuckCommand
+CF-28-route      | has       | packages/daemon/src/routes/transport.ts | /sweep-stuck
+CF-28-docs       | file      | docs/reference/stuck-message-sweeper.md
+CF-28-plist      | file      | scripts/stuck-message-sweep.plist.template
+CF-28-attr       | file      | packages/daemon/src/domain/stuck-message-attribution.ts
+CF-28-notify     | file      | packages/daemon/src/domain/stuck-message-notify.ts
 
 # RIG-80 fleet, RIG-60 redaction, RIG-9 suppress rules
 CF-08-ingestion | has | packages/daemon/src/index.ts | new FleetIngestionService

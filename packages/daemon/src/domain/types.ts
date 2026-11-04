@@ -190,6 +190,8 @@ export type RigEvent =
   // prompt / permission block. overrideReason = caller's --reason; detectedReason/evidenceSource =
   // what the classifier saw (kept distinct so permission_prompt vs selection_prompt vs unknown stays visible).
   | { type: "transport.prompt_override"; rigId: string; nodeId: string; sessionName: string; actorSession: string | null; detectedState: string; detectedReason: string; evidenceSource: string; overrideReason: string | null }
+  // Fork stuck-message sweeper — audit every auto-Enter attempt (never carries full pane text).
+  | { type: "transport.stuck_message_enter"; rigId: string; nodeId: string; sessionName: string; outcome: "verified" | "unverified" | "failed"; attribution: string; excerpt: string; deliveryAttemptId: string | null; error?: string }
   // OPR.0.4.6.PI1 FR-5 — "rpc" provenance is ADDITIVE: Pi session identity comes
   // from the pi-runner's RPC get_state / typed events, never pane scraping.
   | { type: "agent.session_identity"; rigId: string; nodeId: string; sessionName: string; runtime: string; sessionId: string; provenance: "hook" | "scrape" | "rpc" }

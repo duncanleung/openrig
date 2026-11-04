@@ -37,6 +37,7 @@ import { agentCommand, type AgentDeps } from "./commands/agent.js";
 import { rigCommand, type RigDeps } from "./commands/rig.js";
 import { transcriptCommand } from "./commands/transcript.js";
 import { sendCommand } from "./commands/send.js";
+import { sweepStuckCommand } from "./commands/sweep-stuck.js";
 import { streamCommand, type StreamDeps } from "./commands/stream.js";
 import { queueCommand, type QueueDeps } from "./commands/queue.js";
 import { slackCommand, type SlackDeps } from "./commands/slack.js";
@@ -213,6 +214,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(rigCommand(depsOverride?.rigDeps));
   program.addCommand(transcriptCommand(depsOverride?.transcriptDeps));
   program.addCommand(sendCommand(depsOverride?.sendDeps));
+  program.addCommand(sweepStuckCommand());
   program.addCommand(streamCommand(depsOverride?.streamDeps));
   program.addCommand(queueCommand(depsOverride?.queueDeps));
   program.addCommand(slackCommand(depsOverride?.slackDeps));
