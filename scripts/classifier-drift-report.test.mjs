@@ -159,3 +159,54 @@ test("drift report: exits 0 with message when log file is missing", () => {
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test("drift report: null-repo prediction joins outcome via PR-number fallback (MF2)", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "rig175-drift-"));
+  try {
+    const logPath = join(tmp, "classifications.jsonl");
+    // Prediction has no repo (pre-RIG-175 or repo-resolution failure)
+    const prediction = JSON.stringify({
+      event: "prediction", version: 1, timestamp: new Date().toISOString(),
+      pr: 42, repo: null, sha: null,
+      level: "trivial", reason: "docs-only", override: null,
+      inputs: { diffSize: 10, additions: 10, deletions: 0, totalFiles: 1,
+        kindCounts: { test: 0, docs: 1, source: 0, config: 0, migration: 0, other: 0 },
+        testFileRatio: 0, shellSourceFiles: 0 },
+    });
+    // Outcome has repo (written at merge time)
+    const outcome = writeOutcome({ pr: 42, repo: "owner/repo", must_fix_count: 1 });
+    writeFileSync(logPath, [prediction, outcome].join("\n") + "\n");
+
+    const result = spawnSync(process.execPath, [DRIFT_REPORT, "--log-dir", tmp], { encoding: "utf8" });
+    assert.equal(result.status, 0, `drift-report exited non-zero: ${result.stderr}`);
+    // MF2 fix: null-repo prediction must still find the outcome and register the mismatch
+    assert.ok(result.stdout.includes("PR #42"), "null-repo prediction must match outcome via PR-number fallback");
+    assert.ok(result.stdout.includes("must_fix=1"), "mismatch signal must be reported");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("drift report: accuracy denominator counts joined pairs not total outcome rows (MF1+MF3)", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "rig175-drift-"));
+  try {
+    const logPath = join(tmp, "classifications.jsonl");
+    // 3 outcome rows but only 2 have matching predictions — no mismatches
+    writeFileSync(logPath, [
+      writePrediction({ pr: 1, level: "moderate" }),
+      writeOutcome({ pr: 1, review_cycles: 1, must_fix_count: 0 }),
+      writePrediction({ pr: 2, level: "moderate" }),
+      writeOutcome({ pr: 2, review_cycles: 1, must_fix_count: 0 }),
+      // Outcome with no matching prediction — must not inflate denominator
+      writeOutcome({ pr: 99, review_cycles: 0, must_fix_count: 0, merge_result: "merged" }),
+    ].join("\n") + "\n");
+
+    const result = spawnSync(process.execPath, [DRIFT_REPORT, "--log-dir", tmp], { encoding: "utf8" });
+    assert.equal(result.status, 0, `drift-report exited non-zero: ${result.stderr}`);
+    // 3 outcome rows but only 2 joined → accuracy should be 100% (2 joined, 0 mismatches)
+    // If MF1+MF3 bug persists, denominator would be 3 and accuracy "66.7%"
+    assert.ok(result.stdout.includes("100.0%"), "accuracy must use joined count (2), not total outcomes (3)");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

@@ -18,7 +18,7 @@ import { homedir } from "os";
 import { fileURLToPath } from "url";
 
 // Conservative thresholds. Tune down with calibration data after 50+ PRs.
-const THRESHOLDS = {
+export const THRESHOLDS = {
   TRIVIAL_MAX_DIFF: 100,         // total additions+deletions
   MODERATE_MAX_DIFF: 300,
   MODERATE_MIN_TEST_RATIO: 0.20, // fraction of changed files that are tests

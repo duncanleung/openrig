@@ -48,6 +48,7 @@
 
 import { readFileSync, existsSync } from "fs";
 import { homedir } from "os";
+import { THRESHOLDS } from "./pr-risk-classifier.mjs";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -67,7 +68,7 @@ function readJsonlFile(path) {
     .filter(Boolean);
 }
 
-/** Build a join key: "repo:pr" if repo present, else "pr". */
+/** Build a join key: "repo:pr" when repo is known, else String(pr) as fallback. */
 function joinKey(row) {
   return row.repo ? `${row.repo}:${row.pr}` : String(row.pr);
 }
@@ -78,8 +79,17 @@ function buildReport(rows) {
   const predictions = rows.filter((r) => r.event === "prediction" || !r.event); // legacy rows lack event
   const outcomes = rows.filter((r) => r.event === "outcome");
 
+  // Primary join: repo:pr (exact). Fallback: pr number only (for null-repo predictions).
   const outcomeMap = new Map();
-  for (const o of outcomes) outcomeMap.set(joinKey(o), o);
+  const outcomeByPrMap = new Map();
+  for (const o of outcomes) {
+    outcomeMap.set(joinKey(o), o);
+    if (!outcomeByPrMap.has(String(o.pr))) outcomeByPrMap.set(String(o.pr), o);
+  }
+
+  function lookupOutcome(p) {
+    return outcomeMap.get(joinKey(p)) ?? (p.repo ? undefined : outcomeByPrMap.get(String(p.pr)));
+  }
 
   // ── Summary stats by predicted level ──────────────────────────────────────
   const stats = {
@@ -97,7 +107,7 @@ function buildReport(rows) {
     s.count++;
     if (p.inputs?.diffSize != null) s.diffSizes.push(p.inputs.diffSize);
 
-    const outcome = outcomeMap.get(joinKey(p));
+    const outcome = lookupOutcome(p);
     if (!outcome) continue;
     s.withOutcome++;
     s.mustFixTotal += outcome.must_fix_count ?? 0;
@@ -131,7 +141,8 @@ function buildReport(rows) {
   }
 
   // ── Accuracy ──────────────────────────────────────────────────────────────
-  const totalWithOutcome = outcomes.length;
+  // Count only predictions that actually joined with an outcome (withOutcome), not all outcome rows.
+  const totalWithOutcome = Object.values(stats).reduce((sum, s) => sum + s.withOutcome, 0);
   const mismatchCount = mismatches.length;
   const accuracyPct = totalWithOutcome > 0
     ? (((totalWithOutcome - mismatchCount) / totalWithOutcome) * 100).toFixed(1)
@@ -142,33 +153,34 @@ function buildReport(rows) {
 
   // Proposal: MODERATE_MAX_DIFF — if most moderate-predicted PRs with outcomes needed >2 cycles
   // and their diffSize > some lower value, suggest lowering the threshold.
+  const driftCeiling = Math.floor(THRESHOLDS.MODERATE_MAX_DIFF * 2 / 3); // ~200 for default 300
   const moderateDrifted = predictions.filter((p) => {
     if (p.level !== "moderate") return false;
-    const o = outcomeMap.get(joinKey(p));
-    return o && (o.review_cycles ?? 0) > 2 && (p.inputs?.diffSize ?? 0) > 200;
+    const o = lookupOutcome(p);
+    return o && (o.review_cycles ?? 0) > 2 && (p.inputs?.diffSize ?? 0) > driftCeiling;
   });
   if (moderateDrifted.length >= 3) {
     const driftSizes = moderateDrifted.map((p) => p.inputs?.diffSize ?? 0).sort((a, b) => a - b);
     const p50 = driftSizes[Math.floor(driftSizes.length / 2)];
     proposals.push({
       threshold: "MODERATE_MAX_DIFF",
-      current: 300,
-      proposed: Math.min(p50, 250),
-      evidence: `${moderateDrifted.length} moderate PRs with diffSize >${200} required >2 review cycles (p50 diffSize: ${p50})`,
+      current: THRESHOLDS.MODERATE_MAX_DIFF,
+      proposed: Math.min(p50, Math.floor(THRESHOLDS.MODERATE_MAX_DIFF * 5 / 6)), // ~250 for default 300
+      evidence: `${moderateDrifted.length} moderate PRs with diffSize >${driftCeiling} required >2 review cycles (p50 diffSize: ${p50})`,
     });
   }
 
-  // Proposal: MODERATE_MIN_TEST_RATIO — if trivial PRs with must-fix findings had low test ratios
+  // Proposal: TRIVIAL_MAX_DIFF — if trivial PRs with must-fix findings suggest ceiling is too high
   const trivialMustFix = predictions.filter((p) => {
     if (p.level !== "trivial") return false;
-    const o = outcomeMap.get(joinKey(p));
+    const o = lookupOutcome(p);
     return o && (o.must_fix_count ?? 0) > 0;
   });
   if (trivialMustFix.length >= 2) {
     proposals.push({
       threshold: "TRIVIAL_MAX_DIFF",
-      current: 100,
-      proposed: 75,
+      current: THRESHOLDS.TRIVIAL_MAX_DIFF,
+      proposed: Math.floor(THRESHOLDS.TRIVIAL_MAX_DIFF * 3 / 4), // ~75 for default 100
       evidence: `${trivialMustFix.length} trivial-classified PRs had must-fix findings — lower trivial ceiling to tighten gate`,
     });
   }
