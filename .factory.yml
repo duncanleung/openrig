@@ -15,7 +15,7 @@ topology:
     - match:
         repo: "openrig-memory"
       seat: dev-memory
-      review_repo: /Users/duncanleung/Documents/Develop/openrig-memory
+      review_repo: duncanleung/openrig-memory
 
 risk:
   peripheral_paths:
