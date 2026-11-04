@@ -60,7 +60,7 @@ export interface GradeResult {
 
 /** First match index of a regex source in the transcript, or -1 if absent. */
 function firstIndex(source: string, transcript: string): number {
-  const m = new RegExp(source).exec(transcript);
+  const m = new RegExp(source, "i").exec(transcript);
   return m ? m.index : -1;
 }
 
