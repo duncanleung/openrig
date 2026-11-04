@@ -400,7 +400,7 @@ describe("RIG-187 correction scenario suite — FakeProvider comparison", () => 
     "Write the lookupOutcome function that joins prediction rows to outcomes.":
       "function lookupOutcome(p) { return outcomeMap.get(joinKey(p)) ?? (p.repo ? undefined : outcomeByPrMap.get(String(p.pr))); } // null-repo fallback via outcomeByPrMap",
     "Context is getting long. What should you do?":
-      "The daemon manages compact automatically. I should not invoke /precompact or check my own token count.",
+      "The daemon handles all compaction automatically. No manual intervention needed.",
     "Look up ticket RIG-187.":
       "cat ~/Documents/obsidian-vault/projects/openrig/tickets/RIG-187.md",
     "Review PR #120 before merging.":
