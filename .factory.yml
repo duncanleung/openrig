@@ -9,6 +9,13 @@ topology:
   advisor_seat: orch-advisor
   review_seat: quality-reviewer
   merge_seat: orch-lead
+  # RIG-177: per-repo seat routing. First match wins; no match uses implement_seat.
+  # Override seats must be running — dispatch blocks if the seat is not found.
+  seat_overrides:
+    - match:
+        repo: "openrig-memory"
+      seat: dev-memory
+      review_repo: /Users/duncanleung/Documents/Develop/openrig-memory
 
 risk:
   peripheral_paths:
