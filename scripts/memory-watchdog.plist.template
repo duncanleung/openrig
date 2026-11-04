@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Memory watchdog launchd agent.
+
+  Replace placeholders before loading:
+    __HOME__         Your home directory path (e.g. /Users/yourname)
+    __NODE__         Absolute path to node binary (e.g. /Users/yourname/.nvm/versions/node/v24.14.1/bin/node)
+    __WATCHDOG_JS__  Absolute path to watchdog entrypoint
+                     (e.g. /Users/yourname/Documents/Develop/openrig-memory/dist/packages/watchdog/src/watchdog.js)
+
+  Quick install (from project root):
+    sed -e "s|__HOME__|$HOME|g" \
+        -e "s|__NODE__|$(which node)|g" \
+        -e "s|__WATCHDOG_JS__|$HOME/Documents/Develop/openrig-memory/dist/packages/watchdog/src/watchdog.js|g" \
+        scripts/memory-watchdog.plist.template \
+        > ~/Library/LaunchAgents/com.duncanleung.openrig-memory-watchdog.plist
+    launchctl load ~/Library/LaunchAgents/com.duncanleung.openrig-memory-watchdog.plist
+
+  To unload:
+    launchctl unload ~/Library/LaunchAgents/com.duncanleung.openrig-memory-watchdog.plist
+
+  Prerequisites:
+    - openrig-memory built: cd openrig-memory && npm run build
+    - openrig-memory watchdog.ts writeAlertEvent must set busy_timeout = 5000 so concurrent
+      daemon writes don't surface SQLITE_BUSY errors (WAL mode is inherited from the daemon's
+      initial DB setup, but busy_timeout is per-connection).
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.duncanleung.openrig-memory-watchdog</string>
+
+  <!-- KeepAlive: launchd restarts the watchdog if it exits unexpectedly. -->
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- RunAtLoad: start immediately when the agent is loaded (login). -->
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>LimitLoadToSessionType</key>
+  <string>Aqua</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__NODE__</string>
+    <string>__WATCHDOG_JS__</string>
+    <!-- Default interval is 1800 s (30 min). Adjust as needed. -->
+    <string>--interval</string>
+    <string>1800</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__HOME__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>OPENRIG_HOME</key>
+    <string>__HOME__/.openrig</string>
+    <key>LANG</key>
+    <string>en_US.UTF-8</string>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.openrig/logs/memory-watchdog.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.openrig/logs/memory-watchdog.err.log</string>
+</dict>
+</plist>
