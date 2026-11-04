@@ -34,6 +34,7 @@ export interface WhoamiResult {
     podId: string | null;
     podNamespace: string | null;
     memberId: string;
+    contextLifecycle?: "elephant" | "goldfish" | null;
   }>;
   /**
    * OPR.99.0.6.1 — the peers[] roster contract, stated in-band so a fresh
@@ -280,6 +281,7 @@ export class WhoamiService {
         podId: peerNode.podId ?? null,
         podNamespace: peerPodNamespace,
         memberId: peerMemberId,
+        ...(peerNode.contextLifecycle ? { contextLifecycle: peerNode.contextLifecycle } : {}),
       });
     }
 

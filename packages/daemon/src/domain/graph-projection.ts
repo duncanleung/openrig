@@ -51,6 +51,7 @@ interface RFNodeData {
    *  surfaces the same non-green mismatch/missing evidence as node inventory. */
   identityVerdict?: SeatIdentityVerdict | null;
   heldReason?: string | null;
+  contextLifecycle?: "elephant" | "goldfish" | null;
 }
 
 interface RFNode {
@@ -96,6 +97,7 @@ export interface InventoryOverlay {
   blockedWorkCount?: number;
   identityVerdict?: SeatIdentityVerdict | null;
   heldReason?: string | null;
+  contextLifecycle?: "elephant" | "goldfish" | null;
 }
 
 export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: InventoryOverlay[]): ReactFlowGraph {
@@ -180,6 +182,7 @@ export function projectRigToGraph(input: RigGraphInput, inventoryOverlay?: Inven
         blockedWorkCount: overlay?.blockedWorkCount ?? 0,
         identityVerdict: overlay?.identityVerdict ?? null,
         heldReason: overlay?.heldReason ?? null,
+        contextLifecycle: node.contextLifecycle ?? null,
       },
     };
   });

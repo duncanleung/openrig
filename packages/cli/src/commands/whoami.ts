@@ -99,7 +99,10 @@ function projectCompactWhoami(data: Record<string, unknown>, bounded?: BoundedPe
     },
     peers: peers.map((p) => {
       const peer = (p ?? {}) as Record<string, unknown>;
-      return { logicalId: peer["logicalId"], sessionName: peer["sessionName"], runtime: peer["runtime"] };
+      return {
+        logicalId: peer["logicalId"], sessionName: peer["sessionName"], runtime: peer["runtime"],
+        ...(peer["contextLifecycle"] ? { contextLifecycle: peer["contextLifecycle"] } : {}),
+      };
     }),
     // KEEP: openrig-user SKILL.md documents peersNote as a required recovery field.
     peersNote: bounded ? bounded.note : data["peersNote"],

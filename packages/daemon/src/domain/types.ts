@@ -74,6 +74,8 @@ export interface Node {
   fallbackOriginalRuntime?: string | null;
   /** RIG-43: the pool's actual usage-limit expiry deadline (ISO string). */
   fallbackExpiresAt?: string | null;
+  /** RIG-182/186: seat's declared context lifecycle from the rig spec. */
+  contextLifecycle?: "elephant" | "goldfish" | null;
   createdAt: string;
 }
 

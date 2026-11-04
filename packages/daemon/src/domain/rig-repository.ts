@@ -927,6 +927,7 @@ export class RigRepository {
       fallbackSwapBack: (row.fallback_swap_back as Node["fallbackSwapBack"]) ?? null,
       fallbackOriginalRuntime: row.fallback_original_runtime ?? null,
       fallbackExpiresAt: row.fallback_expires_at ?? null,
+      contextLifecycle: row.context_lifecycle as Node["contextLifecycle"] ?? null,
       createdAt: row.created_at,
     };
   }
@@ -1026,6 +1027,7 @@ interface NodeRow {
   fallback_swap_back?: string | null;
   fallback_original_runtime?: string | null;
   fallback_expires_at?: string | null;
+  context_lifecycle?: string | null;
   created_at: string;
 }
 
