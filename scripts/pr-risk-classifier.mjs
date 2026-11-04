@@ -18,7 +18,7 @@ import { homedir } from "os";
 import { fileURLToPath } from "url";
 
 // Conservative thresholds. Tune down with calibration data after 50+ PRs.
-const THRESHOLDS = {
+export const THRESHOLDS = {
   TRIVIAL_MAX_DIFF: 100,         // total additions+deletions
   MODERATE_MAX_DIFF: 300,
   MODERATE_MIN_TEST_RATIO: 0.20, // fraction of changed files that are tests
@@ -253,7 +253,15 @@ async function main() {
     mkdirSync(logDir, { recursive: true });
     appendFileSync(
       `${logDir}/classifications.jsonl`,
-      JSON.stringify({ timestamp: new Date().toISOString(), pr: parseInt(prNum, 10), ...result }) + "\n",
+      JSON.stringify({
+        event: "prediction",
+        version: 1,
+        timestamp: new Date().toISOString(),
+        pr: parseInt(prNum, 10),
+        repo: repoPath ?? null,
+        sha: headSha || null,
+        ...result,
+      }) + "\n",
     );
   } catch (logErr) {
     console.error(`[pr-risk-classifier] Warning: failed to write classification log: ${logErr.message}`);

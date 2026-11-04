@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 
+import { readFileSync } from "node:fs";
 import { isSkillFile, fileKind, classify } from "./pr-risk-classifier.mjs";
 
 const CLASSIFIER = fileURLToPath(new URL("./pr-risk-classifier.mjs", import.meta.url));
@@ -292,6 +293,49 @@ if (args.includes('nameWithOwner')) {
     assert.equal(result.status, 0, `classifier exited non-zero: ${result.stderr}`);
     const parsed = JSON.parse(result.stdout);
     assert.equal("skillFileGate" in parsed, false, "skillFileGate must be absent when no skill files");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// ─── RIG-175: prediction event fields in JSONL log ───────────────────────────
+
+test("subprocess: JSONL log includes event, version, repo, and sha fields (RIG-175)", () => {
+  const tmp = mkdtempSync(join(tmpdir(), "rig175-test-"));
+  try {
+    const ghBin = join(tmp, "gh");
+    writeFileSync(ghBin, `#!/usr/bin/env node
+const args = process.argv.slice(2).join(' ');
+if (args.includes('nameWithOwner')) {
+  process.stdout.write('duncanleung/openrig\\n');
+} else if (args.includes('--paginate') && args.includes('/files')) {
+  const files = [
+    { path: 'src/index.ts', additions: 10, deletions: 3 },
+  ];
+  for (const f of files) process.stdout.write(JSON.stringify(f) + '\\n');
+} else if (args.includes('headRefOid')) {
+  process.stdout.write(JSON.stringify(['', 'deadbeef1234567890abcdef1234567890abcdef12']) + '\\n');
+} else {
+  process.stderr.write('fake-gh: unhandled: ' + args + '\\n');
+  process.exit(1);
+}
+`, { mode: 0o755 });
+
+    const env = { ...process.env, PATH: `${tmp}:${process.env.PATH}`, CLASSIFIER_LOG_DIR: tmp };
+    const result = spawnSync(process.execPath, [CLASSIFIER, "55"], { encoding: "utf8", env });
+
+    assert.equal(result.status, 0, `classifier exited non-zero: ${result.stderr}`);
+
+    const logPath = join(tmp, "classifications.jsonl");
+    const logRow = JSON.parse(readFileSync(logPath, "utf8").trim());
+
+    assert.equal(logRow.event, "prediction", "event field must be 'prediction'");
+    assert.equal(logRow.version, 1, "version field must be 1");
+    assert.equal(logRow.repo, "duncanleung/openrig", "repo field must match gh nameWithOwner");
+    assert.equal(logRow.sha, "deadbeef1234567890abcdef1234567890abcdef12", "sha field must match headRefOid");
+    assert.equal(logRow.pr, 55, "pr field must be the PR number");
+    assert.ok(logRow.timestamp, "timestamp must be present");
+    assert.ok(logRow.level, "level must be present");
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
