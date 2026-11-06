@@ -224,6 +224,48 @@ describe("agent pane activity classifier", () => {
     expect(result.reason).toBe("idle_status_bar");
   });
 
+  // Live orch-lead@mac-fan-speed footer: standalone update banner + /rc under the mode bar.
+  // Managed /compact stalled on unknown/no_activity_signal until both rows were skippable.
+  it("classifies empty Claude prompt under standalone update-installed banner and /rc as idle", () => {
+    const result = classifyPaneActivity([
+      "Opus 4.6 (1M context) | mac-fan-speed | 2M 1?",
+      "⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent",
+      "✔ Update installed · Restart to update",
+      "/rc",
+    ].join("\n"));
+
+    expect(result).toMatchObject({ state: "agent_idle", reason: "idle_status_bar" });
+  });
+
+  it("keeps Claude drafts, active turns, and unknown trailing rows out of idle under the standalone update banner", () => {
+    const draft = classifyPaneActivity([
+      "❯ deploy the release",
+      "⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent",
+      "✔ Update installed · Restart to update",
+      "/rc",
+    ].join("\n"));
+    expect(draft.state).not.toBe("agent_idle");
+    expect(draft).toMatchObject({ state: "attention", reason: "prompt_draft" });
+
+    const active = classifyPaneActivity([
+      "✻ Thinking… (2m 38s · ↓ 10.9k tokens · thought for 8s)",
+      "❯ ",
+      "⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent",
+      "✔ Update installed · Restart to update",
+      "/rc",
+    ].join("\n"));
+    expect(active).toMatchObject({ state: "agent_active", reason: "mid_work_pattern" });
+
+    const unknown = classifyPaneActivity([
+      "Opus 4.6 (1M context) | mac-fan-speed | 2M 1?",
+      "⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent",
+      "✔ Update installed · Restart to update",
+      "/rc",
+      "unrecognized output",
+    ].join("\n"));
+    expect(unknown).toMatchObject({ state: "unknown", reason: "no_activity_signal" });
+  });
+
   it("classifies typed Claude prompt text above an idle footer as attention, not idle", () => {
     const result = classifyPaneActivity([
       "❯ I am still typing a message",
