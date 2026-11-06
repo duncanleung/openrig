@@ -251,7 +251,7 @@ const DEFAULT_CLAUDE_COMPACTION_EXTRA_INSTRUCTION_FILE_PATH = getDefaultOpenRigP
 
 const DEFAULTS = {
   launch: { nonInterruptive: false },
-  daemon: { port: 7433, host: "127.0.0.1" },
+  daemon: { port: 7433, host: "127.0.0.1", startupDeadlineSeconds: 90 },
   // OPR.0.4.6.MH1 FR-1 — "local" ≡ no remote selection (LOCAL_HOST_ID).
   // FR-4 — own-host display name; default "localhost" (PRD-named).
   host: { selected: "local", name: "localhost" },
@@ -393,6 +393,7 @@ const DEFAULTS = {
 export const VALID_KEYS = [
   "daemon.port",
   "daemon.host",
+  "daemon.startup_deadline_seconds",
   // OPR.0.4.6.MH1 FR-1 — the persisted host-selection pointer (the
   // kubectl current-context shape). ONE static key, lockstep with the
   // daemon settings-store twin (parity test pins both). Registry-
@@ -535,6 +536,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   // OPR.0.4.6.WF5 FR-2 — new key, OPENRIG_* only.
   "workflow.exception_routing": { primary: "OPENRIG_WORKFLOW_EXCEPTION_ROUTING" },
   "daemon.host": { primary: "OPENRIG_HOST", legacy: "RIGGED_HOST" },
+  "daemon.startup_deadline_seconds": { primary: "OPENRIG_STARTUP_DEADLINE_SECONDS" },
   "db.path": { primary: "OPENRIG_DB", legacy: "RIGGED_DB" },
   "transcripts.enabled": { primary: "OPENRIG_TRANSCRIPTS_ENABLED", legacy: "RIGGED_TRANSCRIPTS_ENABLED" },
   "transcripts.path": { primary: "OPENRIG_TRANSCRIPTS_PATH", legacy: "RIGGED_TRANSCRIPTS_PATH" },
@@ -635,6 +637,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "host.name": ["host", "name"],
   "workflow.exception_routing": ["workflow", "exceptionRouting"],
   "daemon.host": ["daemon", "host"],
+  "daemon.startup_deadline_seconds": ["daemon", "startupDeadlineSeconds"],
   "db.path": ["db", "path"],
   "transcripts.enabled": ["transcripts", "enabled"],
   "transcripts.path": ["transcripts", "path"],
@@ -918,6 +921,11 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   "transcripts.poll_interval_seconds": (raw, value) => {
     if (!/^\d+$/.test(raw.trim()) || typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 3600) {
       throw new Error("Invalid transcripts.poll_interval_seconds: must be an integer in [1, 3600]");
+    }
+  },
+  "daemon.startup_deadline_seconds": (raw, coerced) => {
+    if (!/^\d+$/.test(raw.trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 10 || coerced > 3600) {
+      throw new Error(`Invalid value for daemon.startup_deadline_seconds: must be an integer in [10, 3600], got "${raw}"`);
     }
   },
   "runtime.readiness_timeout_seconds": (raw, coerced) => {

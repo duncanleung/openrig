@@ -254,7 +254,17 @@ const DEFAULT_DB = "openrig.sqlite";
 // answer already in hand when the clock passes it is still used, with the usual
 // liveness and publication rechecks. A failed start may add up to
 // DAEMON_STOP_WAIT_MS of owned-child cleanup.
-const STARTUP_READINESS_DEADLINE_MS = 20_000;
+function readConfigDeadline(): number | undefined {
+  try {
+    const resolved = new ConfigStore().resolveWithSource("daemon.startup_deadline_seconds");
+    if (resolved.source !== "default") return (resolved.value as number) * 1000;
+  } catch { /* config unreadable — fall through to built-in default */ }
+  return undefined;
+}
+const STARTUP_READINESS_DEADLINE_MS =
+  (Number(process.env.OPENRIG_STARTUP_DEADLINE_MS) || 0) ||
+  readConfigDeadline() ||
+  90_000;
 const STARTUP_PROBE_TIMEOUT_MS = 2_000;
 const HEALTHZ_DELAY_MS = 250;
 // OPR.0.4.7 slice-05 item-4: the WHOLE status health probe stays within ONE normal
@@ -784,8 +794,15 @@ async function startOwnedDaemon(opts: StartOptions, deps: LifecycleDeps, lock: D
     let lastProbe = "health endpoint not responding";
     let unverified: string[] | null = null;
     deadline = Date.now() + STARTUP_READINESS_DEADLINE_MS;
+    const startTime = Date.now();
+    let lastProgressLogS = 0;
     while (remaining() > 0) {
       unverified = null;
+      const elapsedS = Math.floor((Date.now() - startTime) / 1000);
+      if (elapsedS > 0 && elapsedS !== lastProgressLogS && elapsedS % 10 === 0) {
+        process.stderr.write(`Waiting for daemon... ${elapsedS}s elapsed\n`);
+        lastProgressLogS = elapsedS;
+      }
       try {
         const body = await readOwnedHealth(healthzUrl);
         if (body) {
