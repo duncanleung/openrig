@@ -261,9 +261,18 @@ function readConfigDeadline(): number | undefined {
   } catch { /* config unreadable — fall through to built-in default */ }
   return undefined;
 }
+export function clampEnvDeadlineMs(raw: number): number | undefined {
+  if (!Number.isFinite(raw)) return undefined;
+  return Math.min(600_000, Math.max(1_000, raw));
+}
+function readEnvDeadlineMs(): number | undefined {
+  const envVal = process.env.OPENRIG_STARTUP_DEADLINE_MS;
+  if (envVal === undefined || envVal === "") return undefined;
+  return clampEnvDeadlineMs(Number(envVal));
+}
 const STARTUP_READINESS_DEADLINE_MS =
-  (Number(process.env.OPENRIG_STARTUP_DEADLINE_MS) || 0) ||
-  readConfigDeadline() ||
+  readEnvDeadlineMs() ??
+  readConfigDeadline() ??
   90_000;
 const STARTUP_PROBE_TIMEOUT_MS = 2_000;
 const HEALTHZ_DELAY_MS = 250;
