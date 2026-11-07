@@ -193,7 +193,13 @@ const CLAUDE_STATUS_WARNINGS = [
 const CLAUDE_STATUS_DECORATIONS = [
   // Standalone post-install banner ("to update"; older builds said "to apply" and live under warnings).
   /^✔ Update installed · Restart to update$/,
-  /^\/rc$/,
+  // Claude 2026-11 wording of the same banner.
+  /^✔ Update installed · \/restart to apply$/,
+  // Remote Control footer marker; "/rc failed" after a disconnect.
+  /^\/rc(?: failed)?$/,
+  // Context hint is noise under a bare mode bar too (also kept in CLAUDE_STATUS_WARNINGS). Mid-work is
+  // still measured from the mode bar, so a live turn above it stays agent_active.
+  /^new task\? \/clear to save \d+(?:\.\d+)?k tokens$/,
 ];
 
 function isClaudeStatusWarning(line: string): boolean {

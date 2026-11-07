@@ -1,0 +1,14 @@
+
+⏺ Remote Control disconnected — Remote Control server rejected the
+  request (HTTP 404) — run /remote-control to retry
+
+────────────────────────────────────────────────────── orch-lead@mac-fan-speed ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  00000000-0000-0000-0000-000000000000 | DUMB +240K |  master | user@example…
+  Opus 4.6 (1M context) | mac-fan-speed | 2M 1?
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent
+                                        ✔ Update installed · /restart to apply
+                                        new task? /clear to save 443.7k tokens
+                                                                    /rc failed
+
