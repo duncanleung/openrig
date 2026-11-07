@@ -608,11 +608,12 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
     };
   }
 
-  const midWorkEvidence = findPatternEvidence(recentLines, [
+  const midWorkPatterns = [
     ...MID_WORK_PATTERNS,
     CLAUDE_LIVE_STATUS_PATTERN,
     ...(options.timerlessStatusIsLive ? [CLAUDE_TIMERLESS_STATUS_PATTERN] : []),
-  ]);
+  ];
+  const midWorkEvidence = findPatternEvidence(recentLines, midWorkPatterns);
   const isClaudeStatusBar = CLAUDE_PERMISSION_MODE_FOOTER.test(idleStatusBarLine ?? "");
   if (idleStatusBarLine && (!isClaudeStatusBar || !midWorkEvidence)) {
     return {
@@ -634,6 +635,14 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
       ? lastNonBlank[statusBarAt]!
       : null;
     const beyondIsClaude = CLAUDE_PERMISSION_MODE_FOOTER.test(statusBarBeyondDecorations ?? "");
+    // Same reach as the idleStatusBarLine veto: the bar plus the 7 rows above it, not the last 8
+    // rows of the capture (decoration rows below the bar would otherwise consume window slots).
+    const lateMidWork = beyondIsClaude
+      ? findPatternEvidence(lastNonBlank.slice(Math.max(0, statusBarAt - 7), statusBarAt + 1), midWorkPatterns)
+      : null;
+    if (lateMidWork) {
+      return { state: "agent_active", reason: "mid_work_pattern", evidence: lateMidWork };
+    }
     if (statusBarBeyondDecorations && (!beyondIsClaude || !midWorkEvidence)) {
       return {
         state: "agent_idle",

@@ -266,6 +266,22 @@ describe("agent pane activity classifier", () => {
     expect(unknown).toMatchObject({ state: "unknown", reason: "no_activity_signal" });
   });
 
+  it("keeps a live Claude turn active when decorations push the status row past the last-8 window", () => {
+    const result = classifyPaneActivity([
+      "✻ Thinking… (2m 38s · ↓ 10.9k tokens · thought for 8s)",
+      "  ⎿  Tip: Use /statusline to configure",
+      "────────────────────────",
+      "❯ ",
+      "────────────────────────",
+      "Opus 4.6 (1M context) | mac-fan-speed | 2M 1?",
+      "⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent",
+      "✔ Update installed · Restart to update",
+      "/rc",
+    ].join("\n"));
+
+    expect(result).toMatchObject({ state: "agent_active", reason: "mid_work_pattern" });
+  });
+
   it("classifies typed Claude prompt text above an idle footer as attention, not idle", () => {
     const result = classifyPaneActivity([
       "❯ I am still typing a message",
