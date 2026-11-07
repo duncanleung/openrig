@@ -115,6 +115,23 @@ export function classify(inputs) {
     };
   }
 
+  // Test-only PRs: no source or migration changes, test files dominate.
+  // Large test diffs do not carry production risk — cap at moderate (not trivial,
+  // since disabled assertions or misconfigured test infra still warrant review).
+  if (
+    kindCounts.source === 0 &&
+    kindCounts.migration === 0 &&
+    testFileRatio >= 0.8
+  ) {
+    return {
+      level: "moderate",
+      reason: [
+        `test-only PR (testFileRatio ${testFileRatio.toFixed(2)}, 0 source/migration)`,
+        `diff ${diffSize} capped at moderate`,
+      ].join("; "),
+    };
+  }
+
   // High: default — list which threshold(s) triggered it
   const triggers = [];
   if (kindCounts.migration > 0) triggers.push(`${kindCounts.migration} migration file(s)`);
