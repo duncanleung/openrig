@@ -1,5 +1,10 @@
 # Per-seat terminal delivery
 
+When a delivered message sits unsubmitted in a seat's input box (Enter never
+registered), see [stuck-message-sweeper.md](./stuck-message-sweeper.md) for
+`rig sweep-stuck` — detection, safe auto-Enter rules, macOS scheduling, and the
+notify hook.
+
 The existing typing guard supports three modes. Before draft-aware mode,
 automatic input either used the ordinary delivery path or was held unconditionally.
 Draft-aware adds an opt-in check for unfinished input without a second control or

@@ -107,6 +107,8 @@ import { probeSessionActivity, readComposerOccupancy, SessionTransport } from ".
 import { DeliveryAttemptLedger, teeObserverSinks } from "./domain/delivery-attempt-ledger.js";
 import { createValidationGatePredicate } from "./domain/validation-gate-enforcer.js";
 import { StuckSeatObserver, type ComposerReading, type SeatTarget } from "./domain/stuck-seat-observer.js";
+import { StuckMessageSweeper, submitOnlyViaTransport } from "./domain/stuck-message-sweeper.js";
+import { makeStuckNotifyHook } from "./domain/stuck-message-notify.js";
 import { getNodeInventoryForRigs } from "./domain/node-inventory.js";
 import { AgentActivityStore } from "./domain/agent-activity-store.js";
 import { HistoryQuery } from "./domain/history-query.js";
@@ -681,14 +683,15 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const deliveryAttemptLedger = new DeliveryAttemptLedger();
   // RIG-79 — fleet turn-anomaly detection reads the fleet store (database), never the terminal, so it is a separate service.
   const turnAnomalyDetector = new TurnAnomalyDetector({ db });
+  const listManagedSeats = (rigFilter?: string): SeatTarget[] => {
+    const rigs = rigRepo.listRigs().filter((r) => !rigFilter || r.id === rigFilter || r.name === rigFilter);
+    const byRig = getNodeInventoryForRigs(db, new Set(rigs.map((r) => r.id)));
+    return [...byRig.values()].flat()
+      .filter((n) => n.nodeKind === "agent" && n.sessionStatus === "running" && n.canonicalSessionName)
+      .map((n) => ({ rig: n.rigName, logicalId: n.logicalId, session: n.canonicalSessionName!, runtime: n.runtime ?? null }));
+  };
   const stuckSeatObserver = new StuckSeatObserver({
-    listSeats: (rigFilter): SeatTarget[] => {
-      const rigs = rigRepo.listRigs().filter((r) => !rigFilter || r.id === rigFilter || r.name === rigFilter);
-      const byRig = getNodeInventoryForRigs(db, new Set(rigs.map((r) => r.id)));
-      return [...byRig.values()].flat()
-        .filter((n) => n.nodeKind === "agent" && n.sessionStatus === "running" && n.canonicalSessionName)
-        .map((n) => ({ rig: n.rigName, logicalId: n.logicalId, session: n.canonicalSessionName!, runtime: n.runtime ?? null }));
-    },
+    listSeats: listManagedSeats,
     seatActivity: seatActivityService,
     // One batched capture for the candidate seats; the composer is read per runtime with the existing composer
     // recognizers. It reports presence of typed text only, never the text.
@@ -1362,15 +1365,79 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       });
     });
   }
+  const sessionTransport = new SessionTransport({
+    db,
+    rigRepo,
+    sessionRegistry,
+    tmuxAdapter,
+    agentActivityStore,
+    eventBus,
+    slowOpRecorder,
+    activityEndpointFile: () => readActivityEndpointFile(OPENRIG_HOME),
+    captureObserver: teeObserverSinks(shadow.capture?.observer, deliveryAttemptLedger),
+    runtimeAdapters: runtimeAdaptersMap,
+    // transport.verify_input_box, read at each verified Claude Code or Codex send (absent or unreadable = off).
+    verifyInputBox: () => {
+      try { return new ContextPackSettingsStore().resolveOne("transport.verify_input_box").value === true; } catch { return false; }
+    },
+  });
+  // PL-004 Phase A revision (R1): wire QueueRepository's wake-path so
+  // create / handoff / handoff-and-complete nudge by default.
+  queueRepoInstance.attachTransport(sessionTransport);
+  // PL-004 Phase B: wire classifier-lease-manager liveness check from
+  // the sessions table. Lease holder is "alive" iff there is at least
+  // one row in `sessions` with session_name == classifierSession AND
+  // status == 'running'.
+  classifierLeaseManagerInstance.attachIsAlive((classifierSession: string): boolean => {
+    try {
+      classifierSession = physicalSessionName(db, classifierSession);
+      const row = db
+        .prepare(
+          `SELECT 1 FROM sessions WHERE session_name = ? AND status = 'running' LIMIT 1`,
+        )
+        .get(classifierSession) as { 1: number } | undefined;
+      return row !== undefined;
+    } catch {
+      // Conservative: on lookup error, treat as alive (do not falsely
+      // trigger deadness-based lease expiry).
+      return true;
+    }
+  });
+
+  // Fork stuck-message sweeper — resolution for stuck OpenRig deliveries (Enter never registered).
+  const stuckMessageSweeper = new StuckMessageSweeper({
+    listSeats: listManagedSeats,
+    seatActivity: seatActivityService,
+    capturePane: (session) => tmuxAdapter.capturePaneContent(session, 50),
+    submitOnly: submitOnlyViaTransport(sessionTransport),
+    pressEnter: async (session) => {
+      const result = await tmuxAdapter.sendKeys(session, ["Enter"]);
+      return result.ok
+        ? { ok: true }
+        : { ok: false, reason: "submit_failed", error: result.message };
+    },
+    attempts: deliveryAttemptLedger,
+    eventBus,
+    notify: makeStuckNotifyHook(),
+    resolveNode: (session) => {
+      try {
+        const row = db.prepare(
+          `SELECT n.id AS nodeId, n.rig_id AS rigId FROM sessions s
+           JOIN nodes n ON n.id = s.node_id
+           WHERE s.session_name = ? ORDER BY s.created_at DESC LIMIT 1`,
+        ).get(session) as { nodeId: string; rigId: string } | undefined;
+        return row ? { rigId: row.rigId, nodeId: row.nodeId } : null;
+      } catch { return null; }
+    },
+  });
+
   const { SeatAttentionReconciler, attentionProbeSend } = await import("./domain/seat-attention-reconciler.js");
   const seatAttentionReconciler = new SeatAttentionReconciler({
     sessionRegistry, eventBus, agentActivityStore, db, tmux: tmuxAdapter,
     reconcileRestoreOutcome: (rigId, nodeId) => restoreOrchestrator.reconcileNodeRuntimeTruth(rigId, nodeId),
-    sendVerify: attentionProbeSend(() => deps.sessionTransport),
+    sendVerify: attentionProbeSend(() => sessionTransport),
     capture: async (session, opts) => {
-      const transport = deps.sessionTransport;
-      if (!transport) return { ok: false, sessionName: session, error: "transport_unavailable" };
-      return transport.capture(session, opts);
+      return sessionTransport.capture(session, opts);
     },
   });
 
@@ -1465,47 +1532,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     podBundleSourceResolver,
     runtimeAdapters: runtimeAdaptersMap,
     transcriptStore,
-    sessionTransport: (() => {
-      const t = new SessionTransport({
-        db,
-        rigRepo,
-        sessionRegistry,
-        tmuxAdapter,
-        agentActivityStore,
-        eventBus,
-        slowOpRecorder,
-        activityEndpointFile: () => readActivityEndpointFile(OPENRIG_HOME),
-        captureObserver: teeObserverSinks(shadow.capture?.observer, deliveryAttemptLedger),
-        runtimeAdapters: runtimeAdaptersMap,
-        // transport.verify_input_box, read at each verified Claude Code or Codex send (absent or unreadable = off).
-        verifyInputBox: () => {
-          try { return new ContextPackSettingsStore().resolveOne("transport.verify_input_box").value === true; } catch { return false; }
-        },
-      });
-      // PL-004 Phase A revision (R1): wire QueueRepository's wake-path so
-      // create / handoff / handoff-and-complete nudge by default.
-      queueRepoInstance.attachTransport(t);
-      // PL-004 Phase B: wire classifier-lease-manager liveness check from
-      // the sessions table. Lease holder is "alive" iff there is at least
-      // one row in `sessions` with session_name == classifierSession AND
-      // status == 'running'.
-      classifierLeaseManagerInstance.attachIsAlive((classifierSession: string): boolean => {
-        try {
-          classifierSession = physicalSessionName(db, classifierSession);
-          const row = db
-            .prepare(
-              `SELECT 1 FROM sessions WHERE session_name = ? AND status = 'running' LIMIT 1`,
-            )
-            .get(classifierSession) as { 1: number } | undefined;
-          return row !== undefined;
-        } catch {
-          // Conservative: on lookup error, treat as alive (do not falsely
-          // trigger deadness-based lease expiry).
-          return true;
-        }
-      });
-      return t;
-    })(),
+    sessionTransport,
+    stuckMessageSweeper,
     chatRepo: new ChatRepository(db),
     streamStore,
     slowOpRecorder,
@@ -2182,7 +2210,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   const { loadHumanRegistry: loadHumanRegistryForDelivery } = await import("./domain/gateway/human-registry.js");
   void loadHumanRegistryForDelivery; // consumed inside the sessionTransport block below
 
-  const sessionTransport = deps.sessionTransport;
+  // sessionTransport was constructed above and placed on deps; reuse that binding (do not redeclare).
   if (sessionTransport) {
     queueRepoInstance.attachActivityReader((session) => {
       session = physicalSessionName(db, session);
