@@ -150,6 +150,39 @@ Line ranges are approximate and drift; the checks do not depend on them.
 
 - `scripts/hooks/post-tool-truncate.sh`.
 
+## Ported upstream fixes
+
+Selective ports from `mvschwarz/openrig` into this fork (not wholesale merges). Each entry names the
+upstream source and the fork files that carry it.
+
+### Claude wrap-slack Enter submit (upstream #2436 / #2429)
+
+- Source: https://github.com/mvschwarz/openrig/pull/2436 (merge `1593295db`, 2026-11-03).
+- Problem: a long one-line delivery to a Claude Code seat wraps a few columns short of the input box;
+  the draft-aware ownership check did not recognize it as the delivery's own text, so Enter was never
+  sent and leftover text blocked later deliveries.
+- Port: `wrapSlack` on `ComposerInput` and `composerContainsOwnedText` in
+  `packages/daemon/src/domain/composer-prompts.ts`; `CLAUDE_WRAP_SLACK = 6` applied for `❯` frames in
+  `packages/daemon/src/domain/session-transport.ts`; native wrapped-frame coverage in
+  `packages/daemon/test/composer-input.test.ts` (fixtures already present under
+  `packages/daemon/test/fixtures/input-box/`).
+- Adaptations: applied by hand (cherry-pick conflicted). Fork still lacks upstream's later
+  `pasteViewport` / `suggestionRows` / native-Codex column trim on `ComposerInput`; only the wrap-slack
+  slice was taken. Codex frames remain unchanged.
+
+### Read-only tmux client submit via paste (upstream #2345 / #2090)
+
+- Source: https://github.com/mvschwarz/openrig/commit/7c6746e612effcbeaad2fee1a406cf00ab058b99
+  (`fix(daemon): submit through the paste route when a read-only tmux client refuses send-keys`).
+- Problem: with a read-only attached client (`tmux attach -r`), tmux 3.7/3.8 refuses every
+  `send-keys` (including Enter), so staged text sits unsubmitted.
+- Port: `isReadOnlyClientRefusal` / `isSubmitKey` and the lone-Enter/`C-m` paste fallback in
+  `packages/daemon/src/adapters/tmux.ts`; tests in `packages/daemon/test/tmux-adapter.test.ts`.
+- Minimal prerequisite from https://github.com/mvschwarz/openrig/pull/2309: optional
+  `options.beforeKeys` on `sendKeys` only (the 3-line signature hook the re-check uses). The rest of
+  #2309 (expected-conversation endpoints) was not ported.
+- Adaptations: applied by hand to the fork's `sendKeys` / `sendTextUnchecked` shape.
+
 ## Known gaps
 
 A `!` ID in the checks block marks a customization that is known to be missing. It reports `GAP` and does
