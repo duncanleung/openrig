@@ -213,6 +213,49 @@ function isClaudeStatusDecoration(line: string): boolean {
 function isClaudeStatusTrailer(line: string): boolean {
   return isClaudeStatusWarning(line) || isClaudeStatusDecoration(line);
 }
+
+const CLAUDE_CLOSING_RULE_PATTERN = /^[ \t]*─{3,}$/;
+// Same shape as the closing rule, but the opening rule can carry a session-name title
+// (`findClaudeComposer`'s `upper` check, and SEAT_IDLE_SHAPES.claude.openingRules.named): e.g.
+// "──── fixer@example ──".
+const CLAUDE_OPENING_RULE_PATTERN = /^[ \t]*─{3,}(?: .+ ─+)?$/;
+
+// OpenRig's statusLine draws its own rows (session id, context budget, branch, model, host) between
+// the composer's closing rule and the mode-bar footer. Content is per-seat and not matchable by a
+// fixed pattern, but every real frame (test/fixtures/claude-footer-drift/*) draws at most this many.
+// Bound the walk and give up safely (return -1) rather than tunnel into real conversation content.
+const CLAUDE_STATUSLINE_MAX_ROWS = 2;
+
+/** Looks for the composer's closing rule up to `CLAUDE_STATUSLINE_MAX_ROWS` rows above `from`
+ *  (skipping OpenRig statusLine rows in between). Returns its index, or -1 if none was found within
+ *  the bound — the caller must then leave the existing (pre-this-fix) idle logic untouched. */
+function skipClaudeStatuslineRows(lines: string[], from: number): number {
+  for (let skipped = 0; skipped <= CLAUDE_STATUSLINE_MAX_ROWS; skipped++) {
+    const i = from - skipped;
+    if (i < 0) return -1;
+    if (CLAUDE_CLOSING_RULE_PATTERN.test(lines[i] ?? "")) return i;
+  }
+  return -1;
+}
+
+// Bound on how many composer rows (prompt text plus continuation lines) can sit between the
+// composer's closing rule and its opening rule. A multi-line draft spans more than one row; treat
+// it as unknown, never idle, rather than tunnel further up looking for a frame.
+const CLAUDE_DRAFT_COMPOSER_MAX_ROWS = 6;
+
+/** The composer rows between `closingRuleAt` and the nearest opening rule above it (bounded).
+ *  `openingRuleAt` is -1 if no opening rule was found within the bound. */
+function findClaudeDraftRegion(lines: string[], closingRuleAt: number): { openingRuleAt: number; rows: string[] } {
+  const rows: string[] = [];
+  let i = closingRuleAt - 1;
+  while (i >= 0 && rows.length <= CLAUDE_DRAFT_COMPOSER_MAX_ROWS) {
+    const line = lines[i] ?? "";
+    if (CLAUDE_OPENING_RULE_PATTERN.test(line)) return { openingRuleAt: i, rows };
+    rows.unshift(line);
+    i--;
+  }
+  return { openingRuleAt: -1, rows };
+}
 // Current Claude status rows need not end in "thinking)" or show "esc to interrupt".
 // Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
 // While a hook runs, the timer follows its label: "(running PostToolUse hook · 3m 12s · …)".
@@ -648,6 +691,30 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
       : null;
     if (lateMidWork) {
       return { state: "agent_active", reason: "mid_work_pattern", evidence: lateMidWork };
+    }
+    // A composer can sit above the mode bar with OpenRig's own statusLine rows drawn in between
+    // (test/fixtures/claude-footer-drift/*) — the only draft-detection path above this point
+    // (findPromptDraftBeforeFooter) checks just the single row directly above the footer, which is
+    // a statusLine row here, not the composer. Walk past the statusLine rows to the composer's
+    // closing rule, then inspect what is actually in the composer: an empty prompt falls through
+    // to the idle return below unchanged; a single-line draft is attention; anything else (a
+    // multi-line draft, or no recognizable frame within bound) must not read as idle.
+    if (beyondIsClaude && statusBarBeyondDecorations) {
+      const closingRuleAt = skipClaudeStatuslineRows(lastNonBlank, statusBarAt - 1);
+      if (closingRuleAt >= 0) {
+        const draftRegion = findClaudeDraftRegion(lastNonBlank, closingRuleAt);
+        if (draftRegion.openingRuleAt < 0 || draftRegion.rows.length !== 1) {
+          return { state: "unknown", reason: "no_activity_signal", evidence: truncateEvidence(lastLine) };
+        }
+        const draftLine = draftRegion.rows[0]!;
+        if (PROMPT_DRAFT_PATTERNS.some((pattern) => pattern.test(draftLine)) && !COMPOSER_SELECTION_PATTERN.test(draftLine)) {
+          return { state: "attention", reason: "prompt_draft", evidence: truncateEvidence(draftLine) };
+        }
+        if (!IDLE_PROMPT_PATTERNS.some((pattern) => pattern.test(draftLine))) {
+          return { state: "unknown", reason: "no_activity_signal", evidence: truncateEvidence(lastLine) };
+        }
+        // Empty composer: fall through to the idle return below, unchanged.
+      }
     }
     if (statusBarBeyondDecorations && (!beyondIsClaude || !midWorkEvidence)) {
       return {

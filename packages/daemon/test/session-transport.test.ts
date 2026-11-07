@@ -277,6 +277,27 @@ describe("agent pane activity classifier", () => {
     },
   );
 
+  // A human draft in the exact same pane layout (composer -> rule -> OpenRig statusLine rows ->
+  // mode bar -> decorations) must never read as idle: that would let managed compaction send
+  // /compact over unsent input (PR #129 review, must-fix #1).
+  it("classifies a draft above the drifted footer's statusLine rows as attention, not idle", () => {
+    const pane = readFileSync(
+      new URL("./fixtures/claude-footer-drift/orch-lead-draft.txt", import.meta.url),
+      "utf8",
+    );
+    expect(classifyPaneActivity(pane)).toMatchObject({ state: "attention", reason: "prompt_draft" });
+  });
+
+  it("never reads a multi-line draft above the drifted footer's statusLine rows as idle", () => {
+    const pane = readFileSync(
+      new URL("./fixtures/claude-footer-drift/orch-lead-multiline-draft.txt", import.meta.url),
+      "utf8",
+    );
+    const result = classifyPaneActivity(pane);
+    expect(result.state).not.toBe("agent_idle");
+    expect(result).toMatchObject({ state: "unknown", reason: "no_activity_signal" });
+  });
+
   it("keeps active turns, drafts, and unknown rows out of idle under the drifted footer rows", () => {
     const trailer = [
       "⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent",
