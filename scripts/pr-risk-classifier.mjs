@@ -23,6 +23,7 @@ export const THRESHOLDS = {
   MODERATE_MAX_DIFF: 300,
   MODERATE_MIN_TEST_RATIO: 0.20, // fraction of changed files that are tests
   MODERATE_MAX_SOURCE_FILES: 8,
+  TEST_ONLY_MIN_RATIO: 0.8,      // testFileRatio floor for test-only cap
 };
 
 /**
@@ -121,12 +122,12 @@ export function classify(inputs) {
   if (
     kindCounts.source === 0 &&
     kindCounts.migration === 0 &&
-    testFileRatio >= 0.8
+    testFileRatio >= THRESHOLDS.TEST_ONLY_MIN_RATIO
   ) {
     return {
       level: "moderate",
       reason: [
-        `test-only PR (testFileRatio ${testFileRatio.toFixed(2)}, 0 source/migration)`,
+        `test-only PR (testFileRatio ${testFileRatio.toFixed(2)} ≥ ${THRESHOLDS.TEST_ONLY_MIN_RATIO}, 0 source/migration)`,
         `diff ${diffSize} capped at moderate`,
       ].join("; "),
     };
