@@ -186,6 +186,27 @@ const CLAUDE_STATUS_WARNINGS = [
   // The context hint, as Claude prints it; reported as the last line below the mode bar on one seat.
   /^new task\? \/clear to save \d+(?:\.\d+)?k tokens$/,
 ];
+// Noninteractive UI rows Claude can draw under the mode footer. Unlike CLAUDE_STATUS_WARNINGS, a
+// bare mode bar above only these rows is still idle (live seats show the standalone install banner
+// plus /rc with no framed composer in the trailing window). Keep these additive so they compose
+// with upstream's longer decoration list when that lands.
+const CLAUDE_STATUS_DECORATIONS = [
+  // Standalone post-install banner ("to update"; older builds said "to apply" and live under warnings).
+  /^✔ Update installed · Restart to update$/,
+  /^\/rc$/,
+];
+
+function isClaudeStatusWarning(line: string): boolean {
+  return CLAUDE_STATUS_WARNINGS.some((pattern) => pattern.test(line.trim()));
+}
+
+function isClaudeStatusDecoration(line: string): boolean {
+  return CLAUDE_STATUS_DECORATIONS.some((pattern) => pattern.test(line.trim()));
+}
+
+function isClaudeStatusTrailer(line: string): boolean {
+  return isClaudeStatusWarning(line) || isClaudeStatusDecoration(line);
+}
 // Current Claude status rows need not end in "thinking)" or show "esc to interrupt".
 // Completed summaries such as "✻ Crunched for 2s" lack the live ellipsis/timer shape.
 // While a hook runs, the timer follows its label: "(running PostToolUse hook · 3m 12s · …)".
@@ -207,7 +228,7 @@ export interface ClassifyPaneOptions {
 /** The current Claude footer follows the input frame; earlier examples are history or draft text. */
 function findClaudeFooterIndex(lines: string[]): number {
   let bar = lines.length - 1;
-  while (bar >= 0 && (!lines[bar]!.trim() || CLAUDE_STATUS_WARNINGS.some(pattern => pattern.test(lines[bar]!.trim())))) bar--;
+  while (bar >= 0 && (!lines[bar]!.trim() || isClaudeStatusTrailer(lines[bar]!))) bar--;
   return bar;
 }
 
@@ -398,6 +419,12 @@ function findPromptDraftBeforeFooter(paneContent: string): string | null {
   while (lastLineIndex >= 0 && rawLines[lastLineIndex]!.trim().length === 0) {
     lastLineIndex--;
   }
+  // Known decoration rows under the mode bar are not the footer; skip them so a draft above the
+  // real bar is still attention. Status warnings stay: a warning-suffixed draft is unknown, not
+  // attention, except for the exact accept-edits footer handled elsewhere.
+  while (lastLineIndex >= 0 && isClaudeStatusDecoration(rawLines[lastLineIndex]!)) {
+    lastLineIndex--;
+  }
   if (lastLineIndex <= 0) return null;
 
   const footerLine = rawLines[lastLineIndex]!.trim();
@@ -516,6 +543,8 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
   const idlePromptLine = trailingNonBlank.find((line) =>
     IDLE_PROMPT_PATTERNS.some((pattern) => pattern.test(line))
   );
+  // Prefer the true last line for the empty-composer reason (idle_prompt vs idle_status_bar). Looking
+  // past known status trailers happens only in the late status-bar check below.
   const idleStatusBarLine = IDLE_STATUS_BAR_PATTERNS.some((pattern) => pattern.test(lastLine))
     ? lastLine
     : null;
@@ -579,11 +608,12 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
     };
   }
 
-  const midWorkEvidence = findPatternEvidence(recentLines, [
+  const midWorkPatterns = [
     ...MID_WORK_PATTERNS,
     CLAUDE_LIVE_STATUS_PATTERN,
     ...(options.timerlessStatusIsLive ? [CLAUDE_TIMERLESS_STATUS_PATTERN] : []),
-  ]);
+  ];
+  const midWorkEvidence = findPatternEvidence(recentLines, midWorkPatterns);
   const isClaudeStatusBar = CLAUDE_PERMISSION_MODE_FOOTER.test(idleStatusBarLine ?? "");
   if (idleStatusBarLine && (!isClaudeStatusBar || !midWorkEvidence)) {
     return {
@@ -591,6 +621,35 @@ export function classifyPaneActivity(paneContent: string, options: ClassifyPaneO
       reason: "idle_status_bar",
       evidence: truncateEvidence(idleStatusBarLine),
     };
+  }
+  // Mode footers can sit above known decoration rows (update banner, /rc). Skip only those so a
+  // bare idle footer still reads idle when decorations are the trailing noise; do not look past
+  // CLAUDE_STATUS_WARNINGS (a mode bar above warnings alone must not invent idle). Stop at the
+  // first unrecognized trailer. Skip when a Claude composer frame was already recognized — framed
+  // drafts with decorations stay unknown, not idle.
+  if (!claudeComposer) {
+    let statusBarAt = lastNonBlank.length - 1;
+    while (statusBarAt >= 0 && isClaudeStatusDecoration(lastNonBlank[statusBarAt]!)) statusBarAt--;
+    const statusBarBeyondDecorations = statusBarAt >= 0
+      && IDLE_STATUS_BAR_PATTERNS.some((pattern) => pattern.test(lastNonBlank[statusBarAt]!))
+      ? lastNonBlank[statusBarAt]!
+      : null;
+    const beyondIsClaude = CLAUDE_PERMISSION_MODE_FOOTER.test(statusBarBeyondDecorations ?? "");
+    // Same reach as the idleStatusBarLine veto: the bar plus the 7 rows above it, not the last 8
+    // rows of the capture (decoration rows below the bar would otherwise consume window slots).
+    const lateMidWork = beyondIsClaude
+      ? findPatternEvidence(lastNonBlank.slice(Math.max(0, statusBarAt - 7), statusBarAt + 1), midWorkPatterns)
+      : null;
+    if (lateMidWork) {
+      return { state: "agent_active", reason: "mid_work_pattern", evidence: lateMidWork };
+    }
+    if (statusBarBeyondDecorations && (!beyondIsClaude || !midWorkEvidence)) {
+      return {
+        state: "agent_idle",
+        reason: "idle_status_bar",
+        evidence: truncateEvidence(statusBarBeyondDecorations),
+      };
+    }
   }
   // Codex keeps its empty-composer placeholder on screen during a turn, and its turn-status row
   // (`• Working (… esc to interrupt)`) can sit well above the composer when queued or incoming
