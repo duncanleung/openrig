@@ -210,6 +210,107 @@ test("classify — high: migration present in shell-only PR (migration precedenc
   assert.equal(result.level, "high");
 });
 
+// ─── test-only cap (testFileRatio >= TEST_ONLY_MIN_RATIO, source=0, migration=0) ───
+
+test("classify — moderate: test-only PR with high ratio and large diff (capped)", () => {
+  const result = classify(inputs({
+    diffSize: 500,
+    additions: 450,
+    deletions: 50,
+    totalFiles: 10,
+    kindCounts: { test: 10, docs: 0, source: 0, config: 0, migration: 0, other: 0 },
+    testFileRatio: 1.0,
+  }));
+  assert.equal(result.level, "moderate");
+  assert.match(result.reason, /test-only PR/);
+});
+
+test("classify — moderate: test-only PR at exact boundary (testFileRatio=0.8)", () => {
+  const result = classify(inputs({
+    diffSize: 200,
+    additions: 180,
+    deletions: 20,
+    totalFiles: 5,
+    kindCounts: { test: 4, docs: 0, source: 0, config: 0, migration: 0, other: 1 },
+    testFileRatio: 0.8,
+  }));
+  assert.equal(result.level, "moderate");
+});
+
+test("classify — high: test file ratio just below test-only threshold (testFileRatio=0.79)", () => {
+  const result = classify(inputs({
+    diffSize: 500,
+    additions: 450,
+    deletions: 50,
+    totalFiles: 10,
+    kindCounts: { test: 7, docs: 0, source: 0, config: 0, migration: 0, other: 3 },
+    testFileRatio: 0.79,
+  }));
+  assert.equal(result.level, "high");
+});
+
+test("classify — high: test-only cap does not apply when source files present", () => {
+  const result = classify(inputs({
+    diffSize: 500,
+    additions: 450,
+    deletions: 50,
+    totalFiles: 10,
+    kindCounts: { test: 9, docs: 0, source: 1, config: 0, migration: 0, other: 0 },
+    testFileRatio: 1.0,
+  }));
+  assert.equal(result.level, "high");
+});
+
+test("classify — high: test-only cap does not apply when migration present", () => {
+  const result = classify(inputs({
+    diffSize: 500,
+    additions: 450,
+    deletions: 50,
+    totalFiles: 10,
+    kindCounts: { test: 9, docs: 0, source: 0, config: 0, migration: 1, other: 0 },
+    testFileRatio: 1.0,
+  }));
+  assert.equal(result.level, "high");
+});
+
+test("classify — moderate (not trivial): small test-only PR routes through test-only cap", () => {
+  // Regression: before the trivial-block guard, diffSize=50 + testFileRatio=1.0 returned trivial.
+  const result = classify(inputs({
+    diffSize: 50,
+    additions: 50,
+    deletions: 0,
+    totalFiles: 2,
+    kindCounts: { test: 2, docs: 0, source: 0, config: 0, migration: 0, other: 0 },
+    testFileRatio: 1.0,
+  }));
+  assert.equal(result.level, "moderate");
+});
+
+test("classify — high: test-only cap does not apply when config files present (e.g. GitHub Actions .yml)", () => {
+  // Regression: before config guard, testFileRatio=0.9 + config=1 returned moderate.
+  const result = classify(inputs({
+    diffSize: 400,
+    additions: 380,
+    deletions: 20,
+    totalFiles: 10,
+    kindCounts: { test: 9, docs: 0, source: 0, config: 1, migration: 0, other: 0 },
+    testFileRatio: 0.9,
+  }));
+  assert.equal(result.level, "high");
+});
+
+test("classify — moderate: test-only cap applies when config=0 (pure test PR)", () => {
+  const result = classify(inputs({
+    diffSize: 400,
+    additions: 380,
+    deletions: 20,
+    totalFiles: 10,
+    kindCounts: { test: 10, docs: 0, source: 0, config: 0, migration: 0, other: 0 },
+    testFileRatio: 0.9,
+  }));
+  assert.equal(result.level, "moderate");
+});
+
 // ─── skillFileGate integration (subprocess with fake gh) ────────────────────
 
 test("subprocess: skill file detected → level forced to high and skillFileGate attached", () => {
