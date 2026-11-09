@@ -49,19 +49,20 @@ export function fileKind(path) {
 export function classify(inputs) {
   const { diffSize, additions, deletions, kindCounts, testFileRatio, shellSourceFiles = 0 } = inputs;
 
-  // Trivial: no source or migration changes, small diff (docs/tests/config only).
+  // Trivial: no source, migration, or config changes; small diff (docs/tests only).
   // Excludes test-only PRs (testFileRatio >= TEST_ONLY_MIN_RATIO) — those go to the
-  // test-only cap below, which caps at moderate (not trivial) since disabled assertions
-  // or misconfigured test infra still warrant review.
+  // test-only cap below (moderate). Excludes config PRs — .yml/.json changes may
+  // alter CI pipelines or secrets and warrant review beyond trivial.
   if (
     kindCounts.source === 0 &&
     kindCounts.migration === 0 &&
+    kindCounts.config === 0 &&
     diffSize <= THRESHOLDS.TRIVIAL_MAX_DIFF &&
     testFileRatio < THRESHOLDS.TEST_ONLY_MIN_RATIO
   ) {
     return {
       level: "trivial",
-      reason: `no source/migration changes; diff ${diffSize} ≤ ${THRESHOLDS.TRIVIAL_MAX_DIFF}`,
+      reason: `no source/migration/config changes; diff ${diffSize} ≤ ${THRESHOLDS.TRIVIAL_MAX_DIFF}`,
     };
   }
 
@@ -120,18 +121,20 @@ export function classify(inputs) {
     };
   }
 
-  // Test-only PRs: no source or migration changes, test files dominate.
+  // Test-only PRs: no source, migration, or config changes; test files dominate.
   // Large test diffs do not carry production risk — cap at moderate (not trivial,
   // since disabled assertions or misconfigured test infra still warrant review).
+  // Config files (e.g. GitHub Actions .yml) are excluded — they may alter CI pipelines.
   if (
     kindCounts.source === 0 &&
     kindCounts.migration === 0 &&
+    kindCounts.config === 0 &&
     testFileRatio >= THRESHOLDS.TEST_ONLY_MIN_RATIO
   ) {
     return {
       level: "moderate",
       reason: [
-        `test-only PR (testFileRatio ${testFileRatio.toFixed(2)} ≥ ${THRESHOLDS.TEST_ONLY_MIN_RATIO}, 0 source/migration)`,
+        `test-only PR (testFileRatio ${testFileRatio.toFixed(2)} ≥ ${THRESHOLDS.TEST_ONLY_MIN_RATIO}, 0 source/migration/config)`,
         `diff ${diffSize} capped at moderate`,
       ].join("; "),
     };

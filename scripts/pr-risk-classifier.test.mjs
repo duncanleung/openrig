@@ -286,6 +286,31 @@ test("classify — moderate (not trivial): small test-only PR routes through tes
   assert.equal(result.level, "moderate");
 });
 
+test("classify — high: test-only cap does not apply when config files present (e.g. GitHub Actions .yml)", () => {
+  // Regression: before config guard, testFileRatio=0.9 + config=1 returned moderate.
+  const result = classify(inputs({
+    diffSize: 400,
+    additions: 380,
+    deletions: 20,
+    totalFiles: 10,
+    kindCounts: { test: 9, docs: 0, source: 0, config: 1, migration: 0, other: 0 },
+    testFileRatio: 0.9,
+  }));
+  assert.equal(result.level, "high");
+});
+
+test("classify — moderate: test-only cap applies when config=0 (pure test PR)", () => {
+  const result = classify(inputs({
+    diffSize: 400,
+    additions: 380,
+    deletions: 20,
+    totalFiles: 10,
+    kindCounts: { test: 10, docs: 0, source: 0, config: 0, migration: 0, other: 0 },
+    testFileRatio: 0.9,
+  }));
+  assert.equal(result.level, "moderate");
+});
+
 // ─── skillFileGate integration (subprocess with fake gh) ────────────────────
 
 test("subprocess: skill file detected → level forced to high and skillFileGate attached", () => {
