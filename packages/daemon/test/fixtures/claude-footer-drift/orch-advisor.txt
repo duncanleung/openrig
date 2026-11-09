@@ -1,0 +1,14 @@
+⏺ Remote Control disconnected — signed-in claude.ai account or
+  organization changed on this machine — run /remote-control to start a
+  session for the current account, or /login to switch back, then
+  /remote-control
+
+─────────────────────────────────────────────────── orch-advisor@mac-fan-speed ─
+❯ 
+────────────────────────────────────────────────────────────────────────────────
+  00000000-0000-0000-0000-000000000000 | SMART 120K |  master | user@example…
+  Opus 4.6 (1M context) | mac-fan-speed | 2M 1?
+  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent
+                                        ✔ Update installed · /restart to apply
+                                                                    /rc failed
+

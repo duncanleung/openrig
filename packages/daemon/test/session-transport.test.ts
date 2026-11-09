@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
@@ -264,6 +265,54 @@ describe("agent pane activity classifier", () => {
       "unrecognized output",
     ].join("\n"));
     expect(unknown).toMatchObject({ state: "unknown", reason: "no_activity_signal" });
+  });
+
+  // Live mac-fan-speed seats, 2026-11-06: banner reworded to "/restart to apply", "/rc failed", and the
+  // /clear context hint under the mode bar left every idle seat at unknown/no_activity_signal.
+  it.each(["orch-lead", "dev-impl", "orch-advisor", "quality-reviewer"])(
+    "classifies the captured %s footer (restart-to-apply banner, /clear hint, /rc failed) as idle",
+    (seat) => {
+      const pane = readFileSync(new URL(`./fixtures/claude-footer-drift/${seat}.txt`, import.meta.url), "utf8");
+      expect(classifyPaneActivity(pane)).toMatchObject({ state: "agent_idle", reason: "idle_status_bar" });
+    },
+  );
+
+  // A human draft in the exact same pane layout (composer -> rule -> OpenRig statusLine rows ->
+  // mode bar -> decorations) must never read as idle: that would let managed compaction send
+  // /compact over unsent input (PR #129 review, must-fix #1).
+  it("classifies a draft above the drifted footer's statusLine rows as attention, not idle", () => {
+    const pane = readFileSync(
+      new URL("./fixtures/claude-footer-drift/orch-lead-draft.txt", import.meta.url),
+      "utf8",
+    );
+    expect(classifyPaneActivity(pane)).toMatchObject({ state: "attention", reason: "prompt_draft" });
+  });
+
+  it("never reads a multi-line draft above the drifted footer's statusLine rows as idle", () => {
+    const pane = readFileSync(
+      new URL("./fixtures/claude-footer-drift/orch-lead-multiline-draft.txt", import.meta.url),
+      "utf8",
+    );
+    const result = classifyPaneActivity(pane);
+    expect(result.state).not.toBe("agent_idle");
+    expect(result).toMatchObject({ state: "unknown", reason: "no_activity_signal" });
+  });
+
+  it("keeps active turns, drafts, and unknown rows out of idle under the drifted footer rows", () => {
+    const trailer = [
+      "⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent",
+      "✔ Update installed · /restart to apply",
+      "new task? /clear to save 443.7k tokens",
+      "/rc failed",
+    ];
+    expect(classifyPaneActivity(["✻ Thinking… (2m 38s · ↓ 10.9k tokens · thought for 8s)", "❯ ", ...trailer].join("\n")))
+      .toMatchObject({ state: "agent_active", reason: "mid_work_pattern" });
+    expect(classifyPaneActivity(["❯ deploy the release", ...trailer].join("\n")))
+      .toMatchObject({ state: "attention", reason: "prompt_draft" });
+    expect(classifyPaneActivity(["Opus 4.6 (1M context) | mac-fan-speed | 2M 1?", ...trailer, "/rc failed again"].join("\n")))
+      .toMatchObject({ state: "unknown", reason: "no_activity_signal" });
+    expect(classifyPaneActivity(["Opus 4.6 (1M context) | mac-fan-speed | 2M 1?", ...trailer, "/rc"].join("\n")))
+      .toMatchObject({ state: "agent_idle", reason: "idle_status_bar" });
   });
 
   it("keeps a live Claude turn active when decorations push the status row past the last-8 window", () => {
