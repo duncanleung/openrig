@@ -114,6 +114,7 @@ export class StuckMessageSweeper {
   private readonly now: () => Date;
   private readonly sleep: (ms: number) => Promise<void>;
   private sweepInFlight: Promise<StuckSweepReport> | null = null;
+  private sweepInFlightOpts: { dryRun: boolean; rig?: string } | null = null;
 
   constructor(private readonly deps: StuckMessageSweeperDeps) {
     this.now = deps.now ?? (() => new Date());
@@ -122,12 +123,22 @@ export class StuckMessageSweeper {
 
   /** Scan every managed seat (or one rig) and optionally auto-Enter attributable stuck text. */
   async sweep(opts: StuckSweepOpts = {}): Promise<StuckSweepReport> {
-    if (this.sweepInFlight) return this.sweepInFlight;
+    const dryRun = opts.dryRun === true;
+    const rig = opts.rig?.trim() || undefined;
+    if (
+      this.sweepInFlight && this.sweepInFlightOpts &&
+      this.sweepInFlightOpts.dryRun === dryRun &&
+      this.sweepInFlightOpts.rig === rig
+    ) {
+      return this.sweepInFlight;
+    }
+    this.sweepInFlightOpts = { dryRun, rig };
     this.sweepInFlight = this._sweep(opts);
     try {
       return await this.sweepInFlight;
     } finally {
       this.sweepInFlight = null;
+      this.sweepInFlightOpts = null;
     }
   }
 
@@ -337,7 +348,14 @@ export class StuckMessageSweeper {
     } catch (err) {
       seen.enterAttempts += 1;
       this.observations.set(seat.session, seen);
-      throw err;
+      this.audit(seat, "failed", attribution, text, attempt?.attemptId ?? null,
+        err instanceof Error ? err.message : String(err));
+      return {
+        ...base,
+        action: "auto_enter_failed",
+        detail: err instanceof Error ? err.message : "Enter threw unexpectedly",
+        verified: false,
+      };
     }
     // Guard refusals don't consume attempts (not actual Enter presses).
     if (enterResult.reason !== "typing_guard_enabled") {
@@ -373,7 +391,14 @@ export class StuckMessageSweeper {
       } catch (err) {
         seen.enterAttempts += 1;
         this.observations.set(seat.session, seen);
-        throw err;
+        this.audit(seat, "failed", attribution, text, attempt?.attemptId ?? null,
+          err instanceof Error ? err.message : String(err));
+        return {
+          ...base,
+          action: "auto_enter_failed",
+          detail: err instanceof Error ? err.message : "Enter threw unexpectedly",
+          verified: false,
+        };
       }
       seen.enterAttempts += 1;
       this.observations.set(seat.session, seen);
@@ -433,7 +458,7 @@ export class StuckMessageSweeper {
     if (activity.state === "agent_active") return true;
     const text = extractComposerVisibleText(pane, runtime);
     if (text == null || !text.trim()) return true;
-    return fingerprintComposerText(text) !== priorFingerprint && activity.state === "agent_idle";
+    return fingerprintComposerText(text) !== priorFingerprint;
   }
 
   private correlate(session: string, state: SeatState, nowMs: number, textHash: string, graceMs: number): DeliveryAttemptRef | null {

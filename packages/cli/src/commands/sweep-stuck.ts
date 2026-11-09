@@ -55,7 +55,7 @@ export function sweepStuckCommand(depsOverride?: SweepStuckDeps): Command {
   const getDeps = (): SweepStuckDeps =>
     depsOverride ?? {
       lifecycleDeps: realDeps(),
-      clientFactory: (url: string) => new DaemonClient(url),
+      clientFactory: (url: string) => new DaemonClient(url, { timeoutMs: 30_000 }),
     };
 
   return new Command("sweep-stuck")
