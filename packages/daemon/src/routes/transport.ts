@@ -365,12 +365,12 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
     if (!sweeper) {
       return c.json({ error: "stuck_message_sweeper_unavailable", message: "stuck-message sweeper is not wired" }, 503);
     }
-    const body = await c.req.json<{
-      dryRun?: boolean;
-      graceMs?: number;
-      rig?: string;
-      autoEnter?: boolean;
-    }>().catch(() => ({} as { dryRun?: boolean; graceMs?: number; rig?: string; autoEnter?: boolean }));
+    let body: { dryRun?: boolean; graceMs?: number; rig?: string; autoEnter?: boolean };
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "invalid_request", message: "request body must be valid JSON" }, 400);
+    }
 
     const graceMs = typeof body.graceMs === "number" && Number.isFinite(body.graceMs) && body.graceMs > 0
       ? body.graceMs

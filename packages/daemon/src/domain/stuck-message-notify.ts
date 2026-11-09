@@ -8,6 +8,7 @@ export const STUCK_SWEEP_NOTIFY_BEARER_ENV = "OPENRIG_STUCK_SWEEP_NOTIFY_BEARER"
 export interface StuckNotifyConfig {
   url: string;
   bearer?: string;
+  timeoutMs?: number;
 }
 
 export function readStuckNotifyConfig(
@@ -47,6 +48,7 @@ export async function postStuckNotify(
       method: "POST",
       headers,
       body: JSON.stringify(stuckNotifyPayload(item)),
+      signal: AbortSignal.timeout(config.timeoutMs ?? 5_000),
     });
   } catch {
     // Notify is best-effort; the sweep report already carries the finding.

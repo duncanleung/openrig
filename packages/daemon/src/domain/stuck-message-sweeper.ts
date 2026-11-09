@@ -6,6 +6,7 @@
 // never presses Enter.
 import type { SeatActivityService } from "./seat-activity-service.js";
 import type { DeliveryAttemptRef } from "./delivery-attempt-ledger.js";
+import { hashSentText } from "./capture-observer.js";
 import type { EventBus } from "./event-bus.js";
 import type { SessionTransport } from "./session-transport.js";
 import { classifyPaneActivity, readComposerOccupancy } from "./session-transport.js";
@@ -112,6 +113,7 @@ export class StuckMessageSweeper {
   private readonly observations = new Map<string, Observation>();
   private readonly now: () => Date;
   private readonly sleep: (ms: number) => Promise<void>;
+  private sweepInFlight: Promise<StuckSweepReport> | null = null;
 
   constructor(private readonly deps: StuckMessageSweeperDeps) {
     this.now = deps.now ?? (() => new Date());
@@ -120,6 +122,16 @@ export class StuckMessageSweeper {
 
   /** Scan every managed seat (or one rig) and optionally auto-Enter attributable stuck text. */
   async sweep(opts: StuckSweepOpts = {}): Promise<StuckSweepReport> {
+    if (this.sweepInFlight) return this.sweepInFlight;
+    this.sweepInFlight = this._sweep(opts);
+    try {
+      return await this.sweepInFlight;
+    } finally {
+      this.sweepInFlight = null;
+    }
+  }
+
+  private async _sweep(opts: StuckSweepOpts): Promise<StuckSweepReport> {
     const dryRun = opts.dryRun === true;
     const autoEnter = opts.autoEnter !== false;
     const graceMs = opts.graceMs ?? DEFAULT_STUCK_GRACE_MS;
@@ -271,7 +283,7 @@ export class StuckMessageSweeper {
       };
     }
 
-    const attempt = this.correlate(seat.session, state ?? null, ctx.nowMs);
+    const attempt = this.correlate(seat.session, state ?? null, ctx.nowMs, hashSentText(text), ctx.graceMs);
     const attribution = classifyStuckAttribution(text, { pasteAttributed: Boolean(attempt) });
     const base = {
       rig: seat.rig, logicalId: seat.logicalId, session: seat.session, runtime: seat.runtime,
@@ -319,9 +331,19 @@ export class StuckMessageSweeper {
       };
     }
 
-    const enterResult = await this.pressEnterOnce(seat, text, attribution, seen);
-    seen.enterAttempts += 1;
-    this.observations.set(seat.session, seen);
+    let enterResult: { ok: boolean; reason?: string; error?: string };
+    try {
+      enterResult = await this.pressEnterOnce(seat, text, attribution, seen);
+    } catch (err) {
+      seen.enterAttempts += 1;
+      this.observations.set(seat.session, seen);
+      throw err;
+    }
+    // Guard refusals don't consume attempts (not actual Enter presses).
+    if (enterResult.reason !== "typing_guard_enabled") {
+      seen.enterAttempts += 1;
+      this.observations.set(seat.session, seen);
+    }
 
     if (!enterResult.ok) {
       if (enterResult.reason === "typing_guard_enabled") {
@@ -345,7 +367,14 @@ export class StuckMessageSweeper {
 
     // One retry only when the first Enter landed but the box did not clear.
     if (!verified && seen.enterAttempts < 2) {
-      const retry = await this.pressEnterOnce(seat, text, attribution, seen);
+      let retry: { ok: boolean; reason?: string; error?: string };
+      try {
+        retry = await this.pressEnterOnce(seat, text, attribution, seen);
+      } catch (err) {
+        seen.enterAttempts += 1;
+        this.observations.set(seat.session, seen);
+        throw err;
+      }
       seen.enterAttempts += 1;
       this.observations.set(seat.session, seen);
       if (retry.ok) {
@@ -404,19 +433,22 @@ export class StuckMessageSweeper {
     if (activity.state === "agent_active") return true;
     const text = extractComposerVisibleText(pane, runtime);
     if (text == null || !text.trim()) return true;
-    return fingerprintComposerText(text) !== priorFingerprint;
+    return fingerprintComposerText(text) !== priorFingerprint && activity.state === "agent_idle";
   }
 
-  private correlate(session: string, state: SeatState, nowMs: number): DeliveryAttemptRef | null {
+  private correlate(session: string, state: SeatState, nowMs: number, textHash: string, graceMs: number): DeliveryAttemptRef | null {
     const attempts = this.deps.attempts?.attemptsFor(session) ?? [];
     const swap = state?.lastSwap ?? null;
     const swapAt = swap ? Date.parse(swap.at) : null;
+    const maxAgeMs = graceMs * 2;
     for (const a of attempts) {
       if (state && a.nodeId !== null && a.nodeId !== state.seatNodeId) continue;
       if (swap && a.occupant !== swap.generation) continue;
       const doneMs = Date.parse(a.completedAt);
       if (!Number.isFinite(doneMs) || doneMs > nowMs) continue;
       if (swapAt !== null && Number.isFinite(swapAt) && doneMs < swapAt) continue;
+      if (nowMs - doneMs > maxAgeMs) continue;
+      if (a.sentHash !== textHash) continue;
       return a;
     }
     return null;

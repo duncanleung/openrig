@@ -6,7 +6,7 @@ import {
 } from "../src/domain/stuck-message-sweeper.js";
 import type { SeatTarget } from "../src/domain/stuck-seat-observer.js";
 import { DeliveryAttemptLedger } from "../src/domain/delivery-attempt-ledger.js";
-import type { ObservationInput } from "../src/domain/capture-observer.js";
+import { hashSentText, type ObservationInput } from "../src/domain/capture-observer.js";
 
 const T0 = Date.parse("2026-11-04T22:00:00Z");
 const SEAT: SeatTarget = { rig: "alpha", logicalId: "dev.impl", session: "dev-impl@alpha", runtime: "claude-code" };
@@ -191,7 +191,7 @@ describe("StuckMessageSweeper", () => {
       attemptId: "att-9",
       binding: { sessionName: SEAT.session, nodeId: "n1", occupant: "g1", pane: "%1" },
       runtime: "claude-code",
-      sentHash: "h1",
+      sentHash: hashSentText("[Pasted text #3 +40 lines]"),
       pre: { state: "not_requested" },
       post: { state: "not_requested" },
       regexResult: { ok: true },
