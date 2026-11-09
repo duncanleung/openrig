@@ -28,7 +28,17 @@ test("buildDocsGuardMessage explains the policy and offending files", () => {
 
   assert.match(message, /Blocked tracked docs paths/);
   assert.match(message, /docs\/plans\/example\.md/);
-  assert.match(message, /docs\/as-built\/, docs\/reference\/, and docs\/releases\//);
+  assert.match(message, /docs\/decisions\//);
+  assert.match(message, /docs\/architecture\//);
+});
+
+test("findBlockedDocsPaths allows docs/decisions/ and docs/architecture/ (CLAUDE.md-prescribed directories)", () => {
+  assert.deepEqual(findBlockedDocsPaths([
+    "docs/decisions/0001-use-sqlite.md",
+    "docs/decisions/0002-daemon-singleton.md",
+    "docs/architecture/2026-01-01-system-overview.md",
+    "docs/plans/ephemeral-note.md",
+  ]), ["docs/plans/ephemeral-note.md"]);
 });
 
 // 572bc477 — docs/DESIGN.md is RATIFIED doctrine, and the guard failed to encode it.
