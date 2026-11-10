@@ -202,7 +202,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       truncated: false,
       records: [{ id: "health-context-dev-impl", scope: { seatId: "01JNODEIMPL" } }],
     });
-    expect(snap.hosts[0]?.rigs[0]?.pods[0]?.agents[0]).toMatchObject({ nodeId: "01JNODEIMPL" });
+    expect(snap.hosts[0]?.rigs.find((r) => r.name === "myrig")?.pods[0]?.agents[0]).toMatchObject({ nodeId: "01JNODEIMPL" });
   });
   it("leaves health unassessed when a focused view skips the projection read", async () => {
     const context = { section: "topology" as const, viewTab: "table" as const, drill: [] };
@@ -254,8 +254,9 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
   it("maps topology: pods grouped, agent rows VERBATIM from the maintained projection (PIN 2)", async () => {
     const snap = await hydrateSnapshot(fixtureClient());
     const local = snap.hosts.find((h) => h.id === "local");
-    expect(local?.rigs[0]?.name).toBe("myrig");
-    const dev = local?.rigs[0]?.pods.find((p) => p.name === "dev");
+    const myrig = local?.rigs.find((r) => r.name === "myrig");
+    expect(myrig?.name).toBe("myrig");
+    const dev = myrig?.pods.find((p) => p.name === "dev");
     expect(dev?.agents.map((a) => a.name)).toEqual(["dev.impl", "dev.qa"]);
     const impl = dev?.agents[0];
     expect(impl).toMatchObject({
@@ -267,7 +268,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     const qa = dev?.agents[1];
     expect(qa).toMatchObject({ context: null, tokens: null, status: "unknown", canRun: true });
     // infrastructure nodes are not agent rows
-    expect(local?.rigs[0]?.pods.flatMap((p) => p.agents.map((a) => a.name))).not.toContain("svc.db");
+    expect(myrig?.pods.flatMap((p) => p.agents.map((a) => a.name))).not.toContain("svc.db");
   });
 
   it("keeps the two stuck legs DISTINCT — served evidence/threshold strings verbatim, no client threshold", async () => {
@@ -431,7 +432,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       { ...base, logicalId: "dev.old" },
     ];
     const snap = await hydrateSnapshot(fixtureClient({}, { "/api/rigs/01JRIG/nodes": nodes }));
-    const byName = Object.fromEntries(snap.hosts[0]!.rigs[0]!.pods[0]!.agents.map((agent) => [agent.name, agent]));
+    const byName = Object.fromEntries(snap.hosts[0]!.rigs.find((r) => r.name === "myrig")!.pods[0]!.agents.map((agent) => [agent.name, agent]));
     expect(byName["dev.choice"]).toMatchObject({ effort: "high", effortSource: "seat_choice" });
     expect(byName["dev.authored"]).toMatchObject({ effort: "medium", effortSource: "authored" });
     expect(byName["dev.default"]).toMatchObject({ effort: null, effortSource: "runtime_default" });
@@ -513,7 +514,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       { ...base, logicalId: "dev.missing", startupStatus: "ready", lifecycleState: "attention_required", agentActivity: { state: "running" }, terminalActive: true, identityVerdict: { verdict: "pane_missing" } },
     ];
     const snap = await hydrateSnapshot(fixtureClient({}, { "/api/rigs/01JRIG/nodes": nodes }));
-    const statuses = Object.fromEntries(snap.hosts[0]!.rigs[0]!.pods[0]!.agents.map((agent) => [agent.name, agent.status]));
+    const statuses = Object.fromEntries(snap.hosts[0]!.rigs.find((r) => r.name === "myrig")!.pods[0]!.agents.map((agent) => [agent.name, agent.status]));
     expect(statuses).toEqual({
       "dev.failed": "failed",
       "dev.attention": "attention_required",
@@ -522,7 +523,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       "dev.mismatch": "attention_required",
       "dev.missing": "attention_required",
     });
-    const byName = Object.fromEntries(snap.hosts[0]!.rigs[0]!.pods[0]!.agents.map((agent) => [agent.name, agent]));
+    const byName = Object.fromEntries(snap.hosts[0]!.rigs.find((r) => r.name === "myrig")!.pods[0]!.agents.map((agent) => [agent.name, agent]));
     expect(byName["dev.mismatch"]?.canRun).toBe(false);
     expect(byName["dev.missing"]?.canRun).toBe(false);
     const view = createViewState({ instanceId: "t", getSnapshot: () => snap });
@@ -543,7 +544,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       { ...base, ...quiet, logicalId: "dev.claude-quiet", runtime: "claude-code" },
     ];
     const snap = await hydrateSnapshot(fixtureClient({}, { "/api/rigs/01JRIG/nodes": nodes }));
-    const statuses = Object.fromEntries(snap.hosts[0]!.rigs[0]!.pods[0]!.agents.map((agent) => [agent.name, agent.status]));
+    const statuses = Object.fromEntries(snap.hosts[0]!.rigs.find((r) => r.name === "myrig")!.pods[0]!.agents.map((agent) => [agent.name, agent.status]));
     expect(statuses).toEqual({
       "dev.app-quiet": "unknown",
       "dev.app-moving": "active",
@@ -576,7 +577,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
       },
     ];
     const snap = await hydrateSnapshot(fixtureClient({}, { "/api/rigs/01JRIG/nodes": nodes }));
-    const statuses = Object.fromEntries(snap.hosts[0]!.rigs[0]!.pods[0]!.agents.map((agent) => [agent.name, agent.status]));
+    const statuses = Object.fromEntries(snap.hosts[0]!.rigs.find((r) => r.name === "myrig")!.pods[0]!.agents.map((agent) => [agent.name, agent.status]));
     expect(statuses).toEqual({
       "dev.missing-session": "detached",
       "dev.missing-attention": "attention_required",
@@ -653,7 +654,7 @@ describe("snapshot hydration over the §4.A reads (Phase 2)", () => {
     expect(snap.humanQueueProbed).toBe(false);
     expect(snap.needs).toEqual([]);
     expect(snap.readErrors).toEqual([expect.stringMatching(/review-fleet: .*503/)]);
-    expect(snap.hosts.find((h) => h.id === "local")?.rigs[0]?.name).toBe("myrig");
+    expect(snap.hosts.find((h) => h.id === "local")?.rigs.find((r) => r.name === "myrig")?.name).toBe("myrig");
     expectIncompleteNeedsTruth(snap);
   });
 });

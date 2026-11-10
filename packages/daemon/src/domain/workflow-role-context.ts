@@ -110,7 +110,7 @@ export function rigDeclaresRole(
     .prepare(
       `SELECT COUNT(*) as c FROM nodes n
          JOIN rigs r ON r.id = n.rig_id
-        WHERE r.name = ? AND n.role = ?`,
+        WHERE r.name = ? AND n.role = ? AND r.archived_at IS NULL`,
     )
     .get(boundRig, role) as { c: number };
   return row.c > 0;

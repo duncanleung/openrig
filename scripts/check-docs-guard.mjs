@@ -28,6 +28,8 @@ export function findBlockedDocsPaths(paths) {
     .filter((file) => !file.startsWith("docs/as-built/"))
     .filter((file) => !file.startsWith("docs/reference/"))
     .filter((file) => !file.startsWith("docs/releases/"))
+    .filter((file) => !file.startsWith("docs/decisions/"))
+    .filter((file) => !file.startsWith("docs/architecture/"))
     .filter((file) => !ALLOWED_DOCS_FILES.has(file))
     .sort();
 }
@@ -41,11 +43,11 @@ export function listTrackedDocsPaths(exec = execFileSync) {
 
 export function buildDocsGuardMessage(blockedPaths) {
   const lines = [
-    "Blocked tracked docs paths detected outside docs/as-built/, docs/reference/, and docs/releases/:",
+    "Blocked tracked docs paths detected outside the allowed docs directories:",
     ...blockedPaths.map((file) => `- ${file}`),
     "",
-    "Only docs/as-built/, docs/reference/, and docs/releases/ are allowed to be tracked.",
-    "Keep plans and local notes untracked under docs/ or move durable docs into docs/as-built/, docs/reference/, or docs/releases/ if they truly belong in git.",
+    "Allowed: docs/as-built/, docs/decisions/, docs/architecture/, docs/reference/, docs/releases/",
+    "Keep plans and local notes untracked under docs/ or move durable docs into one of the allowed directories.",
   ];
   return lines.join("\n");
 }
