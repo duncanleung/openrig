@@ -124,6 +124,8 @@ export interface StuckMessageSweeperDeps {
   sessionTransport: Pick<SessionTransport, "capture" | "send">;
   attemptStore: SweepAttemptStore;
   seatActivity: Pick<SeatActivityService, "getSeatStateBySession">;
+  /** Resolves a rig filter (name or id) to canonical rig names. Absent = filter taken as name. */
+  resolveRig?(rig: string): string[];
 }
 
 export class StuckMessageSweeper {
@@ -153,7 +155,12 @@ export class StuckMessageSweeper {
 
     // R9: delegate detection to StuckSeatObserver.
     await this.deps.stuckSeatObserver.scan(opts.rig ? { rig: opts.rig } : {});
-    const snapshot = this.deps.stuckSeatObserver.snapshot(opts.rig ? { rig: opts.rig, rigNames: new Set([opts.rig]) } : {});
+    // MF2 (cycle 2): resolve rig filter to canonical names before passing to snapshot.
+    // opts.rig may be an ID; findings are keyed by name — a raw Set([opts.rig]) yields empty silently.
+    const resolvedRigNames = opts.rig
+      ? new Set(this.deps.resolveRig ? this.deps.resolveRig(opts.rig) : [opts.rig])
+      : undefined;
+    const snapshot = this.deps.stuckSeatObserver.snapshot(opts.rig ? { rig: opts.rig, rigNames: resolvedRigNames } : {});
 
     const findings: StuckFinding[] = snapshot.findings.filter(
       (f) => f.kind === "persistent_composer_input" && !f.stale,
@@ -173,8 +180,20 @@ export class StuckMessageSweeper {
     const workers = Array.from({ length: Math.min(SWEEP_POOL_SIZE, findings.length) }, async () => {
       while (next < findings.length) {
         const finding = findings[next++]!;
-        const delta = await this.processSeat(finding, gen0.get(finding.session) ?? "", opts, seatTimeoutMs, now);
-        deltas.push(delta);
+        // MF1 (cycle 2): catch processSeat throws so each seat produces a delta (not a silent gap).
+        try {
+          const delta = await this.processSeat(finding, gen0.get(finding.session) ?? "", opts, seatTimeoutMs, now);
+          deltas.push(delta);
+        } catch (err) {
+          deltas.push({
+            session: finding.session,
+            outcome: "degraded",
+            deliveryId: null,
+            attemptId: null,
+            durationMs: 0,
+            error: err instanceof Error ? err.message : "unknown worker error",
+          });
+        }
       }
     });
     await Promise.allSettled(workers);

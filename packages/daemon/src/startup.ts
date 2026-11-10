@@ -2830,6 +2830,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       sessionTransport: deps.sessionTransport,
       attemptStore: sweepAttemptStore,
       seatActivity: seatActivityService,
+      resolveRig: (rigFilter) => rigRepo.listRigs().filter((r) => r.id === rigFilter || r.name === rigFilter).map((r) => r.name),
     });
   }
 

@@ -384,6 +384,27 @@ describe("StuckMessageSweeper (RIG-190)", () => {
     expect(result.seats[0]!.outcome).toBe("skipped_capture_failed");
   });
 
+  // T15: Worker exception → degraded result, not silent gap (MF1 cycle 2).
+  it("T15: worker exception produces degraded result, not silent coverage gap", async () => {
+    const finding = makeFinding(SESSION, { deliveryAttempt: { attemptId: "del-t15", completedAt: T0.toISOString() } });
+    const [obs] = makeObserver([finding]);
+    // Transport that throws on capture — simulates processSeat throwing unexpectedly.
+    const throwingTransport = {
+      capture: async (_session: string): Promise<never> => { throw new Error("capture exploded"); },
+      send: async (_session: string, _text: string, _opts: unknown) => ({ ok: true }),
+    };
+    const sweeper = new StuckMessageSweeper({
+      stuckSeatObserver: obs,
+      sessionTransport: throwingTransport as never,
+      attemptStore: store,
+      seatActivity: makeSeatActivity("idle-at-prompt"),
+    });
+    const result = await sweeper.sweep();
+    expect(result.seats).toHaveLength(1);
+    expect(result.seats[0]!.outcome).toBe("degraded");
+    expect(result.degraded).toBe(true);
+  });
+
   // T14: SweepAttemptStore state machine — attempting → confirmed → hasAttemptForDelivery.
   it("T14: SweepAttemptStore state machine persists correctly", () => {
     const id = store.writeAttempting({
