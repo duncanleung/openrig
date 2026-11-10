@@ -2830,7 +2830,6 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       sessionTransport: deps.sessionTransport,
       attemptStore: sweepAttemptStore,
       seatActivity: seatActivityService,
-      deliveryAttempts: deliveryAttemptLedger,
     });
   }
 

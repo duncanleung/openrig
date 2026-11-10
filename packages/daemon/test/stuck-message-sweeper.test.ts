@@ -9,7 +9,6 @@ import { ALL_MIGRATIONS } from "../src/db/all-migrations.js";
 import { StuckMessageSweeper, type SweepOpts, type StuckMessageSweeperDeps } from "../src/domain/stuck-message-sweeper.js";
 import { SweepAttemptStore } from "../src/domain/sweep-attempt-store.js";
 import type { StuckSeatObserver, StuckFinding, StuckSeatSnapshot } from "../src/domain/stuck-seat-observer.js";
-import type { DeliveryAttemptRef } from "../src/domain/delivery-attempt-ledger.js";
 
 // ---- Test helpers ----
 
@@ -93,10 +92,6 @@ function makeSeatActivity(activity: "idle-at-prompt" | "working" | "unknown" = "
   };
 }
 
-function makeDeliveryAttempts(attempts: DeliveryAttemptRef[] = []): StuckMessageSweeperDeps["deliveryAttempts"] {
-  return { attemptsFor: () => attempts };
-}
-
 type MockObserver = {
   scanCalls: Array<{ rig?: string }>;
   findings: StuckFinding[];
@@ -137,7 +132,6 @@ describe("StuckMessageSweeper (RIG-190)", () => {
       sessionTransport: transport,
       attemptStore: store,
       seatActivity: makeSeatActivity(),
-      deliveryAttempts: makeDeliveryAttempts(),
     });
     const result = await sweeper.sweep();
     expect(result.findings).toBe(0);
@@ -147,7 +141,7 @@ describe("StuckMessageSweeper (RIG-190)", () => {
 
   // T2: Successful submit — finding yields confirmed outcome.
   it("T2: a persistent_composer_input finding with text leads to confirmed outcome", async () => {
-    const finding = makeFinding(SESSION);
+    const finding = makeFinding(SESSION, { deliveryAttempt: { attemptId: "del-1", completedAt: T0.toISOString() } });
     const [obs] = makeObserver([finding]);
     // Pane content with a Claude-style input box; composerRegion must find non-empty body.
     // We use a minimal pane layout that composerRegion recognises.
@@ -158,15 +152,6 @@ describe("StuckMessageSweeper (RIG-190)", () => {
       sessionTransport: transport,
       attemptStore: store,
       seatActivity: makeSeatActivity("idle-at-prompt"),
-      deliveryAttempts: makeDeliveryAttempts([{
-        attemptId: "del-1",
-        sessionName: SESSION,
-        nodeId: null,
-        occupant: null,
-        pane: null,
-        sentHash: "abc",
-        completedAt: T0.toISOString(),
-      }]),
     });
     const result = await sweeper.sweep();
     expect(result.findings).toBe(1);
@@ -186,7 +171,6 @@ describe("StuckMessageSweeper (RIG-190)", () => {
       sessionTransport: transport,
       attemptStore: store,
       seatActivity: makeSeatActivity("working"),
-      deliveryAttempts: makeDeliveryAttempts(),
     });
     const result = await sweeper.sweep();
     expect(result.seats[0]!.outcome).toBe("fast_path");
@@ -196,7 +180,7 @@ describe("StuckMessageSweeper (RIG-190)", () => {
 
   // T4: R2 occupant re-check — generation changes after capture, seat skipped.
   it("T4: skipped_occupant_changed when occupant generation changes after capture", async () => {
-    const finding = makeFinding(SESSION);
+    const finding = makeFinding(SESSION, { deliveryAttempt: { attemptId: "del-t4", completedAt: T0.toISOString() } });
     const [obs] = makeObserver([finding]);
     // We simulate generation change by tracking call count on getSeatStateBySession.
     let callCount = 0;
@@ -214,7 +198,6 @@ describe("StuckMessageSweeper (RIG-190)", () => {
       sessionTransport: transport,
       attemptStore: store,
       seatActivity: activity,
-      deliveryAttempts: makeDeliveryAttempts(),
     });
     const result = await sweeper.sweep();
     expect(result.seats[0]!.outcome).toBe("skipped_occupant_changed");
@@ -222,7 +205,7 @@ describe("StuckMessageSweeper (RIG-190)", () => {
 
   // T5: R5 idempotency — second sweep for same delivery ID is skipped.
   it("T5: second sweep for same delivery ID returns skipped_already_attempted", async () => {
-    const finding = makeFinding(SESSION);
+    const finding = makeFinding(SESSION, { deliveryAttempt: { attemptId: "del-1", completedAt: T0.toISOString() } });
     const [obs] = makeObserver([finding]);
     // Insert a prior attempt for delivery "del-1".
     store.writeAttempting({
@@ -238,15 +221,6 @@ describe("StuckMessageSweeper (RIG-190)", () => {
       sessionTransport: transport,
       attemptStore: store,
       seatActivity: makeSeatActivity("idle-at-prompt"),
-      deliveryAttempts: makeDeliveryAttempts([{
-        attemptId: "del-1",
-        sessionName: SESSION,
-        nodeId: null,
-        occupant: null,
-        pane: null,
-        sentHash: "abc",
-        completedAt: T0.toISOString(),
-      }]),
     });
     const result = await sweeper.sweep();
     expect(result.seats[0]!.outcome).toBe("skipped_already_attempted");
@@ -254,7 +228,7 @@ describe("StuckMessageSweeper (RIG-190)", () => {
 
   // T6: R6 persisted attempt record — 'attempting' row written before Enter.
   it("T6: attempt record written in 'attempting' state, resolved to 'confirmed' on success", async () => {
-    const finding = makeFinding(SESSION);
+    const finding = makeFinding(SESSION, { deliveryAttempt: { attemptId: "del-new", completedAt: T0.toISOString() } });
     const [obs] = makeObserver([finding]);
     // Use a fake delivery ID not in the store.
     const [transport] = makeTransport({ content: "> My message", sendOk: true });
@@ -263,15 +237,6 @@ describe("StuckMessageSweeper (RIG-190)", () => {
       sessionTransport: transport,
       attemptStore: store,
       seatActivity: makeSeatActivity("idle-at-prompt"),
-      deliveryAttempts: makeDeliveryAttempts([{
-        attemptId: "del-new",
-        sessionName: SESSION,
-        nodeId: null,
-        occupant: null,
-        pane: null,
-        sentHash: "abc",
-        completedAt: T0.toISOString(),
-      }]),
     });
     const result = await sweeper.sweep();
     const outcome = result.seats[0]!.outcome;
@@ -286,7 +251,7 @@ describe("StuckMessageSweeper (RIG-190)", () => {
 
   // T7: R7 degraded on capture timeout.
   it("T7: degraded outcome on capture timeout", async () => {
-    const finding = makeFinding(SESSION);
+    const finding = makeFinding(SESSION, { deliveryAttempt: { attemptId: "del-t7", completedAt: T0.toISOString() } });
     const [obs] = makeObserver([finding]);
     const [transport] = makeTransport({ captureDelay: 200 });
     const sweeper = new StuckMessageSweeper({
@@ -294,7 +259,6 @@ describe("StuckMessageSweeper (RIG-190)", () => {
       sessionTransport: transport,
       attemptStore: store,
       seatActivity: makeSeatActivity("idle-at-prompt"),
-      deliveryAttempts: makeDeliveryAttempts(),
     });
     const result = await sweeper.sweep({ seatTimeoutMs: 50 });
     expect(result.seats[0]!.outcome).toBe("degraded");
@@ -303,7 +267,7 @@ describe("StuckMessageSweeper (RIG-190)", () => {
 
   // T8: R3 collapsed-paste skipped (Claude style).
   it("T8: skipped_collapsed for Claude collapsed paste pattern", async () => {
-    const finding = makeFinding(SESSION);
+    const finding = makeFinding(SESSION, { deliveryAttempt: { attemptId: "del-t8", completedAt: T0.toISOString() } });
     const [obs] = makeObserver([finding]);
     // Claude collapsed paste: "[Pasted text #1 +10 lines]" — composerRegion must return this body.
     // We build the pane content that composerRegion would parse; since the body depends on
@@ -318,7 +282,6 @@ describe("StuckMessageSweeper (RIG-190)", () => {
       sessionTransport: transport,
       attemptStore: store,
       seatActivity: makeSeatActivity("idle-at-prompt"),
-      deliveryAttempts: makeDeliveryAttempts(),
     });
     const result = await sweeper.sweep();
     // Outcome must not be "confirmed" since collapsed paste check or empty body prevents it.
@@ -342,7 +305,7 @@ describe("StuckMessageSweeper (RIG-190)", () => {
 
   // T10: Dry-run — no attempt records written, no Enter pressed.
   it("T10: dry run does not write attempt records or call send", async () => {
-    const finding = makeFinding(SESSION);
+    const finding = makeFinding(SESSION, { deliveryAttempt: { attemptId: "del-dry", completedAt: T0.toISOString() } });
     const [obs] = makeObserver([finding]);
     const [transport, mock] = makeTransport({ content: "> my message" });
     const sweeper = new StuckMessageSweeper({
@@ -350,15 +313,6 @@ describe("StuckMessageSweeper (RIG-190)", () => {
       sessionTransport: transport,
       attemptStore: store,
       seatActivity: makeSeatActivity("idle-at-prompt"),
-      deliveryAttempts: makeDeliveryAttempts([{
-        attemptId: "del-dry",
-        sessionName: SESSION,
-        nodeId: null,
-        occupant: null,
-        pane: null,
-        sentHash: "abc",
-        completedAt: T0.toISOString(),
-      }]),
     });
     const result = await sweeper.sweep({ dryRun: true });
     expect(mock.sendCalls).toHaveLength(0);
@@ -387,7 +341,6 @@ describe("StuckMessageSweeper (RIG-190)", () => {
       sessionTransport: transport,
       attemptStore: store,
       seatActivity: makeSeatActivity("idle-at-prompt"),
-      deliveryAttempts: makeDeliveryAttempts(),
     });
     // Fire both concurrently, then wait for both.
     const [r1, r2] = await Promise.all([
@@ -410,7 +363,6 @@ describe("StuckMessageSweeper (RIG-190)", () => {
       sessionTransport: transport,
       attemptStore: store,
       seatActivity: makeSeatActivity(),
-      deliveryAttempts: makeDeliveryAttempts(),
     });
     await sweeper.sweep({ rig: "alpha" });
     expect(mock.scanCalls).toHaveLength(1);
@@ -419,7 +371,7 @@ describe("StuckMessageSweeper (RIG-190)", () => {
 
   // T13: Capture failure — skipped_capture_failed outcome.
   it("T13: skipped_capture_failed when capture returns ok:false", async () => {
-    const finding = makeFinding(SESSION);
+    const finding = makeFinding(SESSION, { deliveryAttempt: { attemptId: "del-t13", completedAt: T0.toISOString() } });
     const [obs] = makeObserver([finding]);
     const [transport] = makeTransport({ captureOk: false });
     const sweeper = new StuckMessageSweeper({
@@ -427,7 +379,6 @@ describe("StuckMessageSweeper (RIG-190)", () => {
       sessionTransport: transport,
       attemptStore: store,
       seatActivity: makeSeatActivity("idle-at-prompt"),
-      deliveryAttempts: makeDeliveryAttempts(),
     });
     const result = await sweeper.sweep();
     expect(result.seats[0]!.outcome).toBe("skipped_capture_failed");

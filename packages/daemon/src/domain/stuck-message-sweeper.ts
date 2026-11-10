@@ -27,7 +27,6 @@ import {
 import type { StuckSeatObserver, StuckFinding } from "./stuck-seat-observer.js";
 import type { SessionTransport } from "./session-transport.js";
 import type { SweepAttemptStore } from "./sweep-attempt-store.js";
-import type { DeliveryAttemptRef } from "./delivery-attempt-ledger.js";
 import type { SeatActivityService } from "./seat-activity-service.js";
 
 // Collapsed-paste patterns (Claude and Codex).  When the composer shows one of
@@ -51,6 +50,8 @@ export type SeatOutcome =
   | "skipped_capture_failed"    // Capture returned an error
   | "skipped_no_body"     // composerRegion returned null body
   | "skipped_no_finding"  // No delivery attempt to correlate
+  | "skipped_dry_run"     // MF1: dry-run mode; no Enter pressed, no attempt record written
+  | "skipped_no_delivery_id" // MF3: no correlated delivery ID; cannot attribute composer text
   | "degraded"            // R7: timeout during capture or submit
   | "indeterminate";      // Crash context (attempt row stuck in attempting state)
 
@@ -123,8 +124,6 @@ export interface StuckMessageSweeperDeps {
   sessionTransport: Pick<SessionTransport, "capture" | "send">;
   attemptStore: SweepAttemptStore;
   seatActivity: Pick<SeatActivityService, "getSeatStateBySession">;
-  /** Newest delivery attempts per session, for delivery-ID lookup. */
-  deliveryAttempts: { attemptsFor(session: string): DeliveryAttemptRef[] };
 }
 
 export class StuckMessageSweeper {
@@ -154,7 +153,7 @@ export class StuckMessageSweeper {
 
     // R9: delegate detection to StuckSeatObserver.
     await this.deps.stuckSeatObserver.scan(opts.rig ? { rig: opts.rig } : {});
-    const snapshot = this.deps.stuckSeatObserver.snapshot(opts.rig ? { rig: opts.rig } : {});
+    const snapshot = this.deps.stuckSeatObserver.snapshot(opts.rig ? { rig: opts.rig, rigNames: new Set([opts.rig]) } : {});
 
     const findings: StuckFinding[] = snapshot.findings.filter(
       (f) => f.kind === "persistent_composer_input" && !f.stale,
@@ -178,7 +177,7 @@ export class StuckMessageSweeper {
         deltas.push(delta);
       }
     });
-    await Promise.all(workers);
+    await Promise.allSettled(workers);
 
     // After pool: coordinator merges deltas (R1).
     // No shared observation map to update — StuckSeatObserver owns that state (R9).
@@ -225,13 +224,16 @@ export class StuckMessageSweeper {
       return done("fast_path");
     }
 
-    // Look up the delivery attempt for delivery ID and pane correlation (R6).
-    const latestAttempts = this.deps.deliveryAttempts.attemptsFor(session);
-    const latestAttempt = latestAttempts[0] ?? null;
+    // MF6: use observer-correlated delivery attempt — do not re-query the ledger.
+    const deliveryId = finding.deliveryAttempt?.attemptId ?? null;
+
+    // MF3: no correlated delivery ID — cannot attribute the composer text; skip.
+    if (!deliveryId) {
+      return done("skipped_no_delivery_id");
+    }
 
     // R5: one Enter per delivery ID.
-    const deliveryId = latestAttempt?.attemptId ?? null;
-    if (deliveryId && !opts.dryRun && this.deps.attemptStore.hasAttemptForDelivery(deliveryId)) {
+    if (!opts.dryRun && this.deps.attemptStore.hasAttemptForDelivery(deliveryId)) {
       return done("skipped_already_attempted", { deliveryId });
     }
 
@@ -279,12 +281,12 @@ export class StuckMessageSweeper {
 
     // Dry-run stops here — no attempt records written (T10).
     if (opts.dryRun) {
-      return done("skipped_no_finding", { deliveryId });
+      return done("skipped_dry_run", { deliveryId });
     }
 
     // R6: write 'attempting' record before pressing Enter.
     const occupantGeneration = gen1;
-    const paneId = latestAttempt?.pane ?? null;
+    const paneId = null;
     const fp = fingerprint(body);
 
     const synthDeliveryId = deliveryId ?? `synth:${session}:${now().getTime()}`;
