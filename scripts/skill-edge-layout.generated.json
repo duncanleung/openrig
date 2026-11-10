@@ -244,6 +244,12 @@
       ],
       "category": "pm"
     },
+    "pr-review-lifecycle": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
+    },
     "queue-handoff": {
       "edges": [
         "plugin"
@@ -363,6 +369,12 @@
         "spec"
       ],
       "category": "core"
+    },
+    "wiki-update": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
     }
   }
 }
