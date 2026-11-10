@@ -7,6 +7,7 @@ import { coreSchema } from "./migrations/001_core_schema.js";
 import { terminalPolicySchema } from "./migrations/128_terminal_policy.js";
 import { turnAnomalySchema } from "./migrations/129_turn_anomaly.js";
 import { nodeContextLifecycleSchema } from "./migrations/130_node_context_lifecycle.js";
+import { sweepAttemptSchema } from "./migrations/131_sweep_attempt.js";
 import { bindingsSessionsSchema } from "./migrations/002_bindings_sessions.js";
 import { eventsSchema } from "./migrations/003_events.js";
 import { snapshotsSchema } from "./migrations/004_snapshots.js";
@@ -291,4 +292,5 @@ export const ALL_MIGRATIONS: Migration[] = [
   digestStallPatternsSchema,
   reviewSuppressRulesSchema,
   nodeContextLifecycleSchema,
+  sweepAttemptSchema,
 ];

@@ -417,6 +417,8 @@ export interface AppDeps {
   runtimeFallbackService?: import("./domain/runtime-fallback-service.js").RuntimeFallbackService;
   /** Fleet ingestion service — enables POST /api/fleet/reconcile. */
   fleetIngestion?: import("./domain/fleet-ingestion-service.js").FleetIngestionService;
+  /** RIG-190 — stuck-message sweeper (POST /api/transport/sweep-stuck). */
+  stuckMessageSweeper?: import("./domain/stuck-message-sweeper.js").StuckMessageSweeper;
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -648,6 +650,7 @@ export function createApp(deps: AppDeps): Hono {
     // hasAssignedWork via attachTerminalActivityAndWork.
     c.set("seatActivityService" as never, deps.seatActivityService);
     c.set("stuckSeatObserver" as never, deps.stuckSeatObserver);
+    c.set("stuckMessageSweeper" as never, deps.stuckMessageSweeper);
     c.set("turnAnomalyDetector" as never, deps.turnAnomalyDetector);
     c.set("seatStructuralActivityService" as never, deps.seatStructuralActivityService);
     c.set("activityHookToken" as never, deps.activityHookToken);

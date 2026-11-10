@@ -4,6 +4,7 @@ import { authBearerTokenMiddleware } from "../middleware/auth-bearer-token.js";
 import { requireSenderIdentity, transportSenderSession } from "./require-sender-identity.js";
 import type { OutboxHandler } from "../domain/outbox-handler.js";
 import { wrapPaneEnvelope } from "../lib/pane-envelope.js";
+import type { StuckMessageSweeper } from "../domain/stuck-message-sweeper.js";
 
 // S2 (OPR.0.5.4.3) — the sender-side half of two-ended honesty: appended to any
 // unattributed delivery's success payload and surfaced by the CLI renderers.
@@ -354,6 +355,27 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       return c.json({ ...result, warning: UNKNOWN_SENDER_NOTICE });
     }
     return c.json(result);
+  });
+
+  // RIG-190 — POST /sweep-stuck: trigger the stuck-message sweeper.
+  // Requires the stuckMessageSweeper dep to be wired into the Hono context.
+  router.post("/sweep-stuck", async (c) => {
+    const sweeper = c.get("stuckMessageSweeper" as never) as StuckMessageSweeper | undefined;
+    if (!sweeper) {
+      return c.json({ ok: false, error: "Stuck-message sweeper is not available." }, 503);
+    }
+    // Parse body — malformed JSON is caught by the global handler in server.ts (T14).
+    const body = await c.req.json<{
+      rig?: string;
+      dryRun?: boolean;
+      seatTimeoutMs?: number;
+    }>();
+    const result = await sweeper.sweep({
+      rig: typeof body.rig === "string" ? body.rig : undefined,
+      dryRun: body.dryRun === true,
+      seatTimeoutMs: typeof body.seatTimeoutMs === "number" ? body.seatTimeoutMs : undefined,
+    });
+    return c.json({ ok: true, ...result });
   });
 
   return router;

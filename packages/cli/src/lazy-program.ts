@@ -59,6 +59,7 @@ export const COMMAND_LOADERS: ReadonlyMap<string, Load> = new Map<string, Load>(
   ["capture", async () => (await import("./commands/capture.js")).captureCommand()],
   ["broadcast", async () => (await import("./commands/broadcast.js")).broadcastCommand()],
   ["walk", async () => (await import("./commands/walk.js")).walkCommand()],
+  ["sweep-stuck", async () => (await import("./commands/sweep-stuck.js")).sweepStuckCommand()],
   ["ask", async () => (await import("./commands/ask.js")).askCommand()],
   ["chatroom", async () => (await import("./commands/chatroom.js")).chatroomCommand()],
   ["specs", async () => (await import("./commands/specs.js")).specsCommand()],
