@@ -63,6 +63,12 @@ const SAFE_VALUES: Record<string, string | number> = {
   "classification_attempts.status": "written",
   "context_usage.runtime": "claude-code",
   "node_startup_context.runtime": "claude-code",
+  // pi_usage_entries (migration 107): kind and origin have CHECK constraints.
+  "pi_usage_entries.kind": "assistant",
+  "pi_usage_entries.origin": "own",
+  // pi_usage_charges (migration 108): status='charged' also requires total_cost_usd NOT NULL.
+  // Use 'unavailable' to avoid that secondary constraint.
+  "pi_usage_charges.status": "unavailable",
 };
 
 /** One row per table, holding a value in each manifest column in that column's shape, so every column is proved. */
