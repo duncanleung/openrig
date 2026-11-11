@@ -267,14 +267,14 @@ describe("RIG-63 GateGuard claude.json registration", () => {
     expect(entry?.matcher).toBe("Edit|Write|MultiEdit|NotebookEdit");
     expect(entry?.hooks[0]).toEqual({
       type: "command",
-      command: 'node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/gateguard.cjs"',
+      command: '"${OPENRIG_NODE:-node}" "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/gateguard.cjs"',
       timeout: 5,
     });
   });
 
   it("registers the --reset hook on UserPromptSubmit", () => {
     const commands = (manifest.hooks.UserPromptSubmit ?? []).flatMap((e) => e.hooks.map((h) => h.command));
-    expect(commands).toContain('node "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/gateguard.cjs" --reset');
+    expect(commands).toContain('"${OPENRIG_NODE:-node}" "${CLAUDE_PLUGIN_ROOT}/hooks/scripts/gateguard.cjs" --reset');
   });
 
   it("every plugin-relative command in the manifest exists on disk", () => {

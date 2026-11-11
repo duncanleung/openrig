@@ -306,6 +306,10 @@ async function main() {
           stdio: "ignore",
           env: process.env,
         });
+        // Suppress async ENOENT — rig may not be on PATH in test/CI environments.
+        // The try/catch only catches synchronous spawn errors; async 'error' events
+        // (e.g. ENOENT) must be handled on the child to avoid crashing the process.
+        child.on("error", () => {});
         child.unref();
       } catch { /* best-effort — manual nudge still works */ }
     }
