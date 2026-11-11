@@ -1292,13 +1292,17 @@ describe("StartupOrchestrator", () => {
       const orch = createOrchestrator({ tmux: mockTmux({ sendText }), readFile: () => "GUIDANCE content" });
       await orch.startNode(makeInput(seed, {
         adapter,
-        resolvedStartupFiles: [autoFile("guidance/role.md")],
+        // guidance/team.md resolves to guidance_merge (not send_text) — it is a shared pod file,
+        // not a per-seat role file, so PER_SEAT_ROLE_PATH does not match it. guidance/role.md
+        // resolves to send_text via isPerSeatRoleStartupFile and would appear in the bundle;
+        // this fixture uses a team-scoped path to test the guidance_merge invariant correctly.
+        resolvedStartupFiles: [autoFile("guidance/team.md")],
         startupActions: [makeIdentityAction()],
         isRestore: false,
       }));
       const prompts = sendText.mock.calls.map((c) => (c as unknown as [string, string])[1]);
       const identityPrompt = prompts.find((t) => t.includes(makeIdentityAction().value))!;
-      expect(identityPrompt).toContain("GUIDANCE content");
+      expect(identityPrompt).not.toContain("GUIDANCE content");
     });
   });
 
