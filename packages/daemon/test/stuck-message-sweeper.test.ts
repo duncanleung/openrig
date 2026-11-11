@@ -426,4 +426,70 @@ describe("StuckMessageSweeper (RIG-190)", () => {
     // R5: guard still blocks a new attempt even after confirmation.
     expect(store.hasAttemptForDelivery("del-state")).toBe(true);
   });
+
+  // T16: MF2 (cycle 4) — send timeout uses failed_transient so future sweeps can retry.
+  it("T16: send timeout marks attempt as failed_transient, not failed; next sweep can retry", async () => {
+    const finding = makeFinding(SESSION, { deliveryAttempt: { attemptId: "del-t16", completedAt: T0.toISOString() } });
+    const [obs] = makeObserver([finding]);
+    // Valid pane content: prompt glyph + text + closing rule + footer.
+    // composerRegion needs this structure to return a non-null body so the code reaches the send.
+    const pane = "prior output\n❯ my message\n──────────────────────\n? for shortcuts";
+    const [transport] = makeTransport({ content: pane, sendDelay: 200 });
+    const sweeper = new StuckMessageSweeper({
+      stuckSeatObserver: obs,
+      sessionTransport: transport,
+      attemptStore: store,
+      seatActivity: makeSeatActivity("idle-at-prompt"),
+    });
+    // seatTimeoutMs=50 — capture is immediate, send takes 200ms → times out.
+    const result = await sweeper.sweep({ seatTimeoutMs: 50 });
+    expect(result.seats[0]!.outcome).toBe("degraded");
+
+    // The attempt row must be failed_transient, not failed.
+    const records = store.attemptsForDelivery("del-t16");
+    expect(records).toHaveLength(1);
+    expect(records[0]!.state).toBe("failed_transient");
+
+    // hasAttemptForDelivery must NOT block future retries for failed_transient.
+    expect(store.hasAttemptForDelivery("del-t16")).toBe(false);
+  });
+
+  // T17: MF4 (cycle 4) — composerRegion uses finding.runtime (not null).
+  // A claude-code finding on a Codex pane (❯ absent, › present): with the correct parser
+  // ("claude-code" only matches ❯) the pane yields skipped_no_body. Without the fix (null
+  // uses the union ❯›» class) it would mistakenly find the › line as staged input.
+  it("T17: composerRegion uses finding.runtime — claude-code finding on Codex pane yields skipped_no_body", async () => {
+    const pane = "prior output\n› my codex message\n──────────────────────\n? for shortcuts";
+    const finding = makeFinding(SESSION, {
+      runtime: "claude-code",
+      deliveryAttempt: { attemptId: "del-t17", completedAt: T0.toISOString() },
+    });
+    const [obs] = makeObserver([finding]);
+    const [transport] = makeTransport({ content: pane });
+    const sweeper = new StuckMessageSweeper({
+      stuckSeatObserver: obs,
+      sessionTransport: transport,
+      attemptStore: store,
+      seatActivity: makeSeatActivity("idle-at-prompt"),
+    });
+    const result = await sweeper.sweep();
+    // With finding.runtime="claude-code", composerRegion only matches ❯; › is not found.
+    expect(result.seats).toHaveLength(1);
+    expect(result.seats[0]!.outcome).toBe("skipped_no_body");
+  });
+
+  // T18: MF5 (cycle 4) — dry-run does not call scan() on the observer.
+  it("T18: dry-run sweep does not call stuckSeatObserver.scan()", async () => {
+    const finding = makeFinding(SESSION, { deliveryAttempt: { attemptId: "del-t18", completedAt: T0.toISOString() } });
+    const [obs, mock] = makeObserver([finding]);
+    const [transport] = makeTransport();
+    const sweeper = new StuckMessageSweeper({
+      stuckSeatObserver: obs,
+      sessionTransport: transport,
+      attemptStore: store,
+      seatActivity: makeSeatActivity("idle-at-prompt"),
+    });
+    await sweeper.sweep({ dryRun: true });
+    expect(mock.scanCalls).toHaveLength(0);
+  });
 });

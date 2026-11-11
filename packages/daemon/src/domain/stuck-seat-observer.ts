@@ -41,6 +41,8 @@ export interface StuckFinding {
   rig: string;
   logicalId: string;
   session: string;
+  /** Runtime observed at scan time (e.g. "claude-code", "codex", or null if unknown). */
+  runtime?: string | null;
   confidence: StuckConfidence;
   openedAt: string;
   lastObservedAt: string;
@@ -385,6 +387,7 @@ export class StuckSeatObserver {
             finding: {
               episodeId: `${kind}:${seat.session}:${Date.parse(nowIso)}`,
               kind, rig: seat.rig, logicalId: seat.logicalId, session: seat.session,
+              runtime: seat.runtime,
               confidence: v.confidence, openedAt: nowIso, lastObservedAt: nowIso, stale: false, detail: v.detail, ...v.extra,
             },
           });

@@ -51,10 +51,14 @@ Notes:
       if (opts.rig) body.rig = opts.rig;
       if (opts.dryRun) body.dryRun = true;
 
+      // MF3 (cycle 4): pass a timeout >= the sweep execution budget so the HTTP request
+      // does not time out before the daemon finishes sweeping. The daemon's default per-seat
+      // timeout is 15s; with SWEEP_POOL_SIZE=4 workers and an unknown number of findings,
+      // 300s (5 min) comfortably covers any realistic fleet sweep.
       const res = await client.post<Record<string, unknown>>(
         "/api/transport/sweep-stuck",
         body,
-        { headers: terminalAuthHeaders() },
+        { headers: terminalAuthHeaders(), timeoutMs: 300_000 },
       );
 
       if (opts.json) {

@@ -370,6 +370,11 @@ export function transportRoutes(opts?: { bearerToken?: string | null }): Hono {
       dryRun?: boolean;
       seatTimeoutMs?: number;
     }>();
+    // MF1 (cycle 4): reject invalid seatTimeoutMs — 0, negative, or non-finite values would
+    // disable or corrupt the per-seat timeout guard (R7).
+    if (typeof body.seatTimeoutMs === "number" && (!Number.isFinite(body.seatTimeoutMs) || body.seatTimeoutMs <= 0)) {
+      return c.json({ ok: false, error: "seatTimeoutMs must be a finite positive number." }, 400);
+    }
     const result = await sweeper.sweep({
       rig: typeof body.rig === "string" ? body.rig : undefined,
       dryRun: body.dryRun === true,

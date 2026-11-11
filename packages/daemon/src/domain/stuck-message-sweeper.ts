@@ -154,7 +154,11 @@ export class StuckMessageSweeper {
     const startMs = Date.now();
 
     // R9: delegate detection to StuckSeatObserver.
-    await this.deps.stuckSeatObserver.scan(opts.rig ? { rig: opts.rig } : {});
+    // MF5 (cycle 4): skip scan() in dry-run — scan advances the observer's composerSince grace
+    // state, which violates the T10 contract (dry-run must not mutate observer state).
+    if (!opts.dryRun) {
+      await this.deps.stuckSeatObserver.scan(opts.rig ? { rig: opts.rig } : {});
+    }
     // MF2 (cycle 2): resolve rig filter to canonical names before passing to snapshot.
     // opts.rig may be an ID; findings are keyed by name — a raw Set([opts.rig]) yields empty silently.
     const resolvedRigNames = opts.rig
@@ -278,11 +282,10 @@ export class StuckMessageSweeper {
 
     const paneContent = capture.content ?? "";
 
-    // Determine runtime from the finding's rig (approximation; accurate enough for
-    // composerRegion which does a union-of-glyphs when runtime is unknown).
-    // The StuckSeatObserver already verified this was a claude-code or codex seat.
-    // We pass null to get the union check; a wrong runtime just widens the match slightly.
-    const body = composerRegion(paneContent, null).body;
+    // MF4 (cycle 4): use the finding's runtime so composerRegion uses the correct parser.
+    // Passing null fell back to a union-of-glyphs check (Claude+Codex combined), which
+    // could misparse a Codex composer as Claude or vice versa.
+    const body = composerRegion(paneContent, finding.runtime ?? null).body;
 
     if (body === null || body.length === 0) {
       return done("skipped_no_body");
@@ -329,7 +332,11 @@ export class StuckMessageSweeper {
 
     if (!sendResult.ok) {
       // R7: timed out during send.
-      this.deps.attemptStore.markFailed(attemptId, now());
+      // MF2 (cycle 4): use markTransientFailure instead of markFailed — a send timeout means the
+      // Enter outcome is unknown (not definitively failed). markFailed would permanently block
+      // retries via hasAttemptForDelivery; failed_transient is non-blocking so the next sweep
+      // can retry the delivery.
+      this.deps.attemptStore.markTransientFailure(attemptId, now());
       return done("degraded", { deliveryId: synthDeliveryId, attemptId });
     }
 

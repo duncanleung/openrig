@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import type Database from "better-sqlite3";
 
-export type SweepAttemptState = "attempting" | "confirmed" | "failed" | "indeterminate";
+export type SweepAttemptState = "attempting" | "confirmed" | "failed" | "failed_transient" | "indeterminate";
 
 export interface SweepAttemptRecord {
   id: string;
@@ -80,6 +80,17 @@ export class SweepAttemptStore {
   }
 
   /**
+   * Mark a row as transiently failed — a timeout or transient transport error where the Enter
+   * outcome is unknown. Unlike markFailed, this state does NOT block future retries:
+   * hasAttemptForDelivery treats failed_transient as non-blocking.
+   */
+  markTransientFailure(id: string, now?: Date): void {
+    this.db
+      .prepare(`UPDATE sweep_attempts SET state = 'failed_transient', resolved_at = ? WHERE id = ?`)
+      .run((now ?? new Date()).toISOString(), id);
+  }
+
+  /**
    * On daemon start: upgrade ALL 'attempting' rows to 'indeterminate'.
    * A crash while 'attempting' leaves the row ambiguous. Indeterminate rows
    * are never auto-retried.
@@ -95,12 +106,13 @@ export class SweepAttemptStore {
   }
 
   /**
-   * Guard: has any attempt (in any state) already been recorded for this
-   * delivery ID? One Enter per delivery ID maximum (R5).
+   * Guard: has a blocking attempt already been recorded for this delivery ID?
+   * One Enter per delivery ID maximum (R5). failed_transient is non-blocking —
+   * it records a timeout where the outcome was unknown, allowing future retries.
    */
   hasAttemptForDelivery(deliveryId: string): boolean {
     const row = this.db
-      .prepare(`SELECT id FROM sweep_attempts WHERE delivery_id = ? LIMIT 1`)
+      .prepare(`SELECT id FROM sweep_attempts WHERE delivery_id = ? AND state != 'failed_transient' LIMIT 1`)
       .get(deliveryId);
     return row !== undefined;
   }
