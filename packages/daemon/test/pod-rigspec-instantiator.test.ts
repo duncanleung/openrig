@@ -907,10 +907,10 @@ profiles:
     const assetPath = resolve(import.meta.dirname, "../src/domain/../../assets/guidance/CULTURE-default.md");
     expect(existsSync(assetPath)).toBe(true);
     const content = readFileSync(assetPath, "utf8");
-    expect(content).toContain("Pragmatic truth-seeking");
-    expect(content).toContain("Principles over rules");
-    expect(content).toContain("Ship good, working product");
-    expect(content).toContain("Match rigor to stakes");
+    expect(content).toContain("Truth-seeking.");
+    expect(content).toContain("Judgment over rules.");
+    expect(content).toContain("Ship working product");
+    expect(content).toContain("Rigor matches stakes.");
     expect(content).not.toContain("full stop on new production");
   });
 

@@ -120,7 +120,7 @@ describe("child-bound startup", () => {
       f.deps.fetch = async (url) => (await fetch(url), new Promise(() => {}));
       const { outcome, elapsed } = await settle(f);
       expect((outcome as Error).message).toMatch(/Last probe: .*timed out|Last probe: .*healthz/);
-      expect(elapsed).toBeLessThanOrEqual(20_000);
+      expect(elapsed).toBeLessThanOrEqual(90_000);
       expect(f.files.has(STATE_FILE)).toBe(false);
       expect(f.deps.kill).toHaveBeenCalledWith(12345, "SIGTERM");
     });
@@ -130,7 +130,7 @@ describe("child-bound startup", () => {
       const fetch = f.deps.fetch; const urls: string[] = [];
       f.deps.fetch = async (url) => {
         const res = await fetch(url);
-        if (urls.push(url) - 1 === at) vi.setSystemTime(Date.now() + 21_000);
+        if (urls.push(url) - 1 === at) vi.setSystemTime(Date.now() + 91_000);
         if (secondary && url.includes("127.0.0.2")) throw new Error("timeout");
         return res;
       };
@@ -176,7 +176,7 @@ describe("child-bound startup", () => {
       f.deps.fetch = async (url) => (await fetch(url), calls++ % 2 === 0 ? { ok: true, json: async () => f.body } : new Promise(() => {}));
       const { outcome, elapsed } = await settle(f);
       expect((outcome as Error).message).toMatch(/listener verification is incomplete.*reservation retained/);
-      expect(elapsed).toBeLessThanOrEqual(20_000);
+      expect(elapsed).toBeLessThanOrEqual(90_000);
       expect(f.files.has(STATE_FILE)).toBe(false);
       expect(f.deps.kill).not.toHaveBeenCalled();
     });

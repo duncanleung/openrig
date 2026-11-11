@@ -171,9 +171,9 @@ describe("Agent Starter v1 vertical — real Codex adapter delivery (M2 R2)", ()
       expect(agentsMd).toContain("END OpenRig MANAGED BLOCK: codex-fixture-starter.yaml");
       expect(agentsMd).toContain("starter_id: codex-fixture-starter");
       expect(agentsMd).toContain("BEGIN OpenRig MANAGED BLOCK: CULTURE-default.md");
-      expect(agentsMd).toContain("Ship good, working product");
+      expect(agentsMd).toContain("Ship working product");
       expect(agentsMd).toContain("How big is the dog?");
-      expect(agentsMd).toContain("When a turn ends, you sleep.");
+      expect(agentsMd).toContain("You sleep between turns.");
 
       db.close();
     } finally {

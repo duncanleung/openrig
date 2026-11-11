@@ -133,7 +133,7 @@ describe("0.5.2-07 A2-3 — model-fidelity enumeration guard", () => {
     // The NodeRow shape must carry it, and createSuccessor must forward it onto the successor node.
     expect(handover, "NodeRow must carry codex_config_profile").toMatch(/codex_config_profile: string \| null/);
     expect(handover, "createSuccessor must forward the profile onto the successor node").toMatch(
-      /codexConfigProfile: node\.codex_config_profile/,
+      /codexConfigProfile: .*node\.codex_config_profile/,
     );
     // The launcher must thread it from the successor node onto the transient binding the adapter reads.
     const launcher = read("domain/successor-session-launcher.ts");

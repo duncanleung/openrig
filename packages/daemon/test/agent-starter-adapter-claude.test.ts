@@ -185,9 +185,9 @@ describe("Agent Starter v1 vertical — real Claude adapter delivery (M2 R2)", (
       // unambiguous marker the resolver passed through.
       expect(claudeMd).toContain("starter_id: claude-fixture-starter");
       expect(claudeMd).toContain("BEGIN OpenRig MANAGED BLOCK: CULTURE-default.md");
-      expect(claudeMd).toContain("Ship good, working product");
+      expect(claudeMd).toContain("Ship working product");
       expect(claudeMd).toContain("How big is the dog?");
-      expect(claudeMd).toContain("When a turn ends, you sleep.");
+      expect(claudeMd).toContain("You sleep between turns.");
 
       db.close();
     } finally {

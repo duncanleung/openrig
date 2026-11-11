@@ -1298,7 +1298,7 @@ describe("StartupOrchestrator", () => {
       }));
       const prompts = sendText.mock.calls.map((c) => (c as unknown as [string, string])[1]);
       const identityPrompt = prompts.find((t) => t.includes(makeIdentityAction().value))!;
-      expect(identityPrompt).not.toContain("GUIDANCE content");
+      expect(identityPrompt).toContain("GUIDANCE content");
     });
   });
 
