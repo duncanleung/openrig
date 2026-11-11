@@ -492,4 +492,35 @@ describe("StuckMessageSweeper (RIG-190)", () => {
     await sweeper.sweep({ dryRun: true });
     expect(mock.scanCalls).toHaveLength(0);
   });
+
+  // T19: S1 (cycle 5) — send() exception calls markTransientFailure, not permanently stuck.
+  // Regression for: a thrown exception in send() bypassed both markTransientFailure and
+  // markFailed, leaving the attempting record permanently stuck until restart.
+  it("T19: send() exception marks attempt as failed_transient, not permanently stuck", async () => {
+    const pane = "prior output\n❯ my message\n──────────────────────\n? for shortcuts";
+    const finding = makeFinding(SESSION, { deliveryAttempt: { attemptId: "del-t19", completedAt: T0.toISOString() } });
+    const [obs] = makeObserver([finding]);
+    const throwingTransport: Pick<StuckMessageSweeperDeps["sessionTransport"], "capture" | "send"> = {
+      capture: async (_session: string) => ({ ok: true, content: pane }) as never,
+      send: async (_session: string, _text: string, _opts: unknown): Promise<never> => {
+        throw new Error("send exploded");
+      },
+    };
+    const sweeper = new StuckMessageSweeper({
+      stuckSeatObserver: obs,
+      sessionTransport: throwingTransport,
+      attemptStore: store,
+      seatActivity: makeSeatActivity("idle-at-prompt"),
+    });
+    const result = await sweeper.sweep();
+    expect(result.seats[0]!.outcome).toBe("degraded");
+
+    // The attempt row must be failed_transient (not attempting), so it does not permanently block.
+    const records = store.attemptsForDelivery("del-t19");
+    expect(records).toHaveLength(1);
+    expect(records[0]!.state).toBe("failed_transient");
+
+    // hasAttemptForDelivery must NOT block future retries for failed_transient.
+    expect(store.hasAttemptForDelivery("del-t19")).toBe(false);
+  });
 });

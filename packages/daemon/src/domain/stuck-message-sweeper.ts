@@ -322,13 +322,21 @@ export class StuckMessageSweeper {
 
     // R3: use submitOnly with the visible body as expectedStagedText.
     // submitOnly re-captures the pane and verifies the text is still there before pressing Enter.
+    // S1 (cycle 5): send() can throw (network error, adapter crash). Without .catch(), the exception
+    // bypasses markTransientFailure and leaves the attempting record permanently stuck. The .catch()
+    // converts a thrown exception to a sentinel so the cleanup path always runs.
     const sendResult = await withTimeout(
       this.deps.sessionTransport.send(session, "", {
         submitOnly: true,
         expectedStagedText: body,
       }),
       seatTimeoutMs,
-    );
+    ).catch((err: unknown) => ({ ok: "threw" as const, error: String(err) }));
+
+    if (sendResult.ok === "threw") {
+      this.deps.attemptStore.markTransientFailure(attemptId, now());
+      return done("degraded", { deliveryId: synthDeliveryId, attemptId, error: sendResult.error });
+    }
 
     if (!sendResult.ok) {
       // R7: timed out during send.
