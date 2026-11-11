@@ -275,6 +275,12 @@
       ],
       "category": null
     },
+    "retro": {
+      "edges": [
+        "plugin"
+      ],
+      "category": null
+    },
     "review-team": {
       "edges": [
         "canonical",

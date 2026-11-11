@@ -34,6 +34,7 @@ describe("POST /api/down route", () => {
   it("returns 409 when delete is blocked by kill failures", async () => {
     const tmux = mockTmuxAdapter();
     (tmux.killSession as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: false, message: "kill failed" });
+    (tmux.probeSession as ReturnType<typeof vi.fn>).mockResolvedValue({ state: "present" });
     const db = createFullTestDb();
     const { app, rigRepo, sessionRegistry } = createTestApp(db, { tmux });
 

@@ -61,6 +61,7 @@ These are auto-delivered to every rig; their name+description are already in you
 - **seat-continuity-and-handover** — handing your seat's work across a restart or to another owner.
 - **orienting-to-an-inherited-seat** — you just inherited an existing seat through a planned handover and need to verify its identity, state, and testimony.
 - **retiring-and-inheriting-a-seat** — you're planning a seat transition and need to retire the current occupant into a fresh successor without losing continuity.
+- **retro** — running a session retrospective: reduce a transcript to a findings summary, mine patterns, and produce a structured retro report.
 - **mission-slice-sop** — you're working a mission/slice (the SDLC: intent → mini-requirements + proof contract → build → QA → proof). The operating manual.
 - **messaging-the-human** — composing a message to the human. Plain language, no insider jargon.
 - **agent-operated-workflows** — a bounded real-world procedure needs an agent to interpret state and operate exact tools, or you are deciding whether ordinary code should own the loop.

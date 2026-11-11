@@ -451,13 +451,13 @@ describe("ticket-factory recurring operation (RIG-88)", () => {
       const text = readFileSync(resolve(import.meta.dirname, "../../../.factory.yml"), "utf8");
       const s = parseFactorySettings(text);
       expect(s.jev).toEqual({ threshold: 0.8, model: "jev-latest" });
-      expect(s.mergePolicy).toBe("auto-low-risk");
+      expect(s.mergePolicy).toBe("auto-risk-classifier");
     });
 
     it("maps the project's .factory.yml onto settings", () => {
       const text = readFileSync(resolve(import.meta.dirname, "../../../.factory.yml"), "utf8");
       expect(parseFactorySettings(text)).toMatchObject({
-        maxTicketsPerRun: 3, wallClockPerTicketSeconds: 3600, mergeGate: "all", mergePolicy: "auto-low-risk",
+        maxTicketsPerRun: 3, wallClockPerTicketSeconds: 3600, mergeGate: "all", mergePolicy: "auto-risk-classifier",
         tokenCapPerTicket: 500000, capacity: 1, cooldownSeconds: 3600,
       });
     });
