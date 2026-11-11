@@ -72,6 +72,21 @@ export const RIG_RENAME_MANIFEST: readonly ManifestColumn[] = [
   ...session("seat_delivery_guard_changes", "actor"),
   ...session("nodes", "previous_occupant"),
 
+  // Terminal policy tables (migration 128) — actor is the session that applied the policy;
+  // config_json holds TerminalPolicyConfig JSON with helpers: string[] (seat addresses like helper@rig).
+  ...session("rig_terminal_policy_defaults", "actor"),
+  ...session("seat_terminal_policies", "actor"),
+  ...json("rig_terminal_policy_defaults", "config_json"),
+  ...json("seat_terminal_policies", "config_json"),
+
+  // Pi usage tables (migrations 107–108) — seat_session is the seat@rig address of the occupant.
+  ...session("pi_usage_entries", "seat_session"),
+  ...session("pi_usage_charges", "seat_session"),
+
+  // Turn anomaly episodes (migration 129) — the seat's session address and the rig it ran in.
+  ...session("turn_anomaly_episodes", "seat_session"),
+  rigName("turn_anomaly_episodes", "rig_name"),
+
   // Cached workflow specs and workflow state. Workflow roles carry `preferred_targets: seat@rig`.
   ...json("workflow_specs", "roles_json", "steps_json", "spec_json"),
   ...json("workflow_instances", "current_frontier_json", "last_continuation_decision_json", "lifecycle_binding_json"),
@@ -144,6 +159,14 @@ export const RIG_RENAME_EXCLUSIONS: readonly ManifestExclusion[] = [
   { table: "chat_messages", column: "body", reason: "message text; kept as written" },
   { table: "watchdog_history", column: "delivery_message", reason: "message text; kept as written" },
   { table: "watchdog_history", column: "evaluation_notes", reason: "log text; kept as written" },
+  // Pi provider session IDs are UUIDs assigned by the Pi service, not seat@rig addresses.
+  { table: "pi_usage_entries", column: "pi_session_id", reason: "Pi provider session UUID; not a seat@rig session name" },
+  { table: "pi_usage_charges", column: "pi_session_id", reason: "Pi provider session UUID; not a seat@rig session name" },
+  // `origin` columns contain enum values; the guard fires because 'origin' contains the substring 'rig'.
+  { table: "pi_usage_entries", column: "origin", reason: "usage origin enum ('own'/'inherited'/'unknown'); 'origin' contains 'rig' as a substring but holds no rig name" },
+  { table: "thread_seat_map", column: "origin", reason: "thread origin enum ('posted'/'person'); 'origin' contains 'rig' as a substring but holds no rig name" },
+  // account_destination is a back-notification target account name, not a rig or session address.
+  { table: "human_saved_modes", column: "account_destination", reason: "quiet-hours back-notification account destination; holds an account identifier, not a rig or session address" },
 ];
 
 /**
