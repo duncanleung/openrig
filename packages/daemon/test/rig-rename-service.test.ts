@@ -157,7 +157,13 @@ function makeService(extra: Partial<RigRenameDeps> = {}): RigRenameService {
 
 function dumpDb(): string {
   const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>;
-  return JSON.stringify(tables.map((t) => [t.name, db.prepare(`SELECT * FROM "${t.name}" ORDER BY rowid`).all()]));
+  return JSON.stringify(tables.map((t) => [
+    t.name,
+    // updated_at is auto-refreshed by triggers on any row UPDATE; exclude it so the rollback
+    // equality check is not sensitive to sub-second timing differences in CI.
+    (db.prepare(`SELECT * FROM "${t.name}" ORDER BY rowid`).all() as Array<Record<string, unknown>>)
+      .map(({ updated_at: _updated_at, ...rest }) => rest),
+  ]));
 }
 
 function snapshotTree(): Record<string, string> {
