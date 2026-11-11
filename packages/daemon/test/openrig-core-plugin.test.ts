@@ -50,6 +50,7 @@ const EXPECTED_SKILLS = [
   "queue-handoff",
   "refocusing",
   "retiring-and-inheriting-a-seat",
+  "retro",
   "seat-continuity-and-handover",
   "session-compaction-and-restore",
   // One-release compatibility redirect. The editable doctrine lives only in
