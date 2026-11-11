@@ -214,6 +214,23 @@ as `guidance/role.md` to `send_text`, so the test premise is outdated. It is not
 
 Pre-merge source for all of the above: `git show e02d09c64^1:packages/daemon/src/{startup,index}.ts`.
 
+## Maintenance obligations
+
+### Upstream release tags (RIG-192 PR2)
+
+Release-surface tests in `packages/daemon` and `packages/cli` read git tags to verify semver logic and
+release metadata. These tags exist on `upstream` but are not auto-synced to the fork. After every
+`git merge upstream/main`, sync tags manually:
+
+```bash
+git fetch upstream --tags
+git push origin --tags
+```
+
+The CI `package-tests` job now has `fetch-tags: true` on its checkout step so the runner sees the
+tags that live on `duncanleung/openrig`. Without the push above, CI still fails because the fork's
+remote has no tags to fetch.
+
 ## Checks
 
 Format: `ID | type | arg1 | arg2 | arg3`. Whitespace around `|` is trimmed. A regex may not contain `|`.
