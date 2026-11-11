@@ -49,6 +49,7 @@ import { startCommand, type StartDeps } from "./commands/start.js";
 import { captureCommand } from "./commands/capture.js";
 import { broadcastCommand } from "./commands/broadcast.js";
 import { walkCommand } from "./commands/walk.js";
+import { sweepStuckCommand, type SweepStuckDeps } from "./commands/sweep-stuck.js";
 import { configCommand } from "./commands/config.js";
 import { fileCommand } from "./commands/file.js";
 import { preflightCommand } from "./commands/preflight.js";
@@ -139,6 +140,7 @@ export interface ProgramDeps {
   captureDeps?: StatusDeps;
   broadcastDeps?: StatusDeps;
   walkDeps?: StatusDeps;
+  sweepStuckDeps?: SweepStuckDeps;
   askDeps?: StatusDeps;
   chatroomDeps?: StatusDeps;
   specsDeps?: StatusDeps;
@@ -225,6 +227,7 @@ export function createProgram(depsOverride?: ProgramDeps): Command {
   program.addCommand(captureCommand(depsOverride?.captureDeps));
   program.addCommand(broadcastCommand(depsOverride?.broadcastDeps));
   program.addCommand(walkCommand(depsOverride?.walkDeps));
+  program.addCommand(sweepStuckCommand(depsOverride?.sweepStuckDeps));
   program.addCommand(askCommand(depsOverride?.askDeps));
   program.addCommand(chatroomCommand(depsOverride?.chatroomDeps));
   program.addCommand(specsCommand(depsOverride?.specsDeps));

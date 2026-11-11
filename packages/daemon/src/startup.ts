@@ -107,6 +107,8 @@ import { probeSessionActivity, readComposerOccupancy, SessionTransport } from ".
 import { DeliveryAttemptLedger, teeObserverSinks } from "./domain/delivery-attempt-ledger.js";
 import { createValidationGatePredicate } from "./domain/validation-gate-enforcer.js";
 import { StuckSeatObserver, type ComposerReading, type SeatTarget } from "./domain/stuck-seat-observer.js";
+import { StuckMessageSweeper } from "./domain/stuck-message-sweeper.js";
+import { SweepAttemptStore } from "./domain/sweep-attempt-store.js";
 import { getNodeInventoryForRigs } from "./domain/node-inventory.js";
 import { AgentActivityStore } from "./domain/agent-activity-store.js";
 import { HistoryQuery } from "./domain/history-query.js";
@@ -707,6 +709,10 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     expectedWork: (session) => queueRepoInstance.countActionableObligations(session),
     resolveRig: (rigFilter) => rigRepo.listRigs().filter((r) => r.id === rigFilter || r.name === rigFilter).map((r) => r.name),
   });
+  // RIG-190 — stuck-message sweeper: persistent attempt store + action sweeper.
+  // On startup, upgrade any rows left 'attempting' by a prior crash to 'indeterminate'.
+  const sweepAttemptStore = new SweepAttemptStore(db);
+  sweepAttemptStore.upgradeAttempingToIndeterminate();
   // OPR.0.4.3.19 — SeatIdentityReconciler owns the liveness identity verdict
   // (the THIRD axis). Reconciles each running seat's pane PID/command against
   // the registered binding and persists the verdict so node-inventory can gate
@@ -2815,6 +2821,17 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     runtimeFallbackService.bindEventSubscription(unsub);
     // Startup sweep: recover nodes stuck in swap_back_pending from a previous daemon crash.
     void runtimeFallbackService.executeManualSwapBack();
+  }
+
+  // RIG-190 — wire the stuck-message sweeper now that sessionTransport is constructed.
+  if (deps.sessionTransport) {
+    deps.stuckMessageSweeper = new StuckMessageSweeper({
+      stuckSeatObserver,
+      sessionTransport: deps.sessionTransport,
+      attemptStore: sweepAttemptStore,
+      seatActivity: seatActivityService,
+      resolveRig: (rigFilter) => rigRepo.listRigs().filter((r) => r.id === rigFilter || r.name === rigFilter).map((r) => r.name),
+    });
   }
 
   // `ui.enabled` (default off): the web UI pages and its terminal WebSocket. Read once at start.

@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { Hono } from "hono";
+import type { StuckMessageSweeper } from "../src/domain/stuck-message-sweeper.js";
 import type Database from "better-sqlite3";
 import { createDb } from "../src/db/connection.js";
 import { migrate } from "../src/db/migrate.js";
@@ -58,11 +59,12 @@ function mockTmux(overrides?: Partial<{
   } as unknown as TmuxAdapter;
 }
 
-function createApp(deps: { sessionTransport: SessionTransport; outboxHandler?: OutboxHandler }): Hono {
+function createApp(deps: { sessionTransport: SessionTransport; outboxHandler?: OutboxHandler; stuckMessageSweeper?: StuckMessageSweeper }): Hono {
   const app = new Hono();
   app.use("*", async (c, next) => {
     c.set("sessionTransport" as never, deps.sessionTransport);
     if (deps.outboxHandler) c.set("outboxHandler" as never, deps.outboxHandler);
+    if (deps.stuckMessageSweeper) c.set("stuckMessageSweeper" as never, deps.stuckMessageSweeper);
     await next();
   });
   app.route("/api/transport", transportRoutes());
@@ -1139,6 +1141,84 @@ describe("transport routes", () => {
       expect(data["warning"]).toContain("runtime: Claude runtime observation or older launch binding is unavailable; delivery proceeds without verified native identity.");
       expect(String(data["warning"])).not.toMatch(/no way of knowing who sent|no idea who sent/i);
       expect(String(data["warning"])).not.toMatch(/sign/i);
+    });
+  });
+
+  // MF1 (cycle 4): seatTimeoutMs validation in POST /sweep-stuck.
+  describe("sweep-stuck route — seatTimeoutMs validation", () => {
+    function makeMockSweeper(): StuckMessageSweeper {
+      return {
+        sweep: async () => ({
+          startedAt: new Date().toISOString(),
+          completedAt: new Date().toISOString(),
+          durationMs: 1,
+          dryRun: false,
+          findings: 0,
+          seats: [],
+          degraded: false,
+        }),
+      } as unknown as StuckMessageSweeper;
+    }
+
+    function createSweepApp(): Hono {
+      let transport: SessionTransport;
+      {
+        const eventBus = new EventBus(db);
+        const agentActivityStore = new AgentActivityStore({ db, eventBus });
+        transport = new SessionTransport({
+          db, rigRepo, sessionRegistry,
+          tmuxAdapter: mockTmux(),
+          eventBus,
+          agentActivityStore,
+        });
+      }
+      return createApp({ sessionTransport: transport, stuckMessageSweeper: makeMockSweeper() });
+    }
+
+    it("T-MF1a: seatTimeoutMs=0 returns 400", async () => {
+      const app = createSweepApp();
+      const res = await app.request("/api/transport/sweep-stuck", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ seatTimeoutMs: 0 }),
+      });
+      expect(res.status).toBe(400);
+      const data = await res.json() as Record<string, unknown>;
+      expect(data["ok"]).toBe(false);
+    });
+
+    it("T-MF1b: seatTimeoutMs=-1 returns 400", async () => {
+      const app = createSweepApp();
+      const res = await app.request("/api/transport/sweep-stuck", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ seatTimeoutMs: -1 }),
+      });
+      expect(res.status).toBe(400);
+    });
+
+    it("T-MF1c: seatTimeoutMs=NaN (serialized as null) is ignored, not 400", async () => {
+      // JSON.stringify(Infinity) === "null", so Infinity and NaN cannot arrive through JSON.
+      // The guard is defensive for non-JSON callers. This test documents that JSON clients
+      // cannot accidentally trigger the guard with Infinity.
+      const app = createSweepApp();
+      const res = await app.request("/api/transport/sweep-stuck", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ seatTimeoutMs: null }),
+      });
+      // null seatTimeoutMs → undefined → uses daemon default → 200
+      expect(res.status).toBe(200);
+    });
+
+    it("T-MF1d: seatTimeoutMs=5000 is accepted (200)", async () => {
+      const app = createSweepApp();
+      const res = await app.request("/api/transport/sweep-stuck", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ seatTimeoutMs: 5000 }),
+      });
+      expect(res.status).toBe(200);
     });
   });
 });
