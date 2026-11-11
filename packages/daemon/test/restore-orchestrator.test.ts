@@ -2677,7 +2677,16 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
-  it("pod-aware Claude restore rebuilds from checkpoint and delivers content via sendText", async () => {
+  it("pod-aware Claude restore returns failed on retry_fresh without missingConversation — compact-checkpoint files are not processed by restore-orchestrator", async () => {
+    // Upstream commit ff5d0cb25 (#1218) intentionally narrowed the awaiting-decision gate:
+    // retry_fresh alone no longer triggers awaiting-decision. Only retry_fresh +
+    // missingConversation === true rolls the seat back as unresumable. A pane that exited
+    // for any other reason stays failed so its output can still be read.
+    //
+    // compact-checkpoint files (.ai/compact-checkpoint-*.md) are written by the precompact
+    // hook and consumed by the postcompact hook (compaction-restore-bridge.cjs). They are
+    // NOT processed by restore-orchestrator.ts; presence of a matching checkpoint file
+    // does not change the outcome here.
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-checkpoint-restore-"));
     try {
       const rig = rigRepo.createRig("test-rig");
@@ -2704,9 +2713,10 @@ describe("RestoreOrchestrator", () => {
       sessionRegistry.updateStatus(session.id, "exited");
       db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
 
+      // retry_fresh without missingConversation → restore-orchestrator returns failed immediately.
+      // No second launch is attempted; the checkpoint file is ignored by restore-orchestrator.
       const launchHarness = vi.fn()
-        .mockResolvedValueOnce({ ok: false as const, error: "Claude resume failed: no conversation found", recovery: "retry_fresh" })
-        .mockResolvedValueOnce({ ok: true as const, resumeToken: "fresh-claude-token", resumeType: "claude_id" });
+        .mockResolvedValueOnce({ ok: false as const, error: "Claude resume failed: no conversation found", recovery: "retry_fresh" });
       const tmux = mockTmux();
       const mockAdapter = {
         runtime: "claude-code",
@@ -2723,21 +2733,19 @@ describe("RestoreOrchestrator", () => {
       expect(result.ok).toBe(true);
       if (result.ok) {
         const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-        expect(nodeResult!.status).toBe("rebuilt");
-        expect(launchHarness).toHaveBeenCalledTimes(2);
-        // Verify checkpoint content was delivered via sendText (startup's sendInteractiveText)
-        const sendTextCalls = (tmux.sendText as ReturnType<typeof vi.fn>).mock.calls;
-        const checkpointDelivered = sendTextCalls.some(
-          (call: unknown[]) => typeof call[1] === "string" && call[1].includes("Implementing feature X"),
-        );
-        expect(checkpointDelivered).toBe(true);
+        expect(nodeResult!.status).toBe("failed");
+        expect(launchHarness).toHaveBeenCalledTimes(1);
       }
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 
-  it("checkpoint with mismatched SESSION_ID is ignored — falls through to awaiting-decision", async () => {
+  it("checkpoint with mismatched SESSION_ID is ignored — retry_fresh without missingConversation returns failed", async () => {
+    // Upstream commit ff5d0cb25 (#1218): retry_fresh without missingConversation → failed.
+    // A mismatched checkpoint SESSION_ID is doubly irrelevant: restore-orchestrator does not
+    // read checkpoint files at all, and even if it did, the new gate requires missingConversation
+    // to be true before rolling the seat back as awaiting-decision.
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-bad-checkpoint-"));
     try {
       const rig = rigRepo.createRig("test-rig");
@@ -2780,7 +2788,7 @@ describe("RestoreOrchestrator", () => {
       expect(result.ok).toBe(true);
       if (result.ok) {
         const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-        expect(nodeResult!.status).toBe("awaiting-decision");
+        expect(nodeResult!.status).toBe("failed");
         expect(launchHarness).toHaveBeenCalledTimes(1);
       }
     } finally {
@@ -2788,7 +2796,10 @@ describe("RestoreOrchestrator", () => {
     }
   });
 
-  it("failed relaunch after clearStaleState restores prior node state", async () => {
+  it("failed relaunch after clearStaleState returns failed — retry_fresh without missingConversation does not retry", async () => {
+    // Upstream commit ff5d0cb25 (#1218): retry_fresh without missingConversation → failed immediately.
+    // No second launch is attempted, so the tmux duplicate-session failure is never reached.
+    // The seat is preserved in failed state so its pane output can still be read.
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-failed-relaunch-"));
     try {
       const rig = rigRepo.createRig("test-rig");
@@ -2813,13 +2824,10 @@ describe("RestoreOrchestrator", () => {
       sessionRegistry.updateStatus(session.id, "exited");
       db.prepare("DELETE FROM bindings WHERE node_id = ?").run(node.id);
 
-      // First launchHarness: resume fails. The tmux createSession will fail
-      // on the second launch (the context-aware relaunch), simulating a
-      // launchNode failure.
+      // First launchHarness: resume fails with retry_fresh (no missingConversation).
+      // restore-orchestrator returns failed immediately — no second launch is attempted,
+      // so the tmux duplicate-session mock is never consumed.
       const tmux = mockTmux();
-      (tmux.createSession as ReturnType<typeof vi.fn>)
-        .mockResolvedValueOnce({ ok: true as const })
-        .mockResolvedValueOnce({ ok: false as const, message: "tmux: duplicate session" });
       const launchHarness = vi.fn()
         .mockResolvedValueOnce({ ok: false as const, error: "no conversation found", recovery: "retry_fresh" });
       const mockAdapter = {
@@ -2837,16 +2845,19 @@ describe("RestoreOrchestrator", () => {
       expect(result.ok).toBe(true);
       if (result.ok) {
         const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-        expect(nodeResult!.status).toBe("awaiting-decision");
-        // Verify the warning includes the relaunch failure
-        expect(result.result.warnings?.some((w) => w.includes("re-launch for context restore failed"))).toBe(true);
+        expect(nodeResult!.status).toBe("failed");
+        expect(launchHarness).toHaveBeenCalledTimes(1);
       }
     } finally {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
 
-  it("pod-aware Claude restore falls through to awaiting-decision when no checkpoint or transcript exists", async () => {
+  it("pod-aware Claude restore returns failed on retry_fresh — awaiting-decision rollback gate requires missingConversation", async () => {
+    // Upstream commit ff5d0cb25 (#1218): the awaiting-decision path with its rollback and
+    // "Original session unresumable" error only fires when startupResult.missingConversation
+    // is true. retry_fresh alone — even with no checkpoint or transcript — returns failed,
+    // preserving the pane so its output can still be read by the operator.
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "rigged-no-context-restore-"));
     try {
       const rig = rigRepo.createRig("test-rig");
@@ -2877,8 +2888,11 @@ describe("RestoreOrchestrator", () => {
       expect(result.ok).toBe(true);
       if (result.ok) {
         const nodeResult = result.result.nodes.find((n) => n.nodeId === node.id);
-        expect(nodeResult!.status).toBe("awaiting-decision");
-        expect(nodeResult!.error).toContain("Original session unresumable");
+        // failed (not awaiting-decision) because missingConversation is absent from the mock.
+        // The error is the raw message from startupResult.errors — no rollback, no "Original
+        // session unresumable" prefix. That prefix only appears in the awaiting-decision path.
+        expect(nodeResult!.status).toBe("failed");
+        expect(nodeResult!.error).toContain("no conversation found");
         expect(launchHarness).toHaveBeenCalledTimes(1);
       }
     } finally {
