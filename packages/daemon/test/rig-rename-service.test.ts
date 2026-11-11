@@ -216,6 +216,13 @@ describe("rig rename: full rename on a fixture (RIG-61)", () => {
     // Look-alikes that a naive REPLACE would corrupt.
     db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES (?, (SELECT id FROM nodes LIMIT 1), ?, 'exited')").run(uid("sess"), `x@${OLD}-2`);
     db.prepare("INSERT INTO sessions (id, node_id, session_name, status) VALUES (?, (SELECT id FROM nodes LIMIT 1), ?, 'exited')").run(uid("sess"), `${OLD}@host`);
+    // MF1 (PR4): config_json holds helper addresses (seat@rig). Verify those get renamed.
+    db.pragma("foreign_keys = OFF");
+    db.prepare(`INSERT INTO rig_terminal_policy_defaults (rig_id, config_json, instruction) VALUES (?, ?, 'policy-test')`).run(
+      uid("rtpd-mf1"),
+      JSON.stringify({ preset: "full-control", helpers: [`helper@${OLD}`], exceptions: {} }),
+    );
+    db.pragma("foreign_keys = ON");
 
     const report = await makeService().rename(OLD, NEW, { dryRun: false });
     expect(report.blockers).toEqual([]);
@@ -244,6 +251,9 @@ describe("rig rename: full rename on a fixture (RIG-61)", () => {
     expect(spec.roles_json).toContain(`orch-lead@${NEW}`);
     const json = db.prepare("SELECT spec_json FROM workflow_specs WHERE spec_json LIKE '%keep%'").get() as { spec_json: string };
     expect(JSON.parse(json.spec_json)).toEqual({ rig: NEW, target: `seat@${NEW}`, keep: `seat@${OLD}-2` });
+    // MF1 (PR4): config_json helpers addresses renamed; look-alike helper@OLD-2 preserved.
+    const policyRow = db.prepare("SELECT config_json FROM rig_terminal_policy_defaults WHERE config_json LIKE '%helper%'").get() as { config_json: string };
+    expect(JSON.parse(policyRow.config_json).helpers).toEqual([`helper@${NEW}`]);
 
     // Files.
     expect(exists(`specs/${NEW}/rig.yaml`)).toBe(true);

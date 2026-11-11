@@ -72,9 +72,12 @@ export const RIG_RENAME_MANIFEST: readonly ManifestColumn[] = [
   ...session("seat_delivery_guard_changes", "actor"),
   ...session("nodes", "previous_occupant"),
 
-  // Terminal policy tables (migration 128) — actor is the session that applied the policy.
+  // Terminal policy tables (migration 128) — actor is the session that applied the policy;
+  // config_json holds TerminalPolicyConfig JSON with helpers: string[] (seat addresses like helper@rig).
   ...session("rig_terminal_policy_defaults", "actor"),
   ...session("seat_terminal_policies", "actor"),
+  ...json("rig_terminal_policy_defaults", "config_json"),
+  ...json("seat_terminal_policies", "config_json"),
 
   // Pi usage tables (migrations 107–108) — seat_session is the seat@rig address of the occupant.
   ...session("pi_usage_entries", "seat_session"),
