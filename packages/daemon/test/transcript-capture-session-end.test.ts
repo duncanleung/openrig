@@ -44,10 +44,8 @@ describe("transcript capture stops when a single session ends", () => {
 
   function tmux() {
     const t = setup.tmuxAdapter as unknown as Record<string, ReturnType<typeof vi.fn>>;
-    if (!t.probeSession) {
-      t.probeSession = vi.fn(async (name: string) =>
-        (await t.hasSession(name)) ? { state: "present" } : { state: "absent" });
-    }
+    t.probeSession = vi.fn(async (name: string) =>
+      (await t.hasSession(name)) ? { state: "present" } : { state: "absent" });
     return t;
   }
 

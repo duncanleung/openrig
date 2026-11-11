@@ -61,11 +61,14 @@ These are auto-delivered to every rig; their name+description are already in you
 - **seat-continuity-and-handover** — handing your seat's work across a restart or to another owner.
 - **orienting-to-an-inherited-seat** — you just inherited an existing seat through a planned handover and need to verify its identity, state, and testimony.
 - **retiring-and-inheriting-a-seat** — you're planning a seat transition and need to retire the current occupant into a fresh successor without losing continuity.
+- **retro** — running a session retrospective: reduce a transcript to a findings summary, mine patterns, and produce a structured retro report.
 - **mission-slice-sop** — you're working a mission/slice (the SDLC: intent → mini-requirements + proof contract → build → QA → proof). The operating manual.
 - **messaging-the-human** — composing a message to the human. Plain language, no insider jargon.
 - **agent-operated-workflows** — a bounded real-world procedure needs an agent to interpret state and operate exact tools, or you are deciding whether ordinary code should own the loop.
 - **agent-operated-software** — you are designing or operating an ongoing application whose live backend includes OpenRig agents.
 - **software-for-agents** — compatibility redirect for the former `agent-operated-software` name; remove in 0.6.0.
+- **pr-review-lifecycle** — a PR needs the full review→fix→merge loop. Covers dispatching `/code-review-dual`, running `/code-review-validate-findings`, polling for bot reviews, dispatching fix agents, scoped re-review after fixes, SHA-tracked staleness, 3-cycle escalation, and the merge gate.
+- **wiki-update** — curating the project wiki at session wrap-up — add, update, or mark pages stale. Enforces write-side adjudication so the wiki stays useful over time.
 - **openrig-skills** — this index (you're reading it). Always loaded; the entry point to everything below.
 
 ### Load when your role or task calls for it (repo-shipped, profile-selected)

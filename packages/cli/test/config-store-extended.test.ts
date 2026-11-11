@@ -112,6 +112,7 @@ describe("ConfigStore — extended namespaces (User Settings v0)", () => {
   it("VALID_KEYS includes legacy, user-settings, ui.preview, recovery, agents, feed, and transcript-rotation keys", () => {
     const expected = [
       "daemon.port", "daemon.host",
+      "daemon.startup_deadline_seconds",
       // OPR.0.4.6.MH1 FR-1/FR-4 — host-selection pointer + own-host name.
       "host.selected",
       "host.name",

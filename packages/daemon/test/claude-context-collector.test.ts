@@ -431,7 +431,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
     written["/project/.claude/settings.local.json"] = JSON.stringify({
       statusLine: {
         type: "command",
-        command: "node /old/path/context-collector.cjs /old/state/context-usage /old/state/provider-usage",
+        command: "node /old/.openrig/context-collector.cjs /old/state/context-usage /old/state/provider-usage",
       },
     });
 
@@ -457,7 +457,7 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
       customSetting: true,
       statusLine: {
         type: "command",
-        command: "node /old/path/context-collector.cjs /old/state/context-usage /old/state/provider-usage",
+        command: "node /old/.openrig/context-collector.cjs /old/state/context-usage /old/state/provider-usage",
       },
     });
     // Global has a user-defined statusLine (e.g., statusline.sh that chains the collector)
@@ -507,9 +507,8 @@ describe("ClaudeCodeAdapter Context Collector Provisioning", () => {
 
     await adapter.deliverStartup([], { cwd: "/project", tmuxSession: "test", nodeId: "n1" } as any);
 
-    const settings = JSON.parse(written["/project/.claude/settings.local.json"]!);
-    // No statusLine injected — the global user script handles it
-    expect(settings.statusLine).toBeUndefined();
+    // No settings file created when global user statusLine handles it
+    expect(written["/project/.claude/settings.local.json"]).toBeUndefined();
   });
 
   describe("global settings.json honors CLAUDE_CONFIG_DIR (RIG-140)", () => {

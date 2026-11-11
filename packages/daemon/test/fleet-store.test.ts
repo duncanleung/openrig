@@ -9,6 +9,7 @@ import { digestEscalationCountSchema } from "../src/db/migrations/101_digest_esc
 import { digestSessionTimestampsSchema } from "../src/db/migrations/102_digest_session_timestamps.js";
 import { digestSkillInvocationsSchema } from "../src/db/migrations/103_digest_skill_invocations.js";
 import { digestStallPatternsSchema } from "../src/db/migrations/108_session_digest_stall_patterns.js";
+import { reviewSuppressRulesSchema } from "../src/db/migrations/109_review_suppress_rules.js";
 import {
   FleetStore,
   type SessionDigestInput,
@@ -31,6 +32,7 @@ function freshDb(): Database {
   db.exec(digestSessionTimestampsSchema.sql);
   db.exec(digestSkillInvocationsSchema.sql);
   db.exec(digestStallPatternsSchema.sql);
+  db.exec(reviewSuppressRulesSchema.sql);
   return db;
 }
 

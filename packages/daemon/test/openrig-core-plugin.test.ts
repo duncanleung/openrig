@@ -46,14 +46,17 @@ const EXPECTED_SKILLS = [
   "openrig-skills",
   "openrig-user",
   "orienting-to-an-inherited-seat",
+  "pr-review-lifecycle",
   "queue-handoff",
   "refocusing",
   "retiring-and-inheriting-a-seat",
+  "retro",
   "seat-continuity-and-handover",
   "session-compaction-and-restore",
   // One-release compatibility redirect. The editable doctrine lives only in
   // agent-operated-software.
   "software-for-agents",
+  "wiki-update",
 ];
 
 describe("openrig-core plugin — vendored tree shape (HG-2.1)", () => {
